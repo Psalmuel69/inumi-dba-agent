@@ -19,6 +19,7 @@ from opentelemetry import trace
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import ConsoleSpanExporter, SimpleSpanProcessor
+from structlog.types import EventDict, WrappedLogger
 
 _SENSITIVE_KEYS = re.compile(
     r"(password|secret|token|api[_-]?key|credential|connection[_-]?string|"
@@ -27,7 +28,7 @@ _SENSITIVE_KEYS = re.compile(
 )
 
 
-def _redact_sensitive(_logger: Any, _method_name: str, event_dict: dict) -> dict:
+def _redact_sensitive(_logger: WrappedLogger, _method_name: str, event_dict: EventDict) -> EventDict:
     for key in list(event_dict.keys()):
         if _SENSITIVE_KEYS.search(key):
             event_dict[key] = "***REDACTED***"

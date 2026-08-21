@@ -33,7 +33,10 @@ class PostgreSQLQueryExecutor:
 
     def __init__(self, credentials: DatabaseCredentials):
         self._credentials = credentials
-        self._conn = None
+        # Typed as Any (not `psycopg.AsyncConnection | None`) so this module
+        # stays importable without the optional `psycopg` dependency — see
+        # the module docstring.
+        self._conn: Any = None
 
     async def connect(self) -> None:
         import psycopg  # optional extra; see module docstring
@@ -84,14 +87,17 @@ class SQLServerQueryExecutor:
 
     def __init__(self, credentials: DatabaseCredentials):
         self._credentials = credentials
-        self._conn = None
+        # Typed as Any (not `pyodbc.Connection | None`) so this module stays
+        # importable without the optional `pyodbc` dependency — see the
+        # module docstring.
+        self._conn: Any = None
 
     async def connect(self) -> None:
         import asyncio
 
         import pyodbc  # optional extra; see module docstring
 
-        def _connect():
+        def _connect() -> Any:
             conn_str = (
                 "DRIVER={ODBC Driver 18 for SQL Server};"
                 f"SERVER={self._credentials.host},{self._credentials.port};"

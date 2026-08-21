@@ -172,7 +172,10 @@ def create_app(settings: Settings | None = None, *, agent_transport=None) -> Fas
     @app.post("/webhooks/slack/interactive")
     async def slack_interactive(request: Request) -> dict:
         form = await request.form()
-        payload = json.loads(form.get("payload", "{}"))
+        raw_payload = form.get("payload", "{}")
+        if not isinstance(raw_payload, str):
+            raise HTTPException(status_code=400, detail="Malformed interactive payload.")
+        payload = json.loads(raw_payload)
 
         user_id = payload.get("user", {}).get("id", "")
         actions = payload.get("actions", [])

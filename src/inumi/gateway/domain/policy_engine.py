@@ -49,6 +49,7 @@ def is_within_maintenance_window(
     if not window.get("start") or not window.get("end"):
         return True  # no window configured -> not restricted by one
     now_utc = now_utc or dt.datetime.now(dt.UTC)
+    tz: dt.tzinfo
     try:
         tz = ZoneInfo(window.get("timezone", "UTC"))
     except Exception:
