@@ -22,18 +22,23 @@ def create_app(settings: Settings | None = None, *, execution_transport=None) ->
     settings = settings or get_settings()
     configure_logging("gateway", settings.log_level)
 
+    # Built eagerly (not inside `lifespan`) so tests driving this app via
+    # `httpx.ASGITransport` — which does not emit ASGI lifespan events —
+    # can reach `app.state.gateway` and call `state.db.create_all()`
+    # themselves without needing a running server.
+    state = GatewayState.build(settings, execution_transport=execution_transport)
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        state = GatewayState.build(settings, execution_transport=execution_transport)
         if settings.control_db_url.startswith("sqlite"):
             # Local dev/test convenience only — real deployments apply the
             # Alembic migrations in migrations/versions instead.
             await state.db.create_all()
-        app.state.gateway = state
         yield
         await state.db.dispose()
 
     app = FastAPI(title="Inumi DBA Control Gateway", version="0.1.0", lifespan=lifespan)
+    app.state.gateway = state
 
     app.include_router(tool_calls.router)
     app.include_router(tools.router)

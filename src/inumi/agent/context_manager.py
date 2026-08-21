@@ -1,0 +1,88 @@
+"""Conversation / investigation state (spec §25, §26, §37, §56).
+
+Kept entirely in the Agent process (never a database credential or policy
+decision in sight). Nothing stored here is ever treated as an authorization
+grant — `database_context` is a convenience so "check it again" resolves to
+the right target, but every tool call is still independently authorized by
+the Gateway from scratch on every single request (spec §37).
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import datetime as dt
+from typing import Any
+
+from inumi.common.ids import new_id
+
+
+@dataclasses.dataclass
+class PendingApproval:
+    approval_id: str
+    tool_id: str
+    summary: str
+    # The exact ToolCallRequest (as a plain dict) that produced this
+    # approval requirement — resubmitted verbatim (with approval_id filled
+    # in) once approved, so the Gateway's action-hash check always matches.
+    request: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+
+@dataclasses.dataclass
+class InvestigationState:
+    investigation_id: str
+    problem: str
+    target: dict[str, Any] = dataclasses.field(default_factory=dict)
+    status: str = "INVESTIGATING"
+    evidence: list[dict[str, Any]] = dataclasses.field(default_factory=list)
+    hypotheses: list[str] = dataclasses.field(default_factory=list)
+    findings: list[str] = dataclasses.field(default_factory=list)
+    recommendations: list[str] = dataclasses.field(default_factory=list)
+    actions: list[dict[str, Any]] = dataclasses.field(default_factory=list)
+    transcript: list[dict[str, Any]] = dataclasses.field(default_factory=list)
+    turn_count: int = 0
+
+
+@dataclasses.dataclass
+class ConversationState:
+    conversation_id: str
+    channel: str
+    channel_thread_id: str
+    channel_account_id: str
+    database_context: dict[str, Any] = dataclasses.field(default_factory=dict)
+    investigation: InvestigationState | None = None
+    pending_approval: PendingApproval | None = None
+    updated_at: dt.datetime = dataclasses.field(
+        default_factory=lambda: dt.datetime.now(dt.timezone.utc)
+    )
+
+
+class ContextManager:
+    """Process-local store. Swappable for a Redis-backed implementation
+    behind the same interface for multi-instance deployments (spec §37's
+    session continuity requirement doesn't require this to be durable across
+    an Agent restart — a lost session simply starts a fresh investigation,
+    which is the fail-closed choice over guessing stale state)."""
+
+    def __init__(self) -> None:
+        self._conversations: dict[str, ConversationState] = {}
+
+    def get_or_create(
+        self, conversation_id: str, channel: str, channel_thread_id: str, channel_account_id: str
+    ) -> ConversationState:
+        state = self._conversations.get(conversation_id)
+        if state is None:
+            state = ConversationState(
+                conversation_id=conversation_id,
+                channel=channel,
+                channel_thread_id=channel_thread_id,
+                channel_account_id=channel_account_id,
+            )
+            self._conversations[conversation_id] = state
+        return state
+
+    def start_investigation(self, state: ConversationState, problem: str) -> InvestigationState:
+        state.investigation = InvestigationState(investigation_id=new_id("inv"), problem=problem)
+        return state.investigation
+
+    def touch(self, state: ConversationState) -> None:
+        state.updated_at = dt.datetime.now(dt.timezone.utc)
