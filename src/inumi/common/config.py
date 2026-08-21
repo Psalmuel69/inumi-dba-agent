@@ -53,6 +53,9 @@ class Settings(BaseSettings):
     execution_base_url: str = "http://localhost:8002"
     execution_port: int = 8002
     execution_service_token_audience: str = "inumi-execution"
+    # "mock" (default, no real DB required) or "real" (uses live connections
+    # via CredentialProvider + pyodbc/psycopg — requires the `db-drivers` extra).
+    execution_mode: str = "mock"
 
     agent_port: int = 8000
 

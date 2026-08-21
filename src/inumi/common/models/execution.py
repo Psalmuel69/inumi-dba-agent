@@ -1,0 +1,54 @@
+"""Gateway <-> Execution Service internal contract.
+
+This is a *different, narrower* contract than the Agent-facing `ToolCallRequest`
+(spec §18): by the time a request reaches here, target ambiguity has been
+resolved to one concrete inventory entry, policy/risk/approval have already
+been cleared, and the only thing left to do is run one specific, typed
+operation and return raw (not-yet-masked) results for the Gateway's Data
+Policy Layer to minimize. The Execution Service never sees a raw user
+message, an LLM completion, or anything about approvals/policy — only this.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict
+
+from inumi.common.models.target import Platform
+
+
+class ExecutionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    execution_id: str
+    tool_id: str
+    tool_version: str
+    platform: Platform
+    database_id: str  # inventory id — Execution Service looks up credentials by this, never a connection string
+    instance: str
+    database: str
+    schema_name: str | None = None
+    object_name: str | None = None
+    session_id: str | None = None
+    query_id: str | None = None
+    arguments: dict[str, Any]
+    max_execution_time: int
+    max_result_rows: int
+
+
+class ExecutionResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    execution_id: str
+    success: bool
+    columns: list[str] = []
+    rows: list[dict[str, Any]] = []
+    row_count: int = 0
+    truncated: bool = False
+    affected: dict[str, Any] = {}
+    error_code: str | None = None
+    error_detail: str | None = None
+    verification_status: str = "NOT_APPLICABLE"
+    verification_detail: str = ""
+    duration_ms: int = 0
