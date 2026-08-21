@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import uuid
-
 import pytest
 
 from inumi.common.config import Settings
@@ -60,6 +58,8 @@ async def test_read_only_health_check_executes_end_to_end(
             reason="investigating slowness",
             conversation_id="conv_1",
             request_id=new_id("req"),
+            channel="slack",
+            channel_account_id="U_MOCK_PLACEHOLDER",
         )
         response = await handler.handle(identity, request)
         assert response.status == ToolCallStatus.EXECUTED
@@ -84,6 +84,8 @@ async def test_dba_l1_denied_from_killing_session_in_production(
             reason="mitigate blocking",
             conversation_id="conv_2",
             request_id=new_id("req"),
+            channel="slack",
+            channel_account_id="U_MOCK_PLACEHOLDER",
         )
         response = await handler.handle(identity, request)
         assert response.status == ToolCallStatus.DENIED
@@ -110,6 +112,8 @@ async def test_full_approval_workflow_kill_session(
             reason="mitigate blocking",
             conversation_id="conv_3",
             request_id=new_id("req"),
+            channel="slack",
+            channel_account_id="U_MOCK_PLACEHOLDER",
         )
         first = await handler.handle(identity, request)
         assert first.status == ToolCallStatus.APPROVAL_REQUIRED
@@ -151,6 +155,8 @@ async def test_execution_denied_if_agent_alters_action_after_approval(
             reason="mitigate blocking",
             conversation_id="conv_4",
             request_id=new_id("req"),
+            channel="slack",
+            channel_account_id="U_MOCK_PLACEHOLDER",
         )
         first = await handler.handle(identity, request)
         approval_id = first.approval_id

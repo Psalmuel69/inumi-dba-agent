@@ -58,7 +58,14 @@ class ToolDefinition(BaseModel):
 
 
 class ToolCallRequest(BaseModel):
-    """What the Agent sends to the Gateway. Untrusted until fully validated."""
+    """What the Agent sends to the Gateway. Untrusted until fully validated.
+
+    Note there is no `identity` or `role` field here: the Agent identifies
+    the *channel account* that originated the request, and the Gateway
+    independently re-resolves a `VerifiedIdentity` from it via its own
+    `IdentityProvider` (spec §3, §5, §37, §62) — it never accepts an
+    identity or role object asserted by the Agent at face value.
+    """
 
     tool_id: str
     tool_version: str | None = None
@@ -68,6 +75,8 @@ class ToolCallRequest(BaseModel):
     conversation_id: str
     investigation_id: str | None = None
     request_id: str
+    channel: str
+    channel_account_id: str
     # An approval_id must be supplied for any tool call that a prior Gateway
     # response marked as APPROVAL_REQUIRED; it is independently re-verified,
     # never trusted at face value.
