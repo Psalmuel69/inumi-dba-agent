@@ -1,0 +1,23 @@
+# Rate limits relaxed for tests that legitimately need to submit the same
+# critical-tier tool call more than twice in one test (e.g. replay/duplicate
+# execution tests) without the *rate limiter itself* being what stops them —
+# rate limiting has its own dedicated test (test_rate_limit_abuse_is_blocked).
+rate_limits:
+  read:
+    per_user_per_minute: 1000
+    per_conversation_per_minute: 1000
+    per_tool_per_minute: 1000
+    per_database_per_minute: 1000
+    per_environment_per_minute: 1000
+  write:
+    per_user_per_minute: 100
+    per_conversation_per_minute: 100
+    per_tool_per_minute: 100
+    per_database_per_minute: 100
+    per_environment_per_minute: 100
+  critical:
+    per_user_per_minute: 100
+    per_conversation_per_minute: 100
+    per_tool_per_minute: 100
+    per_database_per_minute: 100
+    per_environment_per_minute: 100

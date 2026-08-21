@@ -1,0 +1,112 @@
+name: inumi
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: inumi
+      POSTGRES_PASSWORD: inumi
+      POSTGRES_DB: inumi_control
+    ports:
+      - "5432:5432"
+    volumes:
+      - inumi-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U inumi"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  migrate:
+    build:
+      context: .
+    command: ["sh", "-c", "alembic upgrade head"]
+    environment: &common-env
+      INUMI_ENV: development
+      CONTROL_DB_URL: postgresql+asyncpg://inumi:inumi@postgres:5432/inumi_control
+      REDIS_URL: redis://redis:6379/0
+      SECRETS_PROVIDER: local_dev
+      IDENTITY_PROVIDER: mock
+      POLICY_CONFIG_PATH: /app/config/policy.yaml
+      INVENTORY_CONFIG_PATH: /app/config/inventory.yaml
+      IDENTITY_CONFIG_PATH: /app/config/identity.yaml
+      RATE_LIMIT_CONFIG_PATH: /app/config/rate_limits.yaml
+      LLM_PROVIDER: mock
+      SERVICE_JWT_SECRET: dev-only-change-me-in-production
+      SERVICE_JWT_ISSUER: inumi-internal
+      EXECUTION_MODE: mock
+      GATEWAY_BASE_URL: http://gateway:8001
+      EXECUTION_BASE_URL: http://execution:8002
+      AGENT_BASE_URL: http://agent:8000
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  execution:
+    build:
+      context: .
+      args:
+        SERVICE: execution
+    environment:
+      <<: *common-env
+    ports:
+      - "8002:8002"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  gateway:
+    build:
+      context: .
+      args:
+        SERVICE: gateway
+    environment:
+      <<: *common-env
+    ports:
+      - "8001:8001"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      execution:
+        condition: service_started
+
+  agent:
+    build:
+      context: .
+      args:
+        SERVICE: agent
+    environment:
+      <<: *common-env
+    ports:
+      - "8000:8000"
+    depends_on:
+      - gateway
+
+  channels:
+    build:
+      context: .
+      args:
+        SERVICE: channels
+    environment:
+      <<: *common-env
+      SLACK_SIGNING_SECRET: ""
+      SLACK_BOT_TOKEN: ""
+      TEAMS_APP_ID: ""
+      TEAMS_APP_PASSWORD: "dev-teams-shared-token"
+    ports:
+      - "8003:8003"
+    depends_on:
+      - agent
+
+volumes:
+  inumi-postgres-data:
