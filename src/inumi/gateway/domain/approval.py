@@ -57,6 +57,11 @@ class ApprovalStatus(str, Enum):
     APPROVED = "APPROVED"
     REJECTED = "REJECTED"
     EXPIRED = "EXPIRED"
+    # Set once execution has actually completed against this approval — an
+    # approved-but-already-used approval can never authorize a *second*
+    # execution, even if it hasn't expired yet (spec §43's "duplicate
+    # execution" / replay test).
+    EXECUTED = "EXECUTED"
 
 
 class ApprovalDecision(str, Enum):
@@ -306,6 +311,11 @@ class ApprovalEngine:
             )
         if record.status == ApprovalStatus.REJECTED.value:
             raise InumiError(FailureCode.APPROVAL_INVALID, "This action was rejected.")
+        if record.status == ApprovalStatus.EXECUTED.value:
+            raise InumiError(
+                FailureCode.APPROVAL_INVALID,
+                "This approval has already been used to execute an action and cannot be reused.",
+            )
 
         if record.action_hash != expected_action_hash:
             raise InumiError(
@@ -314,6 +324,17 @@ class ApprovalEngine:
             )
 
         return record
+
+    async def mark_executed(self, approval_id: str, now: dt.datetime | None = None) -> None:
+        """Consumes the approval so it cannot authorize a second execution
+        (spec §43 — duplicate execution / replay)."""
+        now = now or dt.datetime.now(dt.timezone.utc)
+        record = await self._get(approval_id)
+        record.status = ApprovalStatus.EXECUTED.value
+        self._session.add(
+            ApprovalEventRecord(approval_id=approval_id, event_type="EXECUTED", created_at=now)
+        )
+        await self._session.flush()
 
     async def get(self, approval_id: str) -> ApprovalRecord:
         return await self._get(approval_id)

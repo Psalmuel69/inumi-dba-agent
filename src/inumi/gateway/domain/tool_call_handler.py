@@ -293,6 +293,11 @@ class ToolCallHandler:
                 result.error_detail or "Execution failed.",
             )
 
+        if needs_approval:
+            # Consume the approval so it cannot authorize a second execution
+            # (spec §43 — duplicate execution / replay of an approved action).
+            await self._approvals.mark_executed(request.approval_id)
+
         # 10. Data Minimization (applied here, once, before anything reaches the Agent)
         masked_rows, masked_fields, truncated = self._minimizer.apply(
             result.rows, max_rows=tool.max_result_rows
