@@ -33,6 +33,7 @@ from inumi.gateway.domain.inventory import DatabaseInventory
 from inumi.gateway.domain.policy_engine import PolicyDecision, PolicyEngine
 from inumi.gateway.domain.rate_limiter import RateLimiter
 from inumi.gateway.domain.risk_engine import RiskEngine
+from inumi.gateway.domain.sql_validator import validate_readonly_sql
 from inumi.gateway.domain.target_validation import TargetValidator
 from inumi.gateway.domain.tool_catalog import ARGUMENT_MODELS
 from inumi.gateway.domain.tool_registry import ToolRegistry
@@ -161,6 +162,17 @@ class ToolCallHandler:
         target = _enrich_target(raw_target, args_dict)
         resolved = self._targets.validate(target, tool.required_target_scope)
         entry = resolved.inventory_entry
+
+        # 3.5. Real-parser SQL validation for the (disabled-by-default) read-only
+        # SQL tool — never reached for typed tools, and args_dict["sql"] is
+        # replaced with the normalized, row-capped statement before it goes
+        # anywhere near the Execution Service.
+        if tool.tool_id == "database.execute_readonly_sql":
+            dialect = "tsql" if entry.platform.value == "sqlserver" else "postgres"
+            validated_sql = validate_readonly_sql(
+                args_dict["sql"], dialect=dialect, max_result_rows=tool.max_result_rows
+            )
+            args_dict = {**args_dict, "sql": validated_sql.normalized_sql}
 
         # 4. Authorization (independent of policy; hard identity/role gate)
         authorize(identity, tool, entry)

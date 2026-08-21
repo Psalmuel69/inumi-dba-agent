@@ -235,6 +235,12 @@ class PostgreSQLAdapter(DatabaseAdapter):
         await self._executor.execute("select pg_reload_conf()")
         return {"parameter": parameter, "value": value, "reload_triggered": True, **result}
 
+    async def execute_readonly_sql(self, validated_sql: str) -> list[dict[str, Any]]:
+        # `validated_sql` has already been parsed, restricted to a single
+        # SELECT, denylist-checked, and row-capped by the Gateway's
+        # `sql_validator` — this adapter just runs it as ordinary read SQL.
+        return await self._executor.fetch_all(validated_sql)
+
     async def restart_instance(self) -> dict[str, Any]:
         raise NotImplementedError(
             "restart_instance requires an out-of-band infrastructure action "
