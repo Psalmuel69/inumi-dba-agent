@@ -20,6 +20,7 @@ logger = get_logger(__name__)
 
 def create_app(settings: Settings | None = None, *, execution_transport=None) -> FastAPI:
     settings = settings or get_settings()
+    settings.validate_for_production()
     configure_logging("gateway", settings.log_level)
 
     # Built eagerly (not inside `lifespan`) so tests driving this app via

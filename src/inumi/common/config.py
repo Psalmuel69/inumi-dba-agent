@@ -77,6 +77,53 @@ class Settings(BaseSettings):
     def is_production(self) -> bool:
         return self.inumi_env == "production"
 
+    def validate_for_production(self) -> None:
+        """Fail closed at process startup rather than at request time.
+
+        Every "mock"/"local_dev" mode in this codebase exists to make local
+        development and the test suite runnable without real credentials
+        (spec §32/§65-67) — none of them are safe to run in production, and
+        none of the request-time code silently tightens them back up on its
+        own. This is the one place that refuses to even start the process
+        if `INUMI_ENV=production` is paired with any of them, rather than
+        relying on an operator remembering to flip every flag correctly.
+        """
+        if not self.is_production():
+            return
+
+        violations: list[str] = []
+        if self.llm_provider == "mock":
+            violations.append(
+                "LLM_PROVIDER=mock — production must use a real provider "
+                "(e.g. LLM_PROVIDER=anthropic with ANTHROPIC_API_KEY set)."
+            )
+        if self.execution_mode == "mock":
+            violations.append(
+                "EXECUTION_MODE=mock — production must use EXECUTION_MODE=real "
+                "with the `db-drivers` extra installed."
+            )
+        if self.identity_provider == "mock":
+            violations.append(
+                "IDENTITY_PROVIDER=mock — production must use a real enterprise "
+                "identity provider (e.g. OIDC), never the config-driven mock directory."
+            )
+        if self.secrets_provider == "local_dev":
+            violations.append(
+                "SECRETS_PROVIDER=local_dev — production must use a real secrets "
+                "manager (vault | aws_secrets_manager | azure_key_vault | gcp_secret_manager)."
+            )
+        if self.service_jwt_secret == "dev-only-insecure-secret-change-me":
+            violations.append(
+                "SERVICE_JWT_SECRET is still the development placeholder — set a "
+                "real, unique secret for production."
+            )
+
+        if violations:
+            raise RuntimeError(
+                "Refusing to start with INUMI_ENV=production while running in a "
+                "development/mock configuration:\n- " + "\n- ".join(violations)
+            )
+
 
 @lru_cache
 def get_settings() -> Settings:

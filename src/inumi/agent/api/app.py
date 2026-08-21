@@ -43,6 +43,7 @@ class ApprovalEventRequest(BaseModel):
 
 def create_app(settings: Settings | None = None, *, gateway_transport=None) -> FastAPI:
     settings = settings or get_settings()
+    settings.validate_for_production()
     configure_logging("agent", settings.log_level)
 
     issuer = ServiceTokenIssuer(settings.service_jwt_secret, settings.service_jwt_issuer)

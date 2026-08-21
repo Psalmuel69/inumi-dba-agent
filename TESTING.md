@@ -77,15 +77,34 @@ submissions/minute (see `tests/security/relaxed_rate_limits.yaml` for an
 example) — don't relax the *default* limits just to make a test pass; that
 usually means the test should assert fewer submissions instead.
 
+## Opt-in live-Claude smoke tests (`tests/e2e/test_live_anthropic.py`)
+
+The default suite runs entirely against `MockLLMProvider` — deterministic,
+free, offline. A small, separate set of tests exercises the *real*
+Anthropic API instead, but only when explicitly asked for:
+
+```bash
+make live-llm-test   # or: RUN_LIVE_LLM_TESTS=1 ANTHROPIC_API_KEY=sk-ant-... pytest tests/e2e -q
+```
+
+They're skipped by default (no env var, no key needed to run `pytest`) and
+their assertions are deliberately loose — a live model's exact phrasing
+isn't guaranteed stable between runs. What they *do* check is the property
+that actually matters for security against a real model rather than the
+deterministic stand-in: it never proposes a `tool_id` outside the list it
+was offered, and injected instruction-shaped text in a tool result
+(spec §45) doesn't make it prefer a destructive tool over a safe one.
+Never wired into `make test`/`test-all` or CI — see
+`common.config.Settings.validate_for_production` for the mechanism that
+guarantees a real deployment can't accidentally run on the mock provider
+in the first place (that's a startup check, not a test).
+
 ## What's intentionally not covered by automated tests
 
 - Real SQL Server/PostgreSQL connections (`execution/adapters/connections.py`)
   — these require live infrastructure; adapter *logic* (which DMV/pg_stat
   query maps to which tool) is fully covered via `FakeQueryExecutor`
   instead (`tests/unit/test_adapters.py`).
-- Real Anthropic API calls (`AnthropicLLMProvider`) — `MockLLMProvider`
-  implements the same interface deterministically and is what the entire
-  suite runs against.
 - Real Vault/AWS/Azure/GCP secret retrieval — each provider's "not
   configured" fail-closed path is tested
   (`tests/unit/test_execution_service.py::test_real_mode_without_configured_credentials_fails_closed`);

@@ -46,6 +46,7 @@ class DevChatRequest(BaseModel):
 
 def create_app(settings: Settings | None = None, *, agent_transport=None) -> FastAPI:
     settings = settings or get_settings()
+    settings.validate_for_production()
     configure_logging("channels", settings.log_level)
 
     identity_provider = MockIdentityProvider(settings.identity_config_path)

@@ -22,6 +22,7 @@ logger = get_logger(__name__)
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
+    settings.validate_for_production()
     configure_logging("execution-service", settings.log_level)
 
     app = FastAPI(title="Inumi Execution Service", version="0.1.0")

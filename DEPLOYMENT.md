@@ -78,10 +78,26 @@ table directly from the SQLAlchemy models (`gateway/infrastructure/db/models.py`
 Set `EXECUTION_MODE=real` and install the `db-drivers` extra
 (`pip install -e ".[db-drivers]"`, or add it to the execution service's
 Docker build) once real SQL Server/PostgreSQL instances and credentials are
-available. Leaving it on `mock` in production would be a fail-*open*
-posture and should be treated as a deployment-blocking misconfiguration —
-consider asserting `settings.execution_mode == "real"` in your production
-startup checks.
+available.
+
+## Production startup checks (fail closed, enforced — not just documented)
+
+Every service's `create_app()` calls `Settings.validate_for_production()`
+(`common/config.py`) before it does anything else. With `INUMI_ENV=production`,
+the process **refuses to start** — raises `RuntimeError` immediately,
+rather than serving traffic in a weakened mode — if any of the following
+development-only defaults are still set:
+
+- `LLM_PROVIDER=mock` (must be a real provider, e.g. `anthropic`)
+- `EXECUTION_MODE=mock` (must be `real`, with the `db-drivers` extra installed)
+- `IDENTITY_PROVIDER=mock` (must be a real enterprise identity provider)
+- `SECRETS_PROVIDER=local_dev` (must be `vault`/`aws_secrets_manager`/`azure_key_vault`/`gcp_secret_manager`)
+- `SERVICE_JWT_SECRET` still equal to the shipped development placeholder
+
+This is deliberately a hard crash-on-boot, not a warning log — an operator
+who forgets to flip one of these in `INUMI_ENV=development` (the default)
+is unaffected either way; setting `INUMI_ENV=production` is the trigger.
+See `tests/unit/test_config.py` for the coverage of this check.
 
 ## Observability
 

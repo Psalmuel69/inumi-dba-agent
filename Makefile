@@ -1,4 +1,4 @@
-.PHONY: dev test lint security-test e2e format migrate seed run-gateway run-execution run-agent run-channels docker-up docker-down
+.PHONY: dev test lint security-test e2e live-llm-test format migrate seed run-gateway run-execution run-agent run-channels docker-up docker-down
 
 VENV := .venv
 PY := $(VENV)/Scripts/python.exe
@@ -17,6 +17,11 @@ security-test:
 
 e2e:
 	$(PY) -m pytest tests/e2e -q
+
+# Opt-in only: hits the real Anthropic API, needs ANTHROPIC_API_KEY, costs
+# money per run. Never invoked by `test`/`test-all`/CI.
+live-llm-test:
+	RUN_LIVE_LLM_TESTS=1 $(PY) -m pytest tests/e2e -q
 
 test-all:
 	$(PY) -m pytest tests -q
