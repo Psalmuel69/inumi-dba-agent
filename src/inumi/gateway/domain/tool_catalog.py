@@ -44,6 +44,47 @@ _ADVANCED_ROLES = [DBARole.DBA_L3, DBARole.DBA_MANAGER]
 _READ = DiagnosticResult.model_json_schema()
 _WRITE = WriteResult.model_json_schema()
 
+# Maps tool_id -> the Pydantic model its `arguments` must validate against.
+# This is the single source of truth the Gateway uses to reject malformed or
+# extra arguments (spec §9: "Never allow arbitrary tool arguments") — the
+# JSON Schema baked into each ToolDefinition.argument_schema is generated
+# from these same models, so the two can never drift.
+ARGUMENT_MODELS: dict[str, type] = {
+    "database.get_health": NoArgs,
+    "database.get_version": NoArgs,
+    "database.get_sessions": NoArgs,
+    "database.get_blocking_sessions": NoArgs,
+    "database.get_deadlocks": NoArgs,
+    "database.get_running_queries": NoArgs,
+    "database.get_wait_statistics": NoArgs,
+    "database.get_query_plan": QueryPlanArgs,
+    "database.get_top_queries": TopQueriesArgs,
+    "database.get_indexes": NoArgs,
+    "database.get_statistics": NoArgs,
+    "database.get_tables": NoArgs,
+    "database.get_storage": NoArgs,
+    "database.get_transaction_log": NoArgs,
+    "database.get_replication_status": NoArgs,
+    "database.get_backup_status": NoArgs,
+    "database.get_configuration": NoArgs,
+    "database.get_error_logs": ErrorLogArgs,
+    "database.cancel_query": CancelQueryArgs,
+    "database.kill_session": KillSessionArgs,
+    "database.update_statistics": UpdateStatisticsArgs,
+    "database.create_index": CreateIndexArgs,
+    "database.rebuild_index": RebuildIndexArgs,
+    "database.modify_configuration": ModifyConfigurationArgs,
+    "database.restart_instance": RestartInstanceArgs,
+    "database.failover": FailoverArgs,
+    "database.execute_readonly_sql": ReadOnlySqlArgs,
+    "database.execute_sql": ExecuteSqlArgs,
+    "database.restore_database": RestoreDatabaseArgs,
+    "database.create_database": CreateDatabaseArgs,
+    "database.drop_database": DropDatabaseArgs,
+    "database.truncate_table": TruncateTableArgs,
+    "database.bulk_delete": BulkDeleteArgs,
+}
+
 
 def _read_tool(
     tool_id: str,

@@ -36,6 +36,21 @@ from inumi.gateway.infrastructure.db.models import ApprovalEventRecord, Approval
 _DEFAULT_TTL_SECONDS = 600  # 10 minutes, per the spec's worked example (§16)
 
 
+def _naive_utc(value: dt.datetime) -> dt.datetime:
+    """Normalizes to a naive UTC datetime for comparison.
+
+    SQLite (used for local dev/tests) does not round-trip timezone info on
+    DateTime columns, so a value read back from the DB may be naive even
+    though it was written as timezone-aware UTC. Postgres (production)
+    preserves the offset. Comparing on a consistently-naive-UTC basis avoids
+    "can't compare offset-naive and offset-aware datetimes" while still
+    being correct, since every datetime this module writes is UTC.
+    """
+    if value.tzinfo is not None:
+        return value.astimezone(dt.timezone.utc).replace(tzinfo=None)
+    return value
+
+
 class ApprovalStatus(str, Enum):
     PENDING = "PENDING"
     AWAITING_SECOND_APPROVAL = "AWAITING_SECOND_APPROVAL"
@@ -162,7 +177,7 @@ class ApprovalEngine:
             ApprovalStatus.PENDING.value,
             ApprovalStatus.AWAITING_SECOND_APPROVAL.value,
             ApprovalStatus.APPROVED.value,
-        ) and record.expires_at < now:
+        ) and _naive_utc(record.expires_at) < _naive_utc(now):
             record.status = ApprovalStatus.EXPIRED.value
             self._session.add(
                 ApprovalEventRecord(
