@@ -114,7 +114,7 @@ class ExecutionService:
             duration_ms = int((time.monotonic() - start) * 1000)
             result.duration_ms = duration_ms
             return result
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return ExecutionResult(
                 execution_id=request.execution_id,
                 success=False,
@@ -130,7 +130,7 @@ class ExecutionService:
                 error_detail=str(exc),
                 duration_ms=int((time.monotonic() - start) * 1000),
             )
-        except Exception as exc:  # noqa: BLE001 — deliberately broad: never leak internals
+        except Exception:  # noqa: BLE001 — deliberately broad: never leak internals
             return ExecutionResult(
                 execution_id=request.execution_id,
                 success=False,

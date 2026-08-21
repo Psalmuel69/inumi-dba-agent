@@ -57,7 +57,7 @@ class DatabaseTarget(BaseModel):
     query_id: str | None = None
 
     @model_validator(mode="after")
-    def _require_instance_scope(self) -> "DatabaseTarget":
+    def _require_instance_scope(self) -> DatabaseTarget:
         # At minimum every target must identify an environment; the Gateway's
         # target-validation stage enforces the operation-specific minimum
         # field set (see gateway.domain.target_validation).

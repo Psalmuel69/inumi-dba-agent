@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from inumi.common.models.failures import FailureCode, InumiError
-from inumi.common.models.target import REQUIRED_FIELD_SETS, DatabaseTarget, RequiredTargetFields
+from inumi.common.models.target import DatabaseTarget
 from inumi.gateway.domain.inventory import AmbiguousTargetError, DatabaseInventory, InventoryEntry
 
 # Maps the ToolDefinition.required_target_scope string labels (which mirror

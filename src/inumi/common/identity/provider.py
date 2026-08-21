@@ -97,7 +97,7 @@ class MockIdentityProvider(IdentityProvider):
             enterprise_groups=list(entry.groups),
             dba_roles=self._derive_roles(entry.groups),
             mfa_satisfied=entry.mfa,
-            authenticated_at=dt.datetime.now(dt.timezone.utc).isoformat(),
+            authenticated_at=dt.datetime.now(dt.UTC).isoformat(),
         )
 
     async def resolve_by_external_account(

@@ -87,7 +87,7 @@ async def test_approval_expired_denies_execution(db, tool_registry, identity_pro
             approval_id=record.approval_id, approver=approver, decision=ApprovalDecision.APPROVE
         )
 
-        later = dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=120)
+        later = dt.datetime.now(dt.UTC) + dt.timedelta(seconds=120)
         with pytest.raises(InumiError) as exc:
             await engine.verify_for_execution(
                 approval_id=record.approval_id,

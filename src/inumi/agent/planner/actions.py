@@ -9,7 +9,7 @@ back to asking the user for clarification, it never guesses.
 
 from __future__ import annotations
 
-from typing import Annotated, Literal, Union
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, TypeAdapter
 
@@ -47,7 +47,7 @@ class Conclude(BaseModel):
 
 
 AgentAction = Annotated[
-    Union[AskClarification, ProposeToolCall, RecordObservation, Conclude],
+    AskClarification | ProposeToolCall | RecordObservation | Conclude,
     Field(discriminator="action"),
 ]
 

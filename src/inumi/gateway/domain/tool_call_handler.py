@@ -21,11 +21,12 @@ from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from inumi.common.ids import new_id
+from inumi.common.models.execution import ExecutionRequest
 from inumi.common.models.failures import FailureCode, InumiError
 from inumi.common.models.identity import VerifiedIdentity
 from inumi.common.models.target import DatabaseTarget
 from inumi.common.models.tool import ToolCallRequest, ToolCallResponse, ToolCallStatus
-from inumi.gateway.domain.approval import ApprovalContext, ApprovalDecision, ApprovalEngine
+from inumi.gateway.domain.approval import ApprovalContext, ApprovalEngine
 from inumi.gateway.domain.audit import AuditLog
 from inumi.gateway.domain.authorization import authorize
 from inumi.gateway.domain.data_policy import DataMinimizer
@@ -38,7 +39,6 @@ from inumi.gateway.domain.target_validation import TargetValidator
 from inumi.gateway.domain.tool_catalog import ARGUMENT_MODELS
 from inumi.gateway.domain.tool_registry import ToolRegistry
 from inumi.gateway.infrastructure.execution_client import ExecutionClient
-from inumi.common.models.execution import ExecutionRequest
 
 
 def _enrich_target(target: DatabaseTarget, args_dict: dict) -> DatabaseTarget:

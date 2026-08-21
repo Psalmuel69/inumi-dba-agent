@@ -84,12 +84,11 @@ def test_availability_impacting_write_escalates_outside_maintenance_window(
     policy_engine, tool_registry, inventory
 ):
     tool = tool_registry.get("database.kill_session")
-    entry = inventory.by_id("sqlserver-dev-01")  # allowed_roles include L1, 24h window
-    # sqlserver-dev-01's maintenance window is effectively all-day, so force
-    # a definitely-outside-window instant using the uat entry instead, whose
-    # window is 22:00-23:59 Africa/Lagos.
+    # sqlserver-dev-01's maintenance window is effectively all-day, so use the
+    # uat entry instead, whose window is 22:00-23:59 Africa/Lagos, to force a
+    # definitely-outside-window instant.
     uat_entry = inventory.by_id("sqlserver-uat-01")
-    noon_utc = dt.datetime(2026, 1, 1, 12, 0, tzinfo=dt.timezone.utc)
+    noon_utc = dt.datetime(2026, 1, 1, 12, 0, tzinfo=dt.UTC)
     evaluation = policy_engine.evaluate(
         environment=Environment.UAT,
         tool=tool,

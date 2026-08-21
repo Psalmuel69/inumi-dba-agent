@@ -10,9 +10,9 @@ Two things happen on every request before any business logic runs:
 
 from __future__ import annotations
 
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
-from fastapi import Depends, Header, HTTPException, Request
+from fastapi import Header, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from inumi.common.models.failures import InumiError

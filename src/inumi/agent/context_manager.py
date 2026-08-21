@@ -52,7 +52,7 @@ class ConversationState:
     investigation: InvestigationState | None = None
     pending_approval: PendingApproval | None = None
     updated_at: dt.datetime = dataclasses.field(
-        default_factory=lambda: dt.datetime.now(dt.timezone.utc)
+        default_factory=lambda: dt.datetime.now(dt.UTC)
     )
 
 
@@ -85,4 +85,4 @@ class ContextManager:
         return state.investigation
 
     def touch(self, state: ConversationState) -> None:
-        state.updated_at = dt.datetime.now(dt.timezone.utc)
+        state.updated_at = dt.datetime.now(dt.UTC)

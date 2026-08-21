@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from inumi.common.config import Settings
 from inumi.common.models.identity import DBARole
+from inumi.common.models.results import DiagnosticResult, WriteResult
 from inumi.common.models.target import Environment
 from inumi.common.models.tool import OperationType, ToolDefinition
 from inumi.common.models.tool_arguments import (
@@ -34,7 +35,6 @@ from inumi.common.models.tool_arguments import (
     TruncateTableArgs,
     UpdateStatisticsArgs,
 )
-from inumi.common.models.results import DiagnosticResult, WriteResult
 
 _ALL_ENVS = [Environment.DEVELOPMENT, Environment.UAT, Environment.PRODUCTION]
 _ALL_ROLES = [DBARole.DBA_L1, DBARole.DBA_L2, DBARole.DBA_L3, DBARole.DBA_MANAGER]

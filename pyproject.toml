@@ -46,11 +46,18 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 
 [tool.ruff]
-line-length = 100
+line-length = 110
 target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+# B008: FastAPI's `Depends(...)` in a default argument is the framework's
+# documented dependency-injection idiom, not a real "mutable default" bug.
+# UP042: keeping `class X(str, Enum)` rather than `StrEnum` — these enums are
+# used directly as Pydantic model fields / JSON schema sources across many
+# modules, and standardizing that is a separate, deliberate refactor, not a
+# lint fixup.
+ignore = ["B008", "UP042"]
 
 [tool.mypy]
 python_version = "3.12"

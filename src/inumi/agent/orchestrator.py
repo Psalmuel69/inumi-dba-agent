@@ -14,7 +14,12 @@ from __future__ import annotations
 
 from inumi.agent.context_manager import ContextManager, ConversationState, PendingApproval
 from inumi.agent.llm.provider import LLMProvider
-from inumi.agent.planner.actions import AskClarification, Conclude, ProposeToolCall, RecordObservation
+from inumi.agent.planner.actions import (
+    AskClarification,
+    Conclude,
+    ProposeToolCall,
+    RecordObservation,
+)
 from inumi.agent.reply import AgentReply, ApprovalCard
 from inumi.agent.tool_client import ToolClient
 from inumi.common.ids import new_id

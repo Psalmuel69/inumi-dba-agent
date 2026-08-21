@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from inumi.common.models.failures import FailureCode, InumiError
 from inumi.common.models.target import DatabaseTarget, Environment
@@ -38,7 +39,7 @@ def test_llm_cannot_supply_arbitrary_connection_target():
     # DatabaseTarget is `extra="forbid"` — a free-text host/connection string
     # field is rejected by the pydantic model itself before it ever reaches
     # target validation.
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         DatabaseTarget(
             environment=Environment.PRODUCTION,
             database="CoreBanking",

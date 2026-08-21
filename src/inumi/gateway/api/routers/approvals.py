@@ -15,7 +15,12 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from inumi.common.models.failures import FailureCode, InumiError
-from inumi.gateway.api.deps import get_session, get_state, require_agent_service_token, resolve_identity
+from inumi.gateway.api.deps import (
+    get_session,
+    get_state,
+    require_agent_service_token,
+    resolve_identity,
+)
 from inumi.gateway.api.state import GatewayState
 from inumi.gateway.domain.approval import ApprovalDecision, ApprovalEngine
 from inumi.gateway.domain.audit import AuditLog

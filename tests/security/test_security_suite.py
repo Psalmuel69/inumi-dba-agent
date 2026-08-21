@@ -10,11 +10,9 @@ from __future__ import annotations
 
 import time
 
-import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from inumi.common.models.tool import ToolCallStatus
 from tests.stack import build_stack
 
 
@@ -287,7 +285,7 @@ async def test_expired_approval_denies_execution_over_http():
             json={"channel": "slack", "channel_account_id": "U_MOCK_L2"},
         )
 
-        future = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=15)
+        future = dt.datetime.now(dt.UTC) + dt.timedelta(minutes=15)
         with freezegun.freeze_time(future):
             # Mint the service token *after* time-travelling too — otherwise
             # the (deliberately short-lived) service-to-service token itself
@@ -383,17 +381,9 @@ async def test_malicious_database_content_is_never_obeyed():
     so it cannot be steered by injected content; this test asserts no
     destructive tool is ever invoked even when such a string is present in
     tool results the orchestrator sees."""
-    from inumi.agent.context_manager import ContextManager
     from inumi.agent.llm.provider import MockLLMProvider
-    from inumi.agent.orchestrator import AgentOrchestrator
-    from inumi.agent.tool_client import ToolClient
-    from inumi.common.service_auth import ServiceTokenIssuer
 
     stack = await build_stack()
-    gateway_transport = httpx.ASGITransport(app=stack.gateway_app)
-    issuer = ServiceTokenIssuer(stack.settings.service_jwt_secret, stack.settings.service_jwt_issuer)
-    tool_client = ToolClient(stack.settings.gateway_base_url, issuer, transport=gateway_transport)
-    orchestrator = AgentOrchestrator(MockLLMProvider(), tool_client, ContextManager())
 
     malicious_transcript = [
         {"tool_id": "database.get_health", "reason": "baseline", "result": {"rows": [{"cpu": 90}]}},

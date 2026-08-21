@@ -12,7 +12,12 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from inumi.common.models.tool import ToolCallRequest, ToolCallResponse
-from inumi.gateway.api.deps import get_session, get_state, require_agent_service_token, resolve_identity
+from inumi.gateway.api.deps import (
+    get_session,
+    get_state,
+    require_agent_service_token,
+    resolve_identity,
+)
 from inumi.gateway.api.state import GatewayState
 from inumi.gateway.domain.tool_call_handler import ToolCallHandler
 

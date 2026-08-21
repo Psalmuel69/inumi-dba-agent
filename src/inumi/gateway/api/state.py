@@ -49,7 +49,7 @@ class GatewayState:
     service_token_verifier: ServiceTokenVerifier
 
     @classmethod
-    def build(cls, settings: Settings, *, execution_transport=None) -> "GatewayState":
+    def build(cls, settings: Settings, *, execution_transport=None) -> GatewayState:
         """`execution_transport` lets tests point the Gateway's HTTP
         execution client at an in-process ASGI app (via
         `httpx.ASGITransport`) instead of a real network address."""

@@ -15,13 +15,13 @@ from __future__ import annotations
 import datetime as dt
 
 from sqlalchemy import JSON, Boolean, ForeignKey, Index, Integer, String, Text
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from inumi.common.ids import new_id
 
 
 def _utcnow() -> dt.datetime:
-    return dt.datetime.now(dt.timezone.utc)
+    return dt.datetime.now(dt.UTC)
 
 
 class Base(DeclarativeBase):

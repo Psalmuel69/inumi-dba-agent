@@ -22,7 +22,6 @@ import json
 from dataclasses import dataclass
 from enum import Enum
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from inumi.common.ids import new_id
@@ -47,7 +46,7 @@ def _naive_utc(value: dt.datetime) -> dt.datetime:
     being correct, since every datetime this module writes is UTC.
     """
     if value.tzinfo is not None:
-        return value.astimezone(dt.timezone.utc).replace(tzinfo=None)
+        return value.astimezone(dt.UTC).replace(tzinfo=None)
     return value
 
 
@@ -137,7 +136,7 @@ class ApprovalEngine:
         requires_dual_approval: bool,
         now: dt.datetime | None = None,
     ) -> ApprovalRecord:
-        now = now or dt.datetime.now(dt.timezone.utc)
+        now = now or dt.datetime.now(dt.UTC)
         record = ApprovalRecord(
             approval_id=new_id("appr"),
             request_id=ctx.request_id,
@@ -201,7 +200,7 @@ class ApprovalEngine:
         decision: ApprovalDecision,
         now: dt.datetime | None = None,
     ) -> ApprovalRecord:
-        now = now or dt.datetime.now(dt.timezone.utc)
+        now = now or dt.datetime.now(dt.UTC)
         record = await self._get(approval_id)
         await self._expire_if_needed(record, now)
 
@@ -295,7 +294,7 @@ class ApprovalEngine:
         everything from the persisted record and the freshly recomputed hash
         of the *current* tool-call request.
         """
-        now = now or dt.datetime.now(dt.timezone.utc)
+        now = now or dt.datetime.now(dt.UTC)
         record = await self._get(approval_id)
         await self._expire_if_needed(record, now)
 
@@ -328,7 +327,7 @@ class ApprovalEngine:
     async def mark_executed(self, approval_id: str, now: dt.datetime | None = None) -> None:
         """Consumes the approval so it cannot authorize a second execution
         (spec §43 — duplicate execution / replay)."""
-        now = now or dt.datetime.now(dt.timezone.utc)
+        now = now or dt.datetime.now(dt.UTC)
         record = await self._get(approval_id)
         record.status = ApprovalStatus.EXECUTED.value
         self._session.add(

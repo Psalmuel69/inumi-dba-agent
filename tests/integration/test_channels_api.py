@@ -16,11 +16,11 @@ import time
 import httpx
 from fastapi.testclient import TestClient
 
+from inumi.agent.api.app import create_app as create_agent_app
 from inumi.channels.api.app import create_app as create_channels_app
 from inumi.common.config import Settings
 from inumi.execution.api.app import create_app as create_execution_app
 from inumi.gateway.api.app import create_app as create_gateway_app
-from inumi.agent.api.app import create_app as create_agent_app
 
 
 def _settings(**overrides) -> Settings:

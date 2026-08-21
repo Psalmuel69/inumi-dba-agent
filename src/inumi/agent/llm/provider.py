@@ -20,7 +20,6 @@ from inumi.agent.planner.actions import (
     Conclude,
     IntentExtraction,
     ProposeToolCall,
-    RecordObservation,
     agent_action_adapter,
 )
 
