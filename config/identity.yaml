@@ -68,6 +68,16 @@ mock_directory:
     groups: ["Enterprise-DBA", "Enterprise-DBA-L3"]
     mfa_satisfied: true
 
+  - subject_id: "dev-sub-l3-006"
+    email: "dba.l3b@example.test"
+    display_name: "Dev DBA L3 (second)"
+    channel_accounts:
+      slack: "U_MOCK_L3B"
+      teams: "aad-mock-l3b"
+      dev: "dba_l3b@example.com"
+    groups: ["Enterprise-DBA", "Enterprise-DBA-L3"]
+    mfa_satisfied: true
+
   - subject_id: "dev-sub-mgr-004"
     email: "dba.manager@example.test"
     display_name: "Dev DBA Manager"
