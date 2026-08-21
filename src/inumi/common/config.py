@@ -57,6 +57,7 @@ class Settings(BaseSettings):
     # via CredentialProvider + pyodbc/psycopg — requires the `db-drivers` extra).
     execution_mode: str = "mock"
 
+    agent_base_url: str = "http://localhost:8000"
     agent_port: int = 8000
 
     channels_port: int = 8003
