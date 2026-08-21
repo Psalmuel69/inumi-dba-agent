@@ -1,0 +1,116 @@
+# =============================================================================
+# Policy Engine configuration (spec §12).
+#
+# The PolicyEngine ALWAYS fails closed: any (environment, tool, role) triple
+# not explicitly listed below evaluates to DENY (see
+# gateway.domain.policy_engine.PolicyEngine.default_decision). Nothing here
+# is interpreted, generated, or modified by the LLM — this file is loaded by
+# the Gateway process only.
+#
+# Decisions: ALLOW | DENY | REQUIRES_APPROVAL
+# =============================================================================
+
+default_decision: DENY
+
+environments:
+  development:
+    database.get_health: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_version: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_sessions: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_blocking_sessions: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_deadlocks: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_running_queries: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_wait_statistics: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_query_plan: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_top_queries: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_indexes: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_statistics: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_tables: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_storage: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_transaction_log: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_replication_status: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_backup_status: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_configuration: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_error_logs: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+
+    database.cancel_query: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.kill_session: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.update_statistics: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.create_index: { DBA_L1: REQUIRES_APPROVAL, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.rebuild_index: { DBA_L1: REQUIRES_APPROVAL, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.modify_configuration: { DBA_L1: DENY, DBA_L2: REQUIRES_APPROVAL, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.restart_instance: { DBA_L1: DENY, DBA_L2: REQUIRES_APPROVAL, DBA_L3: REQUIRES_APPROVAL, DBA_MANAGER: REQUIRES_APPROVAL }
+    database.failover: { DBA_L1: DENY, DBA_L2: DENY, DBA_L3: REQUIRES_APPROVAL, DBA_MANAGER: REQUIRES_APPROVAL }
+
+  uat:
+    database.get_health: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_version: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_sessions: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_blocking_sessions: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_deadlocks: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_running_queries: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_wait_statistics: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_query_plan: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_top_queries: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_indexes: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_statistics: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_tables: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_storage: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_transaction_log: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_replication_status: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_backup_status: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_configuration: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_error_logs: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+
+    database.cancel_query: { DBA_L1: REQUIRES_APPROVAL, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.kill_session: { DBA_L1: DENY, DBA_L2: REQUIRES_APPROVAL, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.update_statistics: { DBA_L1: DENY, DBA_L2: REQUIRES_APPROVAL, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.create_index: { DBA_L1: DENY, DBA_L2: REQUIRES_APPROVAL, DBA_L3: REQUIRES_APPROVAL, DBA_MANAGER: REQUIRES_APPROVAL }
+    database.rebuild_index: { DBA_L1: DENY, DBA_L2: REQUIRES_APPROVAL, DBA_L3: REQUIRES_APPROVAL, DBA_MANAGER: REQUIRES_APPROVAL }
+    database.modify_configuration: { DBA_L1: DENY, DBA_L2: DENY, DBA_L3: REQUIRES_APPROVAL, DBA_MANAGER: REQUIRES_APPROVAL }
+    database.restart_instance: { DBA_L1: DENY, DBA_L2: DENY, DBA_L3: REQUIRES_APPROVAL, DBA_MANAGER: REQUIRES_APPROVAL }
+    database.failover: { DBA_L1: DENY, DBA_L2: DENY, DBA_L3: DENY, DBA_MANAGER: REQUIRES_APPROVAL }
+
+  production:
+    database.get_health: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_version: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_sessions: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_blocking_sessions: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_deadlocks: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_running_queries: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_wait_statistics: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_query_plan: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_top_queries: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_indexes: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_statistics: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_tables: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_storage: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_transaction_log: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_replication_status: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_backup_status: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_configuration: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.get_error_logs: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+
+    # Matches the example in spec §12 exactly.
+    database.cancel_query: { DBA_L1: DENY, DBA_L2: REQUIRES_APPROVAL, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    database.kill_session: { DBA_L1: DENY, DBA_L2: REQUIRES_APPROVAL, DBA_L3: REQUIRES_APPROVAL, DBA_MANAGER: REQUIRES_APPROVAL }
+    database.update_statistics: { DBA_L1: DENY, DBA_L2: REQUIRES_APPROVAL, DBA_L3: REQUIRES_APPROVAL, DBA_MANAGER: REQUIRES_APPROVAL }
+    database.create_index: { DBA_L1: DENY, DBA_L2: REQUIRES_APPROVAL, DBA_L3: REQUIRES_APPROVAL, DBA_MANAGER: REQUIRES_APPROVAL }
+    database.rebuild_index: { DBA_L1: DENY, DBA_L2: REQUIRES_APPROVAL, DBA_L3: REQUIRES_APPROVAL, DBA_MANAGER: REQUIRES_APPROVAL }
+    database.modify_configuration: { DBA_L1: DENY, DBA_L2: DENY, DBA_L3: REQUIRES_APPROVAL, DBA_MANAGER: REQUIRES_APPROVAL }
+    database.restart_instance: { DBA_L1: DENY, DBA_L2: DENY, DBA_L3: REQUIRES_APPROVAL, DBA_MANAGER: REQUIRES_APPROVAL }
+    database.failover: { DBA_L1: DENY, DBA_L2: DENY, DBA_L3: DENY, DBA_MANAGER: REQUIRES_APPROVAL }
+
+# Tools requiring a change ticket in production regardless of role (spec §41).
+change_ticket_required:
+  production:
+    - database.create_index
+    - database.rebuild_index
+    - database.modify_configuration
+    - database.restart_instance
+    - database.failover
+
+# Tools requiring two-person (dual) approval regardless of role (spec §17).
+dual_approval_required:
+  - database.restart_instance
+  - database.failover

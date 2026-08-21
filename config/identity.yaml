@@ -1,0 +1,89 @@
+# =============================================================================
+# Identity / authorization mapping (spec §3).
+#
+# This file NEVER contains real employees. It maps *enterprise identity
+# provider groups* to application roles. In production this is backed by a
+# real OIDC/AAD/Okta provider; the `directory` section below only exists to
+# drive the local mock IdentityProvider for development and tests.
+# =============================================================================
+
+identity:
+  # Any user who is a member of one of these groups is considered part of
+  # the DBA team and may invoke @Inumi at all. Group membership alone does
+  # NOT grant any tool access — role mapping below determines that.
+  groups:
+    dba_team:
+      - "Enterprise-DBA"
+
+  roles:
+    DBA_L1:
+      groups:
+        - "Enterprise-DBA-L1"
+    DBA_L2:
+      groups:
+        - "Enterprise-DBA-L2"
+    DBA_L3:
+      groups:
+        - "Enterprise-DBA-L3"
+    DBA_MANAGER:
+      groups:
+        - "Enterprise-DBA-Managers"
+
+# -----------------------------------------------------------------------------
+# Mock directory — DEVELOPMENT / TEST ONLY.
+#
+# Maps a channel account (e.g. a Slack user id, or a Teams AAD object id) to
+# a synthetic enterprise identity + group memberships. The real
+# `OIDCIdentityProvider` never reads this section; it authenticates against
+# a real IdP instead. Fictitious users only.
+# -----------------------------------------------------------------------------
+mock_directory:
+  - subject_id: "dev-sub-l1-001"
+    email: "dba.l1@example.test"
+    display_name: "Dev DBA L1"
+    channel_accounts:
+      slack: "U_MOCK_L1"
+      teams: "aad-mock-l1"
+      dev: "dba_l1@example.com"
+    groups: ["Enterprise-DBA", "Enterprise-DBA-L1"]
+    mfa_satisfied: true
+
+  - subject_id: "dev-sub-l2-002"
+    email: "dba.l2@example.test"
+    display_name: "Dev DBA L2"
+    channel_accounts:
+      slack: "U_MOCK_L2"
+      teams: "aad-mock-l2"
+      dev: "dba_l2@example.com"
+    groups: ["Enterprise-DBA", "Enterprise-DBA-L2"]
+    mfa_satisfied: true
+
+  - subject_id: "dev-sub-l3-003"
+    email: "dba.l3@example.test"
+    display_name: "Dev DBA L3"
+    channel_accounts:
+      slack: "U_MOCK_L3"
+      teams: "aad-mock-l3"
+      dev: "dba_l3@example.com"
+    groups: ["Enterprise-DBA", "Enterprise-DBA-L3"]
+    mfa_satisfied: true
+
+  - subject_id: "dev-sub-mgr-004"
+    email: "dba.manager@example.test"
+    display_name: "Dev DBA Manager"
+    channel_accounts:
+      slack: "U_MOCK_MGR"
+      teams: "aad-mock-mgr"
+      dev: "dba_manager@example.com"
+    groups: ["Enterprise-DBA", "Enterprise-DBA-L3", "Enterprise-DBA-Managers"]
+    mfa_satisfied: true
+
+  - subject_id: "dev-sub-nondba-005"
+    email: "notadba@example.test"
+    display_name: "Non DBA Employee"
+    channel_accounts:
+      slack: "U_MOCK_NONDBA"
+      teams: "aad-mock-nondba"
+      dev: "notadba@example.com"
+    groups: ["Everyone"]
+    mfa_satisfied: true

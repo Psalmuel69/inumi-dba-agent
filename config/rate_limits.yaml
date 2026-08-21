@@ -1,0 +1,27 @@
+# =============================================================================
+# Rate limiting configuration (spec §29). Enforced in the Gateway, at every
+# level below, before a tool call reaches the Policy Engine. Fully
+# configurable; these are sane development-scale defaults.
+# =============================================================================
+
+rate_limits:
+  read:
+    per_user_per_minute: 100
+    per_conversation_per_minute: 60
+    per_tool_per_minute: 200
+    per_database_per_minute: 300
+    per_environment_per_minute: 1000
+
+  write:
+    per_user_per_minute: 10
+    per_conversation_per_minute: 10
+    per_tool_per_minute: 20
+    per_database_per_minute: 20
+    per_environment_per_minute: 50
+
+  critical:
+    per_user_per_minute: 2
+    per_conversation_per_minute: 2
+    per_tool_per_minute: 3
+    per_database_per_minute: 3
+    per_environment_per_minute: 5

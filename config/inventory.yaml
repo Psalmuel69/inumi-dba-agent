@@ -1,0 +1,126 @@
+# =============================================================================
+# Database inventory (spec §11).
+#
+# The Gateway's TargetValidator resolves every DatabaseTarget the Agent
+# proposes against exactly this list. Nothing outside this file can ever
+# become a valid execution target — the LLM cannot invent a host, instance,
+# or connection string.
+#
+# Fake data only. Fictitious "CoreBanking" example mirrors the walkthrough in
+# the design spec (§54/§68) for local development and demos.
+# =============================================================================
+
+databases:
+  - id: sqlserver-dev-01
+    platform: sqlserver
+    environment: development
+    organization: platform-eng
+    instance: sqlserver-dev-01
+    cluster: ""
+    database_name: SampleDev
+    region: local
+    criticality: low
+    classification: internal
+    owner: platform-eng
+    support_team: platform-eng
+    maintenance_window:
+      timezone: Africa/Lagos
+      start: "00:00"
+      end: "23:59"
+    allowed_roles: [DBA_L1, DBA_L2, DBA_L3, DBA_MANAGER]
+    status: active
+
+  - id: sqlserver-uat-01
+    platform: sqlserver
+    environment: uat
+    organization: platform-eng
+    instance: sqlserver-uat-01
+    cluster: ""
+    database_name: SampleUAT
+    region: local
+    criticality: standard
+    classification: internal
+    owner: platform-eng
+    support_team: platform-eng
+    maintenance_window:
+      timezone: Africa/Lagos
+      start: "22:00"
+      end: "23:59"
+    allowed_roles: [DBA_L2, DBA_L3, DBA_MANAGER]
+    status: active
+
+  - id: corebanking-prd-01
+    platform: sqlserver
+    environment: production
+    organization: core-banking
+    instance: corebanking-prd-01
+    cluster: corebanking
+    database_name: CoreBanking
+    region: primary
+    criticality: critical
+    classification: restricted
+    owner: core-banking
+    support_team: core-banking-dba
+    maintenance_window:
+      timezone: Africa/Lagos
+      start: "01:00"
+      end: "04:00"
+    allowed_roles: [DBA_L2, DBA_L3]
+    status: active
+
+  - id: postgres-dev-01
+    platform: postgresql
+    environment: development
+    organization: platform-eng
+    instance: postgres-dev-01
+    cluster: ""
+    database_name: sample_dev
+    region: local
+    criticality: low
+    classification: internal
+    owner: platform-eng
+    support_team: platform-eng
+    maintenance_window:
+      timezone: Africa/Lagos
+      start: "00:00"
+      end: "23:59"
+    allowed_roles: [DBA_L1, DBA_L2, DBA_L3, DBA_MANAGER]
+    status: active
+
+  - id: postgres-uat-01
+    platform: postgresql
+    environment: uat
+    organization: platform-eng
+    instance: postgres-uat-01
+    cluster: ""
+    database_name: sample_uat
+    region: local
+    criticality: standard
+    classification: internal
+    owner: platform-eng
+    support_team: platform-eng
+    maintenance_window:
+      timezone: Africa/Lagos
+      start: "22:00"
+      end: "23:59"
+    allowed_roles: [DBA_L2, DBA_L3, DBA_MANAGER]
+    status: active
+
+  - id: postgres-prod-cluster-01
+    platform: postgresql
+    environment: production
+    organization: analytics
+    instance: postgres-prod-cluster-01
+    cluster: analytics-cluster
+    database_name: analytics_prod
+    region: primary
+    criticality: high
+    classification: restricted
+    owner: analytics
+    support_team: analytics-dba
+    maintenance_window:
+      timezone: Africa/Lagos
+      start: "01:00"
+      end: "04:00"
+    allowed_roles: [DBA_L2, DBA_L3]
+    status: active
