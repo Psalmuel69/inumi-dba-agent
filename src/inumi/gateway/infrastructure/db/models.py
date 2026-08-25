@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import datetime as dt
 
-from sqlalchemy import JSON, Boolean, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import JSON, Boolean, ForeignKey, Index, Integer, String, Text, DateTime
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from inumi.common.ids import new_id
@@ -49,8 +49,8 @@ class UserRecord(Base):
     display_name: Mapped[str] = mapped_column(String, nullable=False)
     last_seen_groups: Mapped[list] = mapped_column(JSON, default=list)
     last_seen_roles: Mapped[list] = mapped_column(JSON, default=list)
-    created_at: Mapped[dt.datetime] = mapped_column(default=_utcnow)
-    updated_at: Mapped[dt.datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
 
 
 class IdentityGroupRecord(Base):
@@ -155,8 +155,7 @@ class ToolVersionRecord(Base):
     tool_id: Mapped[str] = mapped_column(String, nullable=False)
     version: Mapped[str] = mapped_column(String, nullable=False)
     definition: Mapped[dict] = mapped_column(JSON, nullable=False)
-    created_at: Mapped[dt.datetime] = mapped_column(default=_utcnow)
-
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 # ---------------------------------------------------------------------------
 # Conversation / session / investigation state
@@ -172,8 +171,8 @@ class ConversationRecord(Base):
     channel: Mapped[str] = mapped_column(String, nullable=False)
     channel_thread_id: Mapped[str] = mapped_column(String, default="")
     user_subject_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
-    created_at: Mapped[dt.datetime] = mapped_column(default=_utcnow)
-    updated_at: Mapped[dt.datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
 
 
 class AgentSessionRecord(Base):
@@ -185,8 +184,8 @@ class AgentSessionRecord(Base):
     conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.conversation_id"))
     database_context: Mapped[dict] = mapped_column(JSON, default=dict)
     investigation_id: Mapped[str | None] = mapped_column(String, default=None)
-    created_at: Mapped[dt.datetime] = mapped_column(default=_utcnow)
-    updated_at: Mapped[dt.datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
 
 
 class InvestigationRecord(Base):
@@ -205,8 +204,8 @@ class InvestigationRecord(Base):
     findings: Mapped[list] = mapped_column(JSON, default=list)
     recommendations: Mapped[list] = mapped_column(JSON, default=list)
     actions: Mapped[list] = mapped_column(JSON, default=list)
-    created_at: Mapped[dt.datetime] = mapped_column(default=_utcnow)
-    updated_at: Mapped[dt.datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
 
 
 class InvestigationEventRecord(Base):
@@ -216,8 +215,7 @@ class InvestigationEventRecord(Base):
     investigation_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
     event_type: Mapped[str] = mapped_column(String, nullable=False)  # OBSERVATION/HYPOTHESIS/...
     payload: Mapped[dict] = mapped_column(JSON, default=dict)
-    created_at: Mapped[dt.datetime] = mapped_column(default=_utcnow)
-
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 # ---------------------------------------------------------------------------
 # Tool requests / executions
@@ -240,8 +238,7 @@ class ToolRequestRecord(Base):
     risk: Mapped[dict] = mapped_column(JSON, default=dict)
     approval_id: Mapped[str | None] = mapped_column(String, default=None)
     status: Mapped[str] = mapped_column(String, default="RECEIVED")
-    created_at: Mapped[dt.datetime] = mapped_column(default=_utcnow)
-
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 class ToolExecutionRecord(Base):
     __tablename__ = "tool_executions"
@@ -283,9 +280,9 @@ class ApprovalRecord(Base):
     approver_1_subject_id: Mapped[str | None] = mapped_column(String, default=None)
     approver_2_subject_id: Mapped[str | None] = mapped_column(String, default=None)
     status: Mapped[str] = mapped_column(String, default="PENDING")
-    created_at: Mapped[dt.datetime] = mapped_column(default=_utcnow)
-    expires_at: Mapped[dt.datetime] = mapped_column(nullable=False)
-    decided_at: Mapped[dt.datetime | None] = mapped_column(default=None)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    expires_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    decided_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), default=None)
 
 
 class ApprovalEventRecord(Base):
@@ -296,8 +293,7 @@ class ApprovalEventRecord(Base):
     event_type: Mapped[str] = mapped_column(String, nullable=False)
     actor_subject_id: Mapped[str] = mapped_column(String, default="")
     detail: Mapped[dict] = mapped_column(JSON, default=dict)
-    created_at: Mapped[dt.datetime] = mapped_column(default=_utcnow)
-
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 # ---------------------------------------------------------------------------
 # Audit / security / change management / incidents / knowledge
@@ -329,7 +325,7 @@ class AuditEventRecord(Base):
     error_code: Mapped[str | None] = mapped_column(String, default=None)
     duration_ms: Mapped[int | None] = mapped_column(Integer, default=None)
     event_type: Mapped[str] = mapped_column(String, nullable=False)
-    created_at: Mapped[dt.datetime] = mapped_column(default=_utcnow)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
 class ChangeRequestRecord(Base):
@@ -344,7 +340,7 @@ class ChangeRequestRecord(Base):
     affected_database: Mapped[str] = mapped_column(String, default="")
     affected_objects: Mapped[list] = mapped_column(JSON, default=list)
     status: Mapped[str] = mapped_column(String, default="OPEN")
-    created_at: Mapped[dt.datetime] = mapped_column(default=_utcnow)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
 class IncidentRecord(Base):
@@ -355,8 +351,8 @@ class IncidentRecord(Base):
     title: Mapped[str] = mapped_column(String, default="")
     status: Mapped[str] = mapped_column(String, default="OPEN")
     severity: Mapped[str] = mapped_column(String, default="")
-    created_at: Mapped[dt.datetime] = mapped_column(default=_utcnow)
-    updated_at: Mapped[dt.datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
 
 
 class KnowledgeDocumentRecord(Base):
@@ -367,8 +363,7 @@ class KnowledgeDocumentRecord(Base):
     title: Mapped[str] = mapped_column(String, nullable=False)
     content: Mapped[str] = mapped_column(Text, default="")
     tags: Mapped[list] = mapped_column(JSON, default=list)
-    created_at: Mapped[dt.datetime] = mapped_column(default=_utcnow)
-
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 class SecurityEventRecord(Base):
     """Append-only record of every security-relevant denial/anomaly (spoofed
@@ -383,4 +378,4 @@ class SecurityEventRecord(Base):
     actor_subject_id: Mapped[str] = mapped_column(String, default="")
     detail: Mapped[dict] = mapped_column(JSON, default=dict)
     severity: Mapped[str] = mapped_column(String, default="WARNING")
-    created_at: Mapped[dt.datetime] = mapped_column(default=_utcnow)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)

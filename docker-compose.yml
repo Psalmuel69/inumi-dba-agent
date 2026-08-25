@@ -12,7 +12,7 @@ services:
     volumes:
       - inumi-postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U inumi"]
+      test: ["CMD-SHELL", "pg_isready -U inumi -d inumi_control"]
       interval: 5s
       timeout: 5s
       retries: 10
