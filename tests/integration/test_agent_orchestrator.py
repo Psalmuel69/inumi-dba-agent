@@ -14,20 +14,21 @@ from __future__ import annotations
 import httpx
 
 from inumi.agent.context_manager import ContextManager
-from inumi.agent.llm.provider import MockLLMProvider
+from inumi.agent.llm.mock import MockLLMProvider
+from inumi.agent.llm.registry import LLMRegistry
 from inumi.agent.orchestrator import AgentOrchestrator
 from inumi.agent.tool_client import ToolClient
 from inumi.common.config import Settings
 from inumi.common.service_auth import ServiceTokenIssuer
 from inumi.execution.api.app import create_app as create_execution_app
 from inumi.gateway.api.app import create_app as create_gateway_app
+from tests.canned_adapter import canned_adapter_factory
 
 
 def _settings() -> Settings:
     return Settings(
         _env_file=None,
         control_db_url="sqlite+aiosqlite:///:memory:",
-        execution_mode="mock",
         service_jwt_secret="test-secret",
         service_jwt_issuer="inumi-internal",
         llm_provider="mock",
@@ -36,7 +37,7 @@ def _settings() -> Settings:
 
 async def _build_orchestrator() -> AgentOrchestrator:
     settings = _settings()
-    execution_app = create_execution_app(settings)
+    execution_app = create_execution_app(settings, adapter_factory=canned_adapter_factory)
     execution_transport = httpx.ASGITransport(app=execution_app)
     gateway_app = create_gateway_app(settings, execution_transport=execution_transport)
     # httpx.ASGITransport doesn't emit lifespan events, so create the
@@ -50,7 +51,9 @@ async def _build_orchestrator() -> AgentOrchestrator:
     tool_client = ToolClient(
         settings.gateway_base_url, issuer, transport=gateway_transport
     )
-    return AgentOrchestrator(MockLLMProvider(), tool_client, ContextManager())
+    return AgentOrchestrator(
+        LLMRegistry.for_testing(MockLLMProvider()), tool_client, ContextManager()
+    )
 
 
 async def test_acceptance_scenario_investigate_approve_execute_verify():

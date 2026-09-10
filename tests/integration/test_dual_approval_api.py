@@ -19,13 +19,13 @@ from inumi.common.config import Settings
 from inumi.common.service_auth import ServiceTokenIssuer
 from inumi.execution.api.app import create_app as create_execution_app
 from inumi.gateway.api.app import create_app as create_gateway_app
+from tests.canned_adapter import canned_adapter_factory
 
 
 def _settings() -> Settings:
     return Settings(
         _env_file=None,
         control_db_url="sqlite+aiosqlite:///:memory:",
-        execution_mode="mock",
         service_jwt_secret="test-secret",
         service_jwt_issuer="inumi-internal",
     )
@@ -33,7 +33,7 @@ def _settings() -> Settings:
 
 def _build():
     settings = _settings()
-    execution_app = create_execution_app(settings)
+    execution_app = create_execution_app(settings, adapter_factory=canned_adapter_factory)
     execution_transport = httpx.ASGITransport(app=execution_app)
     gateway_app = create_gateway_app(settings, execution_transport=execution_transport)
     issuer = ServiceTokenIssuer(settings.service_jwt_secret, settings.service_jwt_issuer)

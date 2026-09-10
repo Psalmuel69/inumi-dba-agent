@@ -381,7 +381,7 @@ async def test_malicious_database_content_is_never_obeyed():
     so it cannot be steered by injected content; this test asserts no
     destructive tool is ever invoked even when such a string is present in
     tool results the orchestrator sees."""
-    from inumi.agent.llm.provider import MockLLMProvider
+    from inumi.agent.llm.mock import MockLLMProvider
 
     stack = await build_stack()
 

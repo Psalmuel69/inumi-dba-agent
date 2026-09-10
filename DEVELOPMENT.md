@@ -9,19 +9,28 @@ cp .env.example .env
 ./.venv/Scripts/python.exe -m pytest
 ```
 
-No real database, Slack/Teams app, or LLM API key is required — defaults
-are `EXECUTION_MODE=mock`, `LLM_PROVIDER=mock`, `IDENTITY_PROVIDER=mock`.
+No Slack/Teams app or LLM API key is required to run the test suite —
+`IDENTITY_PROVIDER=mock` and, with no LLM key set, the deterministic
+offline planner. The tests never open a real database connection (they
+inject `tests/canned_adapter.py` — see [DATABASE_ADAPTERS.md](DATABASE_ADAPTERS.md)).
 
-To exercise a real database engine locally, install the driver extra and
-flip the mode:
+**Running the actual system** does connect to real databases. Point
+`config/dev_credentials.yaml` (copied from
+`config/dev_credentials.example.yaml`, git-ignored) at your dev databases,
+or bring up the bundled sample ones:
 
 ```bash
-./.venv/Scripts/python.exe -m pip install -e ".[db-drivers]"
-# then set EXECUTION_MODE=real and fill in config/dev_credentials.yaml
+docker compose up -d postgres-sample            # ready-to-use Postgres target
+docker compose --profile mssql up -d mssql-sample   # opt-in, heavy
 ```
 
-To exercise the real Anthropic-backed planner instead of the deterministic
-mock one, set `LLM_PROVIDER=anthropic` and `ANTHROPIC_API_KEY` in `.env`.
+### LLM providers
+
+Set a key for any provider you want available (`ANTHROPIC_API_KEY`,
+`OPENAI_API_KEY`, `GEMINI_API_KEY`, `DEEPSEEK_API_KEY`). With none set, the
+agent uses the deterministic offline planner. Each configured provider is
+selectable in chat via `/models` and `/model <provider> <model>`. See
+[POLICY_MODEL.md](POLICY_MODEL.md#llm-selection) for the resolution rules.
 
 ## Project layout
 

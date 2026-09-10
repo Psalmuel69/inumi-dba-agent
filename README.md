@@ -24,7 +24,7 @@ by prompting.
 | Service       | Responsibility                                                                 |
 |---------------|----------------------------------------------------------------------------------|
 | `channels`    | Slack + Microsoft Teams webhook adapters. Verifies signatures/tokens, resolves identity, forwards to `agent`. Never touches a database. |
-| `agent`       | The LLM-backed investigation/planning loop. Proposes tool calls; has no DB credential and no authorization authority. |
+| `agent`       | The LLM-backed investigation/planning loop (Anthropic / OpenAI / Gemini / DeepSeek, DBA-selectable per conversation, or a deterministic offline planner). Proposes tool calls; has no DB credential and no authorization authority. |
 | `gateway`     | **The security boundary.** Tool registry, target validation, authorization, policy, risk, approval, data minimization, rate limiting, audit. |
 | `execution`   | The only service with database credentials/network access. Dispatches to `SQLServerAdapter`/`PostgreSQLAdapter`. |
 
@@ -33,34 +33,40 @@ Supporting infrastructure: PostgreSQL (control-plane database), Redis
 
 ## Quick start (local development)
 
-No real Slack/Teams/SQL Server/PostgreSQL credentials are required — the
-system runs fully in "mock" mode out of the box.
+The test suite needs no external services. Running the system needs a
+database to point at (bundled sample below) and, optionally, an LLM key.
 
 ```bash
 python -m venv .venv
 ./.venv/Scripts/python.exe -m pip install -e ".[dev]"
 cp .env.example .env
-./.venv/Scripts/python.exe -m pytest
+cp config/dev_credentials.example.yaml config/dev_credentials.yaml
+./.venv/Scripts/python.exe -m pytest        # 116 pass, 22 opt-in skipped
 ```
 
-Run the full stack with Docker Compose (still mock-mode by default):
+Run the full stack (bundled sample PostgreSQL target included):
 
 ```bash
 docker compose up --build
 ```
 
-Then talk to it without any real chat platform, via the mock dev channel
-(spec §66):
+Talk to it via the dev channel (no real Slack/Teams needed, spec §66):
 
 ```bash
 curl -X POST http://localhost:8003/dev/chat \
   -H "Content-Type: application/json" \
-  -d '{"user": "dba_l2@example.com", "message": "Check blocking on CoreBanking production."}'
+  -d '{"user": "dba_l2@example.com", "message": "Check blocking on the production PostgreSQL cluster."}'
 ```
 
-See [DEVELOPMENT.md](DEVELOPMENT.md) for the full local setup (including how
-to point the system at a real Slack/Teams app or a real database engine),
-and [TOOL_CATALOG.md](TOOL_CATALOG.md) for what `@Inumi` can currently do.
+**Choosing an LLM.** Set a key for any of `ANTHROPIC_API_KEY`,
+`OPENAI_API_KEY`, `GEMINI_API_KEY`, `DEEPSEEK_API_KEY` (e.g.
+`ANTHROPIC_API_KEY=sk-ant-... docker compose up`). Each configured provider
+becomes selectable in chat with `/models` and `/model <provider> <model>`.
+With no key set, the agent uses a deterministic offline planner. See
+[POLICY_MODEL.md](POLICY_MODEL.md#llm-selection).
+
+See [DEVELOPMENT.md](DEVELOPMENT.md) for the full local setup and
+[TOOL_CATALOG.md](TOOL_CATALOG.md) for what `@Inumi` can currently do.
 
 ## Commands
 
@@ -92,9 +98,12 @@ make docker-up       # full stack via docker compose
 
 Phases 1–9 of the build (foundation → gateway → execution → read tools →
 agent → channels → approvals → controlled writes → restricted-tool
-framework) are implemented and covered by an automated test suite (92
-tests as of this writing: unit, integration, and a dedicated security
-suite). Oracle/MariaDB adapters and a real OIDC identity provider are
-structured for but not yet implemented — see the "Extending" sections in
-[DATABASE_ADAPTERS.md](DATABASE_ADAPTERS.md) and
-[ARCHITECTURE.md](ARCHITECTURE.md).
+framework) are implemented and covered by an automated test suite (116
+passing + 22 opt-in: unit, integration, and a dedicated security suite).
+The Execution Service uses real database connections; the Agent supports
+Anthropic, OpenAI, Gemini, and DeepSeek with per-conversation model
+selection. Oracle/MariaDB adapters, a real OIDC identity provider, and the
+real Vault/AWS/Azure/GCP secrets-manager SDK calls are structured for but
+not yet implemented — see the "Extending" / "Adding" sections in
+[DATABASE_ADAPTERS.md](DATABASE_ADAPTERS.md), [ARCHITECTURE.md](ARCHITECTURE.md),
+and [DEPLOYMENT.md](DEPLOYMENT.md).

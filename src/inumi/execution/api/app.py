@@ -20,7 +20,7 @@ from inumi.execution.service import ExecutionService
 logger = get_logger(__name__)
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(settings: Settings | None = None, *, adapter_factory=None) -> FastAPI:
     settings = settings or get_settings()
     settings.validate_for_production()
     configure_logging("execution-service", settings.log_level)
@@ -28,7 +28,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="Inumi Execution Service", version="0.1.0")
     verifier = ServiceTokenVerifier(settings.service_jwt_secret, settings.service_jwt_issuer)
     credential_provider = build_credential_provider(settings)
-    service = ExecutionService(settings, credential_provider)
+    service = ExecutionService(settings, credential_provider, adapter_factory=adapter_factory)
 
     async def require_gateway_service_token(
         x_service_token: str | None = Header(default=None),

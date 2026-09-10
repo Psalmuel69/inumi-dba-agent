@@ -12,13 +12,13 @@ from inumi.common.config import Settings
 from inumi.common.service_auth import ServiceTokenIssuer
 from inumi.execution.api.app import create_app as create_execution_app
 from inumi.gateway.api.app import create_app as create_gateway_app
+from tests.canned_adapter import canned_adapter_factory
 
 
 def test_settings(**overrides) -> Settings:
     base = dict(
         _env_file=None,
         control_db_url="sqlite+aiosqlite:///:memory:",
-        execution_mode="mock",
         service_jwt_secret="test-secret",
         service_jwt_issuer="inumi-internal",
         llm_provider="mock",
@@ -32,7 +32,7 @@ def test_settings(**overrides) -> Settings:
 class Stack:
     def __init__(self, settings: Settings):
         self.settings = settings
-        self.execution_app = create_execution_app(settings)
+        self.execution_app = create_execution_app(settings, adapter_factory=canned_adapter_factory)
         execution_transport = httpx.ASGITransport(app=self.execution_app)
         self.gateway_app = create_gateway_app(settings, execution_transport=execution_transport)
         gateway_transport = httpx.ASGITransport(app=self.gateway_app)

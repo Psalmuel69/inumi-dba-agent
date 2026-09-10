@@ -51,6 +51,10 @@ class ConversationState:
     database_context: dict[str, Any] = dataclasses.field(default_factory=dict)
     investigation: InvestigationState | None = None
     pending_approval: PendingApproval | None = None
+    # Per-conversation LLM choice (set via the `/model` command). None -> use
+    # the deployment's configured default. Never an authorization input.
+    llm_provider: str | None = None
+    llm_model: str | None = None
     updated_at: dt.datetime = dataclasses.field(
         default_factory=lambda: dt.datetime.now(dt.UTC)
     )

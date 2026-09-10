@@ -45,12 +45,16 @@ not a class boundary a bug could accidentally erase.
    (UX-level convenience check — see below), and forwards
    `{channel, channel_account_id, message}` to the Agent over HTTP with a
    signed service token.
-2. **Agent** (`agent/orchestrator.py`) asks its `LLMProvider`
-   (`agent/llm/provider.py`) to classify intent and, in a bounded loop,
-   decide the next investigative step — always as a *typed*
-   `AgentAction` (`agent/planner/actions.py`), never free text. A
-   `ProposeToolCall` becomes a `ToolCallRequest` sent to the Gateway via
-   `agent/tool_client.py`.
+2. **Agent** (`agent/orchestrator.py`) resolves an `LLMProvider` for the
+   conversation via `agent/llm/registry.py` (the DBA's `/model` choice, or
+   the configured default — Anthropic / OpenAI / Gemini / DeepSeek, or the
+   deterministic offline planner when no key is set) and, in a bounded
+   loop, asks it to classify intent and decide the next investigative step
+   — always as a *typed* `AgentAction` (`agent/planner/actions.py`), never
+   free text. A `ProposeToolCall` becomes a `ToolCallRequest` sent to the
+   Gateway via `agent/tool_client.py`. The choice of model has no bearing
+   on the security boundary: every proposal, from any provider, goes
+   through the identical Gateway pipeline.
 3. **Gateway** (`gateway/domain/tool_call_handler.py`) runs the full
    pipeline: tool registry lookup → argument schema validation → target
    parsing/enrichment → inventory resolution → **independent identity
@@ -103,13 +107,14 @@ src/inumi/
 
   execution/
     adapters/           # DatabaseAdapter interface, SQLServerAdapter,
-                        # PostgreSQLAdapter, MockDatabaseAdapter, connections
+                        # PostgreSQLAdapter, connections (real drivers)
     credentials/        # CredentialProvider (local_dev/Vault/AWS/Azure/GCP)
     service.py           # dispatcher: ExecutionRequest -> adapter method
     api/                 # FastAPI app
 
   agent/
-    llm/                 # LLMProvider (Mock, Anthropic)
+    llm/                 # base (LLMProvider), mock, anthropic/openai/gemini/
+                        # deepseek providers, registry (provider+model selection)
     planner/actions.py    # structured AgentAction union
     orchestrator.py        # investigation loop
     context_manager.py     # conversation/investigation state (in-process)

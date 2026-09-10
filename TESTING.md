@@ -5,13 +5,16 @@
 ```
 tests/
   unit/          # policy, risk, target validation, approval, data masking,
-                  # authorization, adapters (via FakeQueryExecutor), SQL
-                  # validator, execution service dispatch — no network, no DB
+                  # authorization, LLM registry, adapters (via
+                  # FakeQueryExecutor), SQL validator, config — no network
   integration/    # Gateway HTTP API, full tool-call pipeline, agent
                   # orchestrator, dual approval, channel webhooks — all wired
                   # via httpx.ASGITransport (in-process, no real sockets)
   security/       # the mandatory attack-scenario suite (spec §43-47)
-  e2e/            # (reserved) tests exercising a fully deployed stack
+  e2e/            # opt-in: real LLM APIs (test_live_llm) and real database
+                  # engines (test_live_databases) — skipped by default
+  canned_adapter.py   # deterministic DatabaseAdapter injected into the
+                  # Execution Service for pipeline tests (test double, not shipped)
 ```
 
 Run each layer:
@@ -19,11 +22,27 @@ Run each layer:
 ```bash
 make test            # unit + integration
 make security-test    # security suite
-make e2e              # e2e (once populated for your deployment)
+make e2e              # e2e (skips everything without keys / reachable DBs)
+make live-llm-test    # opt-in: hits real LLM APIs (needs a key)
 ./.venv/Scripts/python.exe -m pytest tests -q   # everything
 ```
 
-92 tests pass as of this writing with zero real database or LLM dependency.
+116 tests pass (+ 22 opt-in skipped) as of this writing, with zero real
+database, LLM, Slack/Teams, or secrets-manager dependency.
+
+## Deterministic execution without "mock mode"
+
+There is no `execution_mode` config — the shipped Execution Service always
+uses real connections. Pipeline tests (which assert on
+policy/risk/approval/audit behaviour, not on SQL) get determinism from an
+injected `adapter_factory`: `tests/canned_adapter.py::CannedDatabaseAdapter`
+is a `DatabaseAdapter` subclass returning the spec's canonical scenario
+(43-session blocking chain headed by `9182`). It lives in `tests/`, never
+in `src/`.
+
+Real adapter query text is covered by `tests/unit/test_adapters.py`
+(`FakeQueryExecutor`) and by `tests/e2e/test_live_databases.py` against
+`docker compose up -d postgres-sample`.
 
 ## Why `httpx.ASGITransport` instead of real servers
 
@@ -77,35 +96,39 @@ submissions/minute (see `tests/security/relaxed_rate_limits.yaml` for an
 example) — don't relax the *default* limits just to make a test pass; that
 usually means the test should assert fewer submissions instead.
 
-## Opt-in live-Claude smoke tests (`tests/e2e/test_live_anthropic.py`)
+## Opt-in live tests (`tests/e2e/`)
 
-The default suite runs entirely against `MockLLMProvider` — deterministic,
-free, offline. A small, separate set of tests exercises the *real*
-Anthropic API instead, but only when explicitly asked for:
+The default suite runs entirely against the deterministic offline planner
+and the canned adapter — free, offline, reproducible. Two separate suites
+exercise the real thing, skipped unless explicitly opted in:
 
 ```bash
-make live-llm-test   # or: RUN_LIVE_LLM_TESTS=1 ANTHROPIC_API_KEY=sk-ant-... pytest tests/e2e -q
+# real LLM APIs — one provider per key you supply
+RUN_LIVE_LLM_TESTS=1 ANTHROPIC_API_KEY=sk-ant-...  pytest tests/e2e/test_live_llm.py -q
+RUN_LIVE_LLM_TESTS=1 OPENAI_API_KEY=sk-...         pytest tests/e2e/test_live_llm.py -q
+#                    GEMINI_API_KEY / DEEPSEEK_API_KEY likewise
+
+# real database engines
+docker compose up -d postgres-sample
+RUN_LIVE_DB_TESTS=1 pytest tests/e2e/test_live_databases.py -q
 ```
 
-They're skipped by default (no env var, no key needed to run `pytest`) and
-their assertions are deliberately loose — a live model's exact phrasing
-isn't guaranteed stable between runs. What they *do* check is the property
-that actually matters for security against a real model rather than the
-deterministic stand-in: it never proposes a `tool_id` outside the list it
-was offered, and injected instruction-shaped text in a tool result
-(spec §45) doesn't make it prefer a destructive tool over a safe one.
-Never wired into `make test`/`test-all` or CI — see
-`common.config.Settings.validate_for_production` for the mechanism that
-guarantees a real deployment can't accidentally run on the mock provider
-in the first place (that's a startup check, not a test).
+`test_live_llm.py` assertions are deliberately loose — a live model's exact
+phrasing isn't stable — but do check the security-relevant property against
+each real provider: it stays inside the tool menu it was offered, and
+injected instruction-shaped text in a tool result (spec §45) doesn't steer
+it to a destructive tool. Never wired into `make test` / CI.
 
-## What's intentionally not covered by automated tests
+## What's intentionally not covered by the default suite
 
-- Real SQL Server/PostgreSQL connections (`execution/adapters/connections.py`)
-  — these require live infrastructure; adapter *logic* (which DMV/pg_stat
-  query maps to which tool) is fully covered via `FakeQueryExecutor`
-  instead (`tests/unit/test_adapters.py`).
+- Real SQL Server/PostgreSQL connections in the *default* run — adapter
+  *logic* is covered via `FakeQueryExecutor` (`tests/unit/test_adapters.py`)
+  and live connections via the opt-in `tests/e2e/test_live_databases.py`.
+- Real LLM API calls in the *default* run — the provider classes' SDK-specific
+  plumbing is covered by the opt-in `tests/e2e/test_live_llm.py`; the
+  registry / selection logic is fully covered offline in
+  `tests/unit/test_llm_registry.py`.
 - Real Vault/AWS/Azure/GCP secret retrieval — each provider's "not
   configured" fail-closed path is tested
-  (`tests/unit/test_execution_service.py::test_real_mode_without_configured_credentials_fails_closed`);
+  (`tests/unit/test_execution_service.py::test_without_configured_credentials_execution_fails_closed`);
   the actual SDK calls are a deployment-time integration concern.

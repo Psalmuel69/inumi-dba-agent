@@ -1,26 +1,30 @@
-"""Mock database adapter for local development / demos (spec §65).
+"""Deterministic in-memory `DatabaseAdapter` for the test suite.
 
-Used only when `EXECUTION_MODE=mock` (the default in `.env.example`, so the
-whole system is runnable end-to-end without a real SQL Server or PostgreSQL
-instance). Every row returned here is clearly synthetic and deterministic
-(seeded from the requested database id) — this is never selected in
-production, where `EXECUTION_MODE=real` routes through the actual
-SQLServerAdapter/PostgreSQLAdapter and a live `QueryExecutor` connection.
+This is a TEST DOUBLE — it lives in `tests/`, never in `src/`, so the
+shipped Execution Service has no fake-data code path. It is injected into
+`ExecutionService` via the `adapter_factory` seam (see `tests/stack.py`) so
+the gateway pipeline tests (policy / risk / approval / audit) can assert on
+deterministic execution results without needing a live SQL Server or
+PostgreSQL.
 
-This is not a stand-in for the real adapters' query logic (those are fully
-implemented and exercised by unit tests against a `FakeQueryExecutor`); it
-exists purely so `docker-compose up` produces a working, explorable demo
-without provisioning real database servers.
+Real adapter *query logic* (which DMV / pg_stat query maps to which tool) is
+covered separately in `tests/unit/test_adapters.py` via `FakeQueryExecutor`,
+and true end-to-end behaviour against real engines is covered by the
+opt-in `tests/e2e/test_live_databases.py`.
+
+The canned data reproduces the spec's worked scenario (§54/§68): a
+43-session blocking chain headed by session ``9182``.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+from inumi.common.models.execution import ExecutionRequest
 from inumi.execution.adapters.base import DatabaseAdapter
 
 
-class MockDatabaseAdapter(DatabaseAdapter):
+class CannedDatabaseAdapter(DatabaseAdapter):
     def __init__(self, database: str):
         super().__init__(executor=None, database=database)  # type: ignore[arg-type]
 
@@ -36,7 +40,7 @@ class MockDatabaseAdapter(DatabaseAdapter):
         ]
 
     async def version(self) -> list[dict[str, Any]]:
-        return [{"version": "Mock Engine 1.0 (development mode)"}]
+        return [{"version": "Canned Engine 1.0 (test double)"}]
 
     async def sessions(self) -> list[dict[str, Any]]:
         return [
@@ -134,3 +138,8 @@ class MockDatabaseAdapter(DatabaseAdapter):
 
     async def failover(self, target_instance: str) -> dict[str, Any]:
         return {"failed_over_to": target_instance}
+
+
+async def canned_adapter_factory(request: ExecutionRequest) -> tuple[DatabaseAdapter, None]:
+    """Drop-in for `ExecutionService(adapter_factory=...)` in tests."""
+    return CannedDatabaseAdapter(request.database), None

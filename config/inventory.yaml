@@ -49,6 +49,25 @@ databases:
     allowed_roles: [DBA_L2, DBA_L3, DBA_MANAGER]
     status: active
 
+  - id: corebanking-dev-01
+    platform: sqlserver
+    environment: development
+    organization: core-banking
+    instance: corebanking-dev-01
+    cluster: ""
+    database_name: AdventureWorks2019
+    region: local
+    criticality: low
+    classification: internal
+    owner: core-banking
+    support_team: core-banking-dba
+    maintenance_window:
+      timezone: Africa/Lagos
+      start: "00:00"
+      end: "23:59"
+    allowed_roles: [DBA_L1, DBA_L2, DBA_L3, DBA_MANAGER]
+    status: active
+
   - id: corebanking-prd-01
     platform: sqlserver
     environment: production

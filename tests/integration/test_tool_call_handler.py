@@ -5,22 +5,22 @@ import pytest
 from inumi.common.config import Settings
 from inumi.common.ids import new_id
 from inumi.common.models.tool import ToolCallRequest, ToolCallStatus
-from inumi.execution.credentials.provider import LocalDevCredentialProvider
 from inumi.execution.service import ExecutionService
 from inumi.gateway.domain.data_policy import DataMinimizer
 from inumi.gateway.domain.risk_engine import RiskEngine
 from inumi.gateway.domain.tool_call_handler import ToolCallHandler
 from inumi.gateway.infrastructure.execution_client import InProcessExecutionClient
+from tests.canned_adapter import canned_adapter_factory
 
 
 def _settings() -> Settings:
-    return Settings(_env_file=None, execution_mode="mock")
+    return Settings(_env_file=None)
 
 
 async def _make_handler(db, tool_registry, inventory, target_validator, policy_engine, rate_limiter):
     settings = _settings()
     execution_service = ExecutionService(
-        settings, credential_provider=LocalDevCredentialProvider("config/dev_credentials.yaml")
+        settings, credential_provider=None, adapter_factory=canned_adapter_factory  # type: ignore[arg-type]
     )
     execution_client = InProcessExecutionClient(execution_service)
     session_cm = db.session()

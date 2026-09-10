@@ -27,16 +27,21 @@
 
 ## No security by prompt
 
-The `AnthropicLLMProvider`'s system prompts (`agent/llm/provider.py`) tell
-the model not to treat tool output as instructions and not to invent tools —
-this is **good practice, not a control**. If every LLM provider vanished and
-was replaced by a coin flip, the security properties above would be
-unchanged, because:
+The provider system prompts (`agent/llm/base.py`) tell the model not to
+treat tool output as instructions and not to invent tools — this is **good
+practice, not a control**. Which model runs (Anthropic / OpenAI / Gemini /
+DeepSeek, chosen per conversation, or the offline planner) is a product
+choice made in `agent/llm/registry.py` and has **zero** bearing on the
+security boundary. If every LLM provider vanished and was replaced by a
+coin flip, the security properties above would be unchanged, because:
 
 - the model can only select from a `tool_id` list the Gateway actually
   registered (`ToolRegistry`), and even that is re-validated;
 - the model's structured output is re-validated against Pydantic schemas
-  the model doesn't control;
+  the model doesn't control (`agent_action_adapter`);
+- a proposed `tool_id` outside the offered menu is downgraded to a
+  clarifying question in `StructuredLLMProvider`, and could not reach the
+  Gateway anyway;
 - authorization/policy/risk/approval are computed from database records and
   configuration files the model never touches.
 
@@ -53,11 +58,13 @@ unchanged, because:
 ## Secrets
 
 - `.env.example` contains placeholders only; `.gitignore` excludes `.env`,
-  `*.pem`, `*.key`, `credentials.json`, `service-account.json`.
+  `*.pem`, `*.key`, `credentials.json`, `service-account.json`, and
+  `config/dev_credentials.yaml`.
 - `SECRETS_PROVIDER=local_dev` is the only mode that reads a plaintext
-  YAML file (`config/dev_credentials.yaml`, itself containing only fake
-  localhost values) — every other provider fails closed until wired to a
-  real secrets manager (`execution/credentials/provider.py`).
+  YAML file (`config/dev_credentials.yaml`, git-ignored, created from
+  `config/dev_credentials.example.yaml`) — every other provider fails
+  closed until wired to a real secrets manager
+  (`execution/credentials/provider.py`).
 - Structured logging (`common/observability.py`) redacts any field whose
   *name* matches a secret-shaped pattern (`password`, `token`, `secret`,
   `api_key`, `connection_string`, ...) as a defense-in-depth backstop — the

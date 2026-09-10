@@ -20,3 +20,6 @@ build/
 .idea/
 .vscode/
 node_modules/
+
+# Local-only real dev DB credentials — use config/dev_credentials.example.yaml as the template
+config/dev_credentials.yaml

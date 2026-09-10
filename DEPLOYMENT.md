@@ -73,12 +73,31 @@ CONTROL_DB_URL=postgresql+asyncpg://... alembic upgrade head
 table directly from the SQLAlchemy models (`gateway/infrastructure/db/models.py`)
 — add new revisions with `alembic revision` for subsequent schema changes.
 
-## Execution mode
+## Databases
 
-Set `EXECUTION_MODE=real` and install the `db-drivers` extra
-(`pip install -e ".[db-drivers]"`, or add it to the execution service's
-Docker build) once real SQL Server/PostgreSQL instances and credentials are
-available.
+The Execution Service always uses real connections. `pyodbc` and `psycopg`
+are part of the base install; `pyodbc` needs the platform ODBC driver at
+runtime (the `Dockerfile` installs Microsoft ODBC Driver 18). Provide
+connection details via `SECRETS_PROVIDER` (a real secrets manager in
+production) or, for dev, `config/dev_credentials.yaml`.
+
+## LLM providers
+
+Set an API key for each provider you want DBAs to be able to use:
+`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `DEEPSEEK_API_KEY`.
+
+- `LLM_PROVIDER` unset / `auto` — the first configured provider (order:
+  anthropic, openai, gemini, deepseek) is the default; DBAs may switch
+  per-conversation with `/model`.
+- `LLM_PROVIDER=<name>` — force that provider and **disable** per-conversation
+  switching (locked deployment).
+- `ALLOW_USER_MODEL_SELECTION=false` — keep auto-default but disable `/model`.
+- With no key set, the agent uses the deterministic offline planner —
+  which `validate_for_production()` rejects at startup in production.
+
+Model lists shown by `/models` come from a live `models.list()` call
+against the provider using the configured key, so DBAs only ever see models
+that key can actually use.
 
 ## Production startup checks (fail closed, enforced — not just documented)
 
@@ -88,8 +107,8 @@ the process **refuses to start** — raises `RuntimeError` immediately,
 rather than serving traffic in a weakened mode — if any of the following
 development-only defaults are still set:
 
-- `LLM_PROVIDER=mock` (must be a real provider, e.g. `anthropic`)
-- `EXECUTION_MODE=mock` (must be `real`, with the `db-drivers` extra installed)
+- no real LLM provider key is configured (or `LLM_PROVIDER` points at a
+  provider whose key is missing)
 - `IDENTITY_PROVIDER=mock` (must be a real enterprise identity provider)
 - `SECRETS_PROVIDER=local_dev` (must be `vault`/`aws_secrets_manager`/`azure_key_vault`/`gcp_secret_manager`)
 - `SERVICE_JWT_SECRET` still equal to the shipped development placeholder

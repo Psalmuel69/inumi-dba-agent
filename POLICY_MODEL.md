@@ -108,3 +108,38 @@ per database, per environment), enforced in-memory for local dev/tests
 (`RedisRateLimitBackend`). A `WRITE`/`PRIVILEGED` operation, or any
 operation requiring approval, is billed against the stricter `critical`
 tier.
+
+## LLM selection
+
+Which LLM the agent uses is a *product* choice, not a security control —
+`agent/llm/registry.py::LLMRegistry` resolves it, and it never touches
+authorization, policy, risk, or approval (all of which live in the Gateway
+and are identical regardless of provider).
+
+**Configuration** (`Settings`, see `.env.example`):
+
+| Setting | Effect |
+|---|---|
+| `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` / `DEEPSEEK_API_KEY` | A provider becomes *selectable* the moment its key is present. |
+| `LLM_PROVIDER` = `""` / `auto` | Auto-pick the first configured provider (order: anthropic, openai, gemini, deepseek). DBAs may switch per-conversation. |
+| `LLM_PROVIDER` = `<name>` | Force that provider **and disable** per-conversation switching. |
+| `LLM_PROVIDER` = `mock` | Force the deterministic offline planner. |
+| `LLM_MODEL` | Default model for the resolved provider (`""` = the provider's own default). |
+| `ALLOW_USER_MODEL_SELECTION` = `false` | Keep the auto default but disable the `/model` command. |
+
+With no key set at all, `effective_default_llm()` returns `("mock", …)` —
+and `validate_for_production()` refuses to start the process in that state
+when `INUMI_ENV=production`.
+
+**Per-conversation selection** (chat commands, `agent/orchestrator.py`):
+
+- `/models` — lists each configured provider and the models its key can
+  actually use (a live `models.list()` call).
+- `/model` — shows the current selection and its source (conversation vs
+  deployment default).
+- `/model <provider> <model>` — switches for this conversation. Rejected if
+  the provider isn't configured, the model isn't in that key's list, or
+  selection is locked/disabled.
+
+The selection is stored on `ConversationState` (in Agent process memory)
+and is never an input to any Gateway decision.

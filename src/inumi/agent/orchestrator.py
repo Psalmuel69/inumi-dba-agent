@@ -13,7 +13,8 @@ confused model can't loop forever.
 from __future__ import annotations
 
 from inumi.agent.context_manager import ContextManager, ConversationState, PendingApproval
-from inumi.agent.llm.provider import LLMProvider
+from inumi.agent.llm.base import LLMProvider
+from inumi.agent.llm.registry import LLMRegistry
 from inumi.agent.planner.actions import (
     AskClarification,
     Conclude,
@@ -32,15 +33,23 @@ _HELP_TEXT = (
     "performance, blocking, deadlocks, replication, backups, and more, and — "
     "with your role's approval where required — take controlled remediation "
     "actions. Try: \"Why is CoreBanking slow?\" or \"Check blocking on "
-    "CoreBanking production.\"\n\nCommands: /help, /status, /approve <id>, /reject <id>"
+    "CoreBanking production.\"\n\nCommands: /help, /status, /approve <id>, "
+    "/reject <id>, /models, /model <provider> <model>"
 )
 
 
 class AgentOrchestrator:
-    def __init__(self, llm: LLMProvider, tool_client: ToolClient, context: ContextManager):
-        self._llm = llm
+    def __init__(
+        self, llm_registry: LLMRegistry, tool_client: ToolClient, context: ContextManager
+    ):
+        self._llm_registry = llm_registry
         self._tool_client = tool_client
         self._context = context
+
+    def _llm_for(self, state: ConversationState) -> LLMProvider:
+        return self._llm_registry.for_conversation(
+            provider=state.llm_provider, model=state.llm_model
+        )
 
     async def handle_message(
         self,
@@ -60,7 +69,8 @@ class AgentOrchestrator:
         if command_reply is not None:
             return command_reply
 
-        intent = await self._llm.extract_intent(message, known_database_names=[])
+        llm = self._llm_for(state)
+        intent = await llm.extract_intent(message, known_database_names=[])
         if intent.is_greeting_or_chitchat:
             return AgentReply(text=_HELP_TEXT)
         if not intent.is_dba_task:
@@ -95,14 +105,20 @@ class AgentOrchestrator:
         available_ids = [t.tool_id for t in available]
 
         return await self._run_investigation_loop(
-            state, investigation, available_ids, channel, channel_account_id
+            state, investigation, available_ids, channel, channel_account_id, llm
         )
 
     async def _run_investigation_loop(
-        self, state: ConversationState, investigation, available_ids: list[str], channel: str, channel_account_id: str
+        self,
+        state: ConversationState,
+        investigation,
+        available_ids: list[str],
+        channel: str,
+        channel_account_id: str,
+        llm: LLMProvider,
     ) -> AgentReply:
         while investigation.turn_count < _MAX_INVESTIGATION_TURNS:
-            action = await self._llm.decide_next_action(
+            action = await llm.decide_next_action(
                 problem_statement=investigation.problem,
                 available_tool_ids=available_ids,
                 transcript=investigation.transcript,
@@ -271,7 +287,53 @@ class AgentOrchestrator:
             return await self.handle_approval_decision(
                 conversation_id=state.conversation_id, decision="reject", channel=channel, channel_account_id=channel_account_id
             )
+        if stripped in ("/models", "/model"):
+            return await self._handle_model_command(state, stripped)
+        if stripped.startswith("/model "):
+            return await self._handle_model_command(state, stripped)
         return None
+
+    async def _handle_model_command(self, state: ConversationState, stripped: str) -> AgentReply:
+        registry = self._llm_registry
+        parts = stripped.split()
+
+        # `/models` — list what's available.
+        if parts[0] == "/models":
+            return AgentReply(text=await registry.describe_available())
+
+        # `/model` — show the current selection.
+        if len(parts) == 1:
+            if state.llm_provider:
+                current = state.llm_provider + (f" / {state.llm_model}" if state.llm_model else "")
+                source = "this conversation"
+            else:
+                dp, dm = registry.default()
+                current = dp + (f" / {dm}" if dm else " (provider default)")
+                source = "deployment default"
+            hint = "" if registry.selection_enabled() else " (switching is disabled here)"
+            return AgentReply(
+                text=f"Current model: {current} — {source}.{hint}\n"
+                "Use `/model <provider> <model>` to switch, or `/models` to list options."
+            )
+
+        # `/model <provider> [<model>]` — switch.
+        provider = parts[1].lower()
+        model = parts[2] if len(parts) >= 3 else None
+        error = registry.validate_selection(provider, model)
+        if error:
+            return AgentReply(text=error, status="error")
+        if provider != "mock" and model is not None:
+            available_models = await registry.list_models(provider)
+            if available_models and model not in available_models:
+                preview = ", ".join(available_models[:10])
+                return AgentReply(
+                    text=f"'{model}' isn't in {provider}'s available models. Options: {preview}",
+                    status="error",
+                )
+        state.llm_provider = provider
+        state.llm_model = model
+        chosen = provider + (f" / {model}" if model else " (provider default)")
+        return AgentReply(text=f"Model for this conversation set to {chosen}.")
 
     @staticmethod
     def _format_report(investigation, conclusion: Conclude) -> str:

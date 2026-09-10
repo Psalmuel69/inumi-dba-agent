@@ -47,17 +47,28 @@ setting `statement_timeout`/`lock_timeout` per call (spec §48).
 `asyncio.to_thread`, translating the adapters' `%(name)s`-style parameters
 to pyodbc's positional `?` placeholders.
 
-Both drivers are optional extras (`pip install -e ".[db-drivers]"`) so the
-rest of the platform — and the entire automated test suite — works without
-an ODBC driver or a live database.
+`pyodbc` and `psycopg` are part of the base install. `pyodbc` also needs
+the platform ODBC driver at *runtime* (the `Dockerfile` installs Microsoft
+ODBC Driver 18); it is not needed to install the package or run the tests.
 
-## Mock mode (`execution/adapters/mock.py`)
+## The Execution Service always uses real connections
 
-`EXECUTION_MODE=mock` (the default) uses `MockDatabaseAdapter`, which
-returns clearly-synthetic, deterministic data shaped like the spec's
-worked examples (e.g., 43 blocking sessions headed by session `9182`) so
-the whole system — including the acceptance-scenario tests — runs without
-any real database server. Production always uses `EXECUTION_MODE=real`.
+There is no "mock execution mode". `ExecutionService` resolves a real
+credential via `CredentialProvider` and opens a real connection for every
+request.
+
+For the automated pipeline tests (policy / risk / approval / audit), which
+need *deterministic* execution results but have nothing to do with SQL,
+`ExecutionService` exposes one test seam: an optional `adapter_factory`.
+`tests/canned_adapter.py` uses it to inject a `CannedDatabaseAdapter` (a
+`DatabaseAdapter` subclass returning the spec's canonical scenario — a
+43-session blocking chain headed by `9182`). That fake lives in `tests/`,
+never in `src/`, so the shipped service has no fake-data path.
+
+Real adapter *query text* is covered against `FakeQueryExecutor` in
+`tests/unit/test_adapters.py`, and against live engines by the opt-in
+`tests/e2e/test_live_databases.py` (`docker compose up -d postgres-sample`,
+or `docker compose --profile mssql up -d mssql-sample`).
 
 ## Adding Oracle / MariaDB
 

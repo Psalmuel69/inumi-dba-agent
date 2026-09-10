@@ -7,7 +7,7 @@ directly from the Agent — see `execution.api.app` for the service-auth
 enforcement that guarantees this) and:
 
   1. looks up credentials for the target `database_id` via `CredentialProvider`
-  2. opens a scoped connection (or the local mock adapter in dev)
+  2. opens a scoped connection to the real database
   3. dispatches to the one typed adapter method matching `tool_id`
   4. enforces `max_execution_time` via a hard timeout
   5. enforces `max_result_rows` by truncating (never silently dropping the
@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from inumi.common.config import Settings
@@ -28,10 +29,14 @@ from inumi.common.models.execution import ExecutionRequest, ExecutionResult
 from inumi.common.models.failures import FailureCode
 from inumi.common.models.target import Platform
 from inumi.execution.adapters.base import DatabaseAdapter, QueryExecutor
-from inumi.execution.adapters.mock import MockDatabaseAdapter
 from inumi.execution.adapters.postgresql import PostgreSQLAdapter
 from inumi.execution.adapters.sqlserver import SQLServerAdapter
 from inumi.execution.credentials.provider import CredentialProvider
+
+# A test/integration seam: given an ExecutionRequest, return a ready
+# DatabaseAdapter (and an optional handle to close). Production never sets
+# this — it always resolves a real credential and opens a real connection.
+AdapterFactory = Callable[[ExecutionRequest], Awaitable[tuple[DatabaseAdapter, Any]]]
 
 _READ_METHODS = {
     "database.get_health": ("health", []),
@@ -79,14 +84,23 @@ def _adapter_class_for(platform: Platform) -> type[DatabaseAdapter]:
 
 
 class ExecutionService:
-    def __init__(self, settings: Settings, credential_provider: CredentialProvider):
+    def __init__(
+        self,
+        settings: Settings,
+        credential_provider: CredentialProvider,
+        *,
+        adapter_factory: AdapterFactory | None = None,
+    ):
         self._settings = settings
         self._credentials = credential_provider
+        # Only ever set by tests (see tests/canned_adapter.py). When None,
+        # every execution opens a real database connection.
+        self._adapter_factory = adapter_factory
 
     async def _build_adapter(self, request: ExecutionRequest) -> tuple[DatabaseAdapter, Any]:
         """Returns (adapter, connection_handle_or_None)."""
-        if self._settings.execution_mode == "mock":
-            return MockDatabaseAdapter(request.database), None
+        if self._adapter_factory is not None:
+            return await self._adapter_factory(request)
 
         creds = await self._credentials.get_credentials(request.database_id)
         adapter_cls = _adapter_class_for(request.platform)

@@ -1,6 +1,7 @@
 name: inumi
 
 services:
+  # --- Control plane -------------------------------------------------------
   postgres:
     image: postgres:16-alpine
     environment:
@@ -27,6 +28,42 @@ services:
       timeout: 5s
       retries: 10
 
+  # --- Sample "dummy" databases the agent can be pointed at ---------------
+  # A ready-to-use PostgreSQL target so `docker compose up` gives a working
+  # real-connection demo out of the box. Point config/dev_credentials.yaml's
+  # `postgres-prod-cluster-01` at host `postgres-sample` (from a container)
+  # or `localhost:5435` (from the host).
+  postgres-sample:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: dev_readonly
+      POSTGRES_PASSWORD: change-me
+      POSTGRES_DB: sample_analytics
+    ports:
+      - "5435:5432"
+    volumes:
+      - ./scripts/seed_postgres_sample.sql:/docker-entrypoint-initdb.d/seed.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dev_readonly -d sample_analytics"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Opt-in (heavy: ~1.5GB image, ~2GB RAM). Start with:
+  #   docker compose --profile mssql up
+  mssql-sample:
+    profiles: ["mssql"]
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "Str0ng_Passw0rd!"
+      MSSQL_PID: Developer
+    ports:
+      - "1433:1433"
+    volumes:
+      - ./scripts/seed_sqlserver_sample.sql:/seed/seed.sql:ro
+
+  # --- Application services ----------------------------------------------
   migrate:
     build:
       context: .
@@ -41,13 +78,20 @@ services:
       INVENTORY_CONFIG_PATH: /app/config/inventory.yaml
       IDENTITY_CONFIG_PATH: /app/config/identity.yaml
       RATE_LIMIT_CONFIG_PATH: /app/config/rate_limits.yaml
-      LLM_PROVIDER: mock
       SERVICE_JWT_SECRET: dev-only-change-me-in-production
       SERVICE_JWT_ISSUER: inumi-internal
-      EXECUTION_MODE: mock
       GATEWAY_BASE_URL: http://gateway:8001
       EXECUTION_BASE_URL: http://execution:8002
       AGENT_BASE_URL: http://agent:8000
+      # LLM: keys are passed through from your shell environment. With none
+      # set, the agent falls back to the deterministic offline planner.
+      # `LLM_PROVIDER` unset/"" = auto-pick the first provider that has a key.
+      LLM_PROVIDER: "${LLM_PROVIDER:-}"
+      LLM_MODEL: "${LLM_MODEL:-}"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
+      DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY:-}"
     depends_on:
       postgres:
         condition: service_healthy
@@ -61,6 +105,9 @@ services:
       <<: *common-env
     ports:
       - "8002:8002"
+    # Lets the execution container reach databases running on the host.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -99,10 +146,10 @@ services:
         SERVICE: channels
     environment:
       <<: *common-env
-      SLACK_SIGNING_SECRET: ""
-      SLACK_BOT_TOKEN: ""
-      TEAMS_APP_ID: ""
-      TEAMS_APP_PASSWORD: "dev-teams-shared-token"
+      SLACK_SIGNING_SECRET: "${SLACK_SIGNING_SECRET:-}"
+      SLACK_BOT_TOKEN: "${SLACK_BOT_TOKEN:-}"
+      TEAMS_APP_ID: "${TEAMS_APP_ID:-}"
+      TEAMS_APP_PASSWORD: "${TEAMS_APP_PASSWORD:-dev-teams-shared-token}"
     ports:
       - "8003:8003"
     depends_on:

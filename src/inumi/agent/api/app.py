@@ -14,7 +14,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
 from inumi.agent.context_manager import ContextManager
-from inumi.agent.llm.provider import build_llm_provider
+from inumi.agent.llm.registry import LLMRegistry
 from inumi.agent.orchestrator import AgentOrchestrator
 from inumi.agent.reply import AgentReply
 from inumi.agent.tool_client import ToolClient
@@ -49,9 +49,15 @@ def create_app(settings: Settings | None = None, *, gateway_transport=None) -> F
     issuer = ServiceTokenIssuer(settings.service_jwt_secret, settings.service_jwt_issuer)
     verifier = ServiceTokenVerifier(settings.service_jwt_secret, settings.service_jwt_issuer)
     tool_client = ToolClient(settings.gateway_base_url, issuer, transport=gateway_transport)
-    llm = build_llm_provider(settings)
+    llm_registry = LLMRegistry(settings)
     context = ContextManager()
-    orchestrator = AgentOrchestrator(llm, tool_client, context)
+    orchestrator = AgentOrchestrator(llm_registry, tool_client, context)
+    logger.info(
+        "llm_configured",
+        default_provider=settings.effective_default_llm()[0],
+        configured=settings.configured_llm_providers(),
+        selection_enabled=llm_registry.selection_enabled(),
+    )
 
     app = FastAPI(title="Inumi AI DBA Agent", version="0.1.0")
 
