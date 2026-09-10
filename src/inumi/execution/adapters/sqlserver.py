@@ -186,7 +186,13 @@ class SQLServerAdapter(DatabaseAdapter):
         return await self._executor.fetch_all(sql)
 
     async def configuration(self) -> list[dict[str, Any]]:
-        sql = "SELECT name, value, value_in_use, description FROM sys.configurations ORDER BY name"
+        # `value` / `value_in_use` are sql_variant — cast so the ODBC layer
+        # can decode them.
+        sql = (
+            "SELECT name, CAST(value AS NVARCHAR(4000)) AS value, "
+            "CAST(value_in_use AS NVARCHAR(4000)) AS value_in_use, description "
+            "FROM sys.configurations ORDER BY name"
+        )
         return await self._executor.fetch_all(sql)
 
     async def error_logs(self, since_minutes: int, limit: int) -> list[dict[str, Any]]:

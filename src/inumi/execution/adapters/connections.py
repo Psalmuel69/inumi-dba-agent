@@ -14,7 +14,9 @@ instead) works without them installed.
 
 from __future__ import annotations
 
+import asyncio
 import re
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from inumi.execution.credentials.provider import DatabaseCredentials
@@ -41,7 +43,8 @@ class PostgreSQLQueryExecutor:
     async def connect(self) -> None:
         import psycopg  # optional extra; see module docstring
 
-        self._conn = await psycopg.AsyncConnection.connect(
+        opts = self._credentials.options or {}
+        kwargs: dict[str, Any] = dict(
             host=self._credentials.host,
             port=self._credentials.port,
             user=self._credentials.username,
@@ -50,6 +53,10 @@ class PostgreSQLQueryExecutor:
             autocommit=True,
             connect_timeout=10,
         )
+        # e.g. options: { sslmode: require }  in dev_credentials.yaml
+        if opts.get("sslmode"):
+            kwargs["sslmode"] = opts["sslmode"]
+        self._conn = await psycopg.AsyncConnection.connect(**kwargs)
 
     async def close(self) -> None:
         if self._conn is not None:
@@ -80,10 +87,13 @@ class PostgreSQLQueryExecutor:
 
 
 class SQLServerQueryExecutor:
-    """Wraps a pyodbc connection, run off the event loop via a worker thread
-    since pyodbc is synchronous. `%(name)s`-style SQL text (used uniformly by
-    both adapters for readability) is translated to pyodbc's `?` positional
-    placeholders here."""
+    """Wraps a pyodbc connection. pyodbc is synchronous *and* a connection
+    must be used from the one thread that created it, so this executor owns a
+    dedicated single worker thread — connect / fetch_all / execute / close
+    all run on it — and hands work to it via `loop.run_in_executor`.
+    `%(name)s`-style SQL text (used uniformly by both adapters for
+    readability) is translated to pyodbc's `?` positional placeholders here.
+    """
 
     def __init__(self, credentials: DatabaseCredentials):
         self._credentials = credentials
@@ -91,32 +101,50 @@ class SQLServerQueryExecutor:
         # importable without the optional `pyodbc` dependency — see the
         # module docstring.
         self._conn: Any = None
+        self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mssql")
+
+    async def _run_on_worker(self, fn):
+        return await asyncio.get_running_loop().run_in_executor(self._pool, fn)
+
+    def _connection_string(self) -> str:
+        opts = self._credentials.options or {}
+        # `Encrypt` defaults on and `TrustServerCertificate` defaults off
+        # (production-safe). For a dev SQL Server with a self-signed cert,
+        # set `options: { trust_server_certificate: true }` on that entry in
+        # config/dev_credentials.yaml. `options.driver` overrides the ODBC
+        # driver name.
+        driver = opts.get("driver", "ODBC Driver 18 for SQL Server")
+        encrypt = "yes" if opts.get("encrypt", True) else "no"
+        trust = "yes" if opts.get("trust_server_certificate", False) else "no"
+        return (
+            f"DRIVER={{{driver}}};"
+            f"SERVER={self._credentials.host},{self._credentials.port};"
+            f"DATABASE={self._credentials.database};"
+            f"UID={self._credentials.username};"
+            f"PWD={self._credentials.password.get_secret_value()};"
+            f"Encrypt={encrypt};TrustServerCertificate={trust};"
+        )
 
     async def connect(self) -> None:
-        import asyncio
-
         import pyodbc  # optional extra; see module docstring
 
+        conn_str = self._connection_string()
+
         def _connect() -> Any:
-            conn_str = (
-                "DRIVER={ODBC Driver 18 for SQL Server};"
-                f"SERVER={self._credentials.host},{self._credentials.port};"
-                f"DATABASE={self._credentials.database};"
-                f"UID={self._credentials.username};"
-                f"PWD={self._credentials.password.get_secret_value()};"
-                "Encrypt=yes;TrustServerCertificate=no;"
-            )
             c = pyodbc.connect(conn_str, timeout=10, autocommit=True)
             c.timeout = 30  # default command timeout, overridden per-call below
             return c
 
-        self._conn = await asyncio.to_thread(_connect)
+        self._conn = await self._run_on_worker(_connect)
 
     async def close(self) -> None:
-        import asyncio
-
-        if self._conn is not None:
-            await asyncio.to_thread(self._conn.close)
+        conn = self._conn
+        if conn is not None:
+            self._conn = None
+            try:
+                await self._run_on_worker(conn.close)
+            finally:
+                self._pool.shutdown(wait=False)
 
     @staticmethod
     def _to_positional(sql: str, params: dict[str, Any] | None) -> tuple[str, list[Any]]:
@@ -133,31 +161,27 @@ class SQLServerQueryExecutor:
     async def fetch_all(
         self, sql: str, params: dict[str, Any] | None = None, *, timeout: int = 30
     ) -> list[dict[str, Any]]:
-        import asyncio
-
         converted, ordered = self._to_positional(sql, params)
 
         def _run():
+            self._conn.timeout = timeout  # pyodbc query timeout is per-connection
             cursor = self._conn.cursor()
-            cursor.timeout = timeout
             cursor.execute(converted, ordered) if ordered else cursor.execute(converted)
             columns = [c[0] for c in cursor.description or []]
             rows = cursor.fetchall()
             return [dict(zip(columns, row, strict=False)) for row in rows]
 
-        return await asyncio.to_thread(_run)
+        return await self._run_on_worker(_run)
 
     async def execute(
         self, sql: str, params: dict[str, Any] | None = None, *, timeout: int = 30
     ) -> dict[str, Any]:
-        import asyncio
-
         converted, ordered = self._to_positional(sql, params)
 
         def _run():
+            self._conn.timeout = timeout  # pyodbc query timeout is per-connection
             cursor = self._conn.cursor()
-            cursor.timeout = timeout
             cursor.execute(converted, ordered) if ordered else cursor.execute(converted)
             return {"rowcount": cursor.rowcount}
 
-        return await asyncio.to_thread(_run)
+        return await self._run_on_worker(_run)
