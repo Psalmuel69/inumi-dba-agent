@@ -20,8 +20,8 @@ from inumi.agent.llm.base import StructuredLLMProvider
 # constants are only the fallback used if that call fails, so they must
 # name real, currently-serving models — not a guessed/rounded id.
 _MIN_MAJOR_VERSION = 3
-_DEFAULT_MODEL = "gemini-3.5-flash"
-_KNOWN_MODELS = ["gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash"]
+_DEFAULT_MODEL = "gemini-3.6-flash"
+_KNOWN_MODELS = ["gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash", "gemini-3.5-flash"]
 
 _VERSION_RE = re.compile(r"gemini-(\d+)")
 
