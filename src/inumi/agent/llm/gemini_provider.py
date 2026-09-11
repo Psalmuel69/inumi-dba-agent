@@ -10,6 +10,7 @@ the strict discriminated-union validation happens afterwards via
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -76,6 +77,31 @@ def _is_model_unavailable_error(exc: Exception) -> bool:
     )
 
 
+_RETRY_DELAY_RE = re.compile(r"retryDelay['\"]?\s*:\s*['\"](\d+(?:\.\d+)?)s")
+# Gemini's own 503/429 error payload usually names a retryDelay ("Please
+# retry in 24.8s") — use it when present, since it's the API's own estimate
+# of when *this* failure specifically clears. When absent (or clearly a
+# multi-hour/day quota reset the caller shouldn't just sit and wait for),
+# fall back to a short cooldown — long enough to skip a model that's
+# genuinely still down, short enough that a model marked unavailable during
+# one burst of testing isn't permanently blacklisted for the rest of this
+# process's life (verified live: exactly what happened without this — every
+# model in the chain ended up marked bad within one long testing session,
+# even though several had only hit a brief 503, not the day-long quota).
+_DEFAULT_COOLDOWN_SECONDS = 60.0
+_MAX_COOLDOWN_SECONDS = 120.0
+
+
+def _cooldown_seconds(exc: Exception) -> float:
+    match = _RETRY_DELAY_RE.search(str(exc))
+    if match:
+        try:
+            return min(float(match.group(1)), _MAX_COOLDOWN_SECONDS)
+        except ValueError:
+            pass
+    return _DEFAULT_COOLDOWN_SECONDS
+
+
 def _clean_schema(schema: dict[str, Any]) -> dict[str, Any]:
     """Drop keys Gemini's schema validator rejects (`description` on the
     root, `$schema`, `title`, `additionalProperties`)."""
@@ -101,7 +127,9 @@ class GeminiLLMProvider(StructuredLLMProvider):
         super().__init__(model or _DEFAULT_MODEL)
         self._api_key = api_key
         self._client = None
-        self._unavailable_models: set[str] = set()
+        # model -> the monotonic time it becomes eligible again — a cooldown,
+        # not a permanent blacklist (see _cooldown_seconds).
+        self._unavailable_until: dict[str, float] = {}
 
     def _get_client(self):
         if self._client is None:
@@ -111,8 +139,11 @@ class GeminiLLMProvider(StructuredLLMProvider):
         return self._client
 
     def _next_fallback_model(self) -> str | None:
+        now = time.monotonic()
         for candidate in _MODEL_FALLBACK_CHAIN:
-            if candidate != self.model and candidate not in self._unavailable_models:
+            if candidate == self.model:
+                continue
+            if self._unavailable_until.get(candidate, 0.0) <= now:
                 return candidate
         return None
 
@@ -129,7 +160,8 @@ class GeminiLLMProvider(StructuredLLMProvider):
             except Exception as exc:
                 if not _is_model_unavailable_error(exc):
                     raise
-                self._unavailable_models.add(self.model)
+                cooldown = _cooldown_seconds(exc)
+                self._unavailable_until[self.model] = time.monotonic() + cooldown
                 next_model = self._next_fallback_model()
                 if next_model is None:
                     raise
@@ -137,6 +169,7 @@ class GeminiLLMProvider(StructuredLLMProvider):
                     "gemini_model_unavailable_switching",
                     from_model=self.model,
                     to_model=next_model,
+                    cooldown_seconds=cooldown,
                 )
                 self.model = next_model
 

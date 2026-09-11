@@ -6,13 +6,18 @@ shedding (503 "high demand" persisting across several same-model retries)."""
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from inumi.agent.llm.gemini_provider import (
+    _DEFAULT_COOLDOWN_SECONDS,
     _DEFAULT_MODEL,
     _KNOWN_MODELS,
+    _MAX_COOLDOWN_SECONDS,
     _MODEL_FALLBACK_CHAIN,
     GeminiLLMProvider,
+    _cooldown_seconds,
     _is_model_unavailable_error,
     _meets_min_version,
 )
@@ -121,7 +126,42 @@ async def test_raises_once_every_fallback_model_is_also_exhausted():
 
     with pytest.raises(RuntimeError, match="429"):
         await provider._with_model_fallback(call)
-    assert provider._unavailable_models == set(_MODEL_FALLBACK_CHAIN)
+    # Every model in the chain got a cooldown recorded, not a permanent ban.
+    assert set(provider._unavailable_until) == set(_MODEL_FALLBACK_CHAIN)
+
+
+def test_cooldown_seconds_uses_the_apis_own_retry_delay_when_present():
+    # Reproduces the live error text verbatim (trimmed).
+    exc = RuntimeError(
+        "429 RESOURCE_EXHAUSTED. {'error': {... 'details': [{'@type': "
+        "'type.googleapis.com/google.rpc.RetryInfo', 'retryDelay': '24.8s'}]}}"
+    )
+    assert _cooldown_seconds(exc) == 24.8
+
+
+def test_cooldown_seconds_caps_an_unreasonably_long_retry_delay():
+    exc = RuntimeError("429 ... 'retryDelay': '3600s' ...")
+    assert _cooldown_seconds(exc) == _MAX_COOLDOWN_SECONDS
+
+
+def test_cooldown_seconds_falls_back_to_a_default_when_absent():
+    assert _cooldown_seconds(RuntimeError("503 UNAVAILABLE: high demand")) == _DEFAULT_COOLDOWN_SECONDS
+
+
+def test_a_model_becomes_eligible_again_after_its_cooldown_expires():
+    """This is the whole point of a cooldown over a permanent blacklist —
+    reproduces a live finding: extended testing eventually marked every
+    model in the chain "unavailable" with no expiry, permanently stranding
+    the provider for the rest of the process even though several of those
+    failures were short-lived capacity blips, not the day-long quota."""
+    provider = GeminiLLMProvider("fake-key", _MODEL_FALLBACK_CHAIN[1])
+    # Still cooling down (5 minutes out) -> not offered as a candidate.
+    provider._unavailable_until[_MODEL_FALLBACK_CHAIN[0]] = time.monotonic() + 300
+    assert provider._next_fallback_model() != _MODEL_FALLBACK_CHAIN[0]
+
+    # Its cooldown has now elapsed -> eligible again.
+    provider._unavailable_until[_MODEL_FALLBACK_CHAIN[0]] = time.monotonic() - 1
+    assert provider._next_fallback_model() == _MODEL_FALLBACK_CHAIN[0]
 
 
 @pytest.mark.asyncio
