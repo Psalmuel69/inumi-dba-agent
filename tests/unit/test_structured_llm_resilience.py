@@ -9,6 +9,8 @@ the flat cross-provider schema can't mark conditionally-required)."""
 
 from __future__ import annotations
 
+import asyncio
+import time
 from typing import Any
 
 import pytest
@@ -209,3 +211,31 @@ async def test_extract_intent_degrades_on_a_transient_provider_outage():
     intent = await provider.extract_intent("CoreBanking is slow", known_database_names=["CoreBanking"])
     assert isinstance(intent, IntentExtraction)
     assert intent.is_dba_task is True
+
+
+@pytest.mark.asyncio
+async def test_a_single_decision_never_exceeds_the_overall_deadline():
+    """The actual production guarantee this session's latency work landed
+    on: no matter how many retries or fallback models a provider tries
+    internally, one decide_next_action call is never worse than
+    _OVERALL_DEADLINE_SECONDS late. Verified live this was the real gap —
+    several individually-reasonable timeouts had no shared ceiling, and
+    their product let one decision run for minutes."""
+
+    class _AlwaysSlowProvider(_FakeStructuredProvider):
+        _OVERALL_DEADLINE_SECONDS = 0.05  # instance override, keep the test fast
+
+        async def _call_tool(self, *, system, user, schema, tool_name):
+            self.call_count += 1
+            await asyncio.sleep(10)  # never actually reached
+            return {}
+
+    provider = _AlwaysSlowProvider()
+    start = time.monotonic()
+    action = await provider.decide_next_action(
+        problem_statement="check health", available_tool_ids=["database.get_health"],
+        transcript=[], turn_count=0,
+    )
+    elapsed = time.monotonic() - start
+    assert isinstance(action, AskClarification)
+    assert elapsed < 2.0  # nowhere near the real 10s sleep or a 20s default deadline

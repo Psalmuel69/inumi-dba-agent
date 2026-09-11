@@ -272,10 +272,43 @@ class StructuredLLMProvider(LLMProvider):
     # has already given up once — this just gives real, load-shedding-driven
     # outages (Gemini's own error text: "usually temporary") one more shot
     # rather than immediately telling the DBA to ask again themselves.
-    _CALL_RETRIES = 2
-    _CALL_RETRY_DELAY_SECONDS = 3.0
+    # Kept to exactly 1 (not more) because a provider with its own internal
+    # model-fallback (Gemini) already retries across several models inside
+    # a single `fn()` call — stacking a generous outer retry on top of that
+    # multiplies worst-case latency rather than adding real resilience; the
+    # actual latency ceiling for one decision is `_OVERALL_DEADLINE_SECONDS`
+    # below, not this count.
+    _CALL_RETRIES = 1
+    _CALL_RETRY_DELAY_SECONDS = 1.0
+
+    # A hard ceiling on ONE decide_next_action/extract_intent call, no
+    # matter how many providers/models/retries it takes internally to get
+    # there. Verified live this was missing entirely: several timeouts and
+    # retry layers each individually looked reasonable, but nothing bounded
+    # their *product* — a real investigation once ran for minutes waiting
+    # on a single decision. This is the actual production guarantee: "the
+    # agent is never worse than X seconds late to tell you it's stuck",
+    # not any individual component's own timeout.
+    _OVERALL_DEADLINE_SECONDS = 20.0
 
     async def _call_with_retry(self, fn: Callable[[], Awaitable[Any]], *, what: str) -> Any:
+        try:
+            return await asyncio.wait_for(
+                self._call_with_retry_unbounded(fn, what=what), timeout=self._OVERALL_DEADLINE_SECONDS
+            )
+        except TimeoutError as exc:
+            logger.warning(
+                "llm_call_deadline_exceeded",
+                provider=self.provider_name,
+                model=self.model,
+                what=what,
+                deadline_seconds=self._OVERALL_DEADLINE_SECONDS,
+            )
+            raise TimeoutError(
+                f"{what} did not complete within {self._OVERALL_DEADLINE_SECONDS}s"
+            ) from exc
+
+    async def _call_with_retry_unbounded(self, fn: Callable[[], Awaitable[Any]], *, what: str) -> Any:
         last_exc: Exception | None = None
         for attempt in range(self._CALL_RETRIES + 1):
             try:

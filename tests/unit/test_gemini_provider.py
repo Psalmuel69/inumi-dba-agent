@@ -145,15 +145,42 @@ async def test_a_request_specific_error_is_never_treated_as_model_unavailability
 
 @pytest.mark.asyncio
 async def test_raises_once_every_fallback_model_is_also_exhausted():
+    """With every model actually cooled down, the fallback chain itself has
+    nowhere left to go and gives up immediately regardless of the switch
+    cap below."""
     provider = GeminiLLMProvider("fake-key", _MODEL_FALLBACK_CHAIN[0])
+    now = time.monotonic()
+    for model in _MODEL_FALLBACK_CHAIN:
+        provider._unavailable_until[model] = now + 300  # all on a long cooldown
 
     async def call():
         raise RuntimeError("429 RESOURCE_EXHAUSTED: quota exceeded, model: " + provider.model)
 
     with pytest.raises(RuntimeError, match="429"):
         await provider._with_model_fallback(call)
-    # Every model in the chain got a cooldown recorded, not a permanent ban.
-    assert set(provider._unavailable_until) == set(_MODEL_FALLBACK_CHAIN)
+    # No candidate was ever eligible, so not even one switch happened.
+    assert provider.model == _MODEL_FALLBACK_CHAIN[0]
+
+
+@pytest.mark.asyncio
+async def test_fallback_stops_after_max_switches_even_with_models_still_eligible():
+    """Latency guarantee, not just resilience: a systemic outage that fails
+    every model in turn must not cascade through the whole chain — each
+    attempt costs a full _REQUEST_TIMEOUT_SECONDS, and unbounded cascading
+    was exactly what let a single decision run for minutes live."""
+    provider = GeminiLLMProvider("fake-key", _MODEL_FALLBACK_CHAIN[0])
+    attempts: list[str] = []
+
+    async def call():
+        attempts.append(provider.model)
+        raise RuntimeError("429 RESOURCE_EXHAUSTED: quota exceeded, model: " + provider.model)
+
+    with pytest.raises(RuntimeError, match="429"):
+        await provider._with_model_fallback(call)
+    # 1 initial attempt + _MAX_FALLBACK_SWITCHES retries on other models —
+    # never the full chain, even though every other model was eligible.
+    assert len(attempts) == provider._MAX_FALLBACK_SWITCHES + 1
+    assert len(set(attempts)) == provider._MAX_FALLBACK_SWITCHES + 1  # each a distinct model
 
 
 def test_cooldown_seconds_uses_the_apis_own_retry_delay_when_present():

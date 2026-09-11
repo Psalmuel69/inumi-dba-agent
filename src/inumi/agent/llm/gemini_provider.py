@@ -155,15 +155,24 @@ class GeminiLLMProvider(StructuredLLMProvider):
 
     # How long a single generateContent call may run before it's treated as
     # this model not responding (see _is_model_unavailable_error) and
-    # retried against a different one. Chosen to comfortably cover a
-    # genuinely slow but working response (this codebase's live testing has
-    # seen many finish well under a minute) while still bounding the worst
-    # case — the channels->agent hop itself only allows 300s total, and a
-    # single hang with no timeout consumed the entire budget by itself with
-    # nothing left to fall back into. A class attribute (like
-    # StructuredLLMProvider._CALL_RETRY_DELAY_SECONDS) so tests can override
-    # it per instance without a real 45s wait.
-    _REQUEST_TIMEOUT_SECONDS = 45.0
+    # retried against a different one. Deliberately tight — a working call
+    # in this codebase's live testing has consistently finished in single-
+    # digit seconds; this exists to fail fast on a hang, not to patiently
+    # wait one out. It also has to leave real room under
+    # StructuredLLMProvider._OVERALL_DEADLINE_SECONDS (20s), which bounds
+    # the *whole* decision regardless of how many models get tried — a
+    # generous per-call timeout just eats that budget on the first model
+    # and leaves none for a fallback to even attempt. A class attribute
+    # (like _CALL_RETRY_DELAY_SECONDS) so tests can override it.
+    _REQUEST_TIMEOUT_SECONDS = 8.0
+
+    # How many *different* models this call will try before giving up, even
+    # if more are technically off cooldown — bounds worst-case latency to a
+    # small, predictable multiple of _REQUEST_TIMEOUT_SECONDS instead of
+    # potentially cascading through the entire fallback chain (verified
+    # live: a systemic outage can make several models fail in a row, each
+    # consuming its own timeout).
+    _MAX_FALLBACK_SWITCHES = 2
 
     def __init__(self, api_key: str, model: str = ""):
         super().__init__(model or _DEFAULT_MODEL)
@@ -195,7 +204,11 @@ class GeminiLLMProvider(StructuredLLMProvider):
         fallback chain and retry the SAME request, rather than surfacing the
         error or waiting out a same-model retry that may not clear in time —
         both a daily quota and demand-based shedding are a property of
-        (project, model), not of the request itself."""
+        (project, model), not of the request itself. Bounded by
+        _MAX_FALLBACK_SWITCHES — see that attribute's docstring for why an
+        unbounded cascade is itself a latency problem, not just a resilience
+        feature."""
+        switches = 0
         while True:
             try:
                 return await asyncio.wait_for(call(), timeout=self._REQUEST_TIMEOUT_SECONDS)
@@ -204,14 +217,18 @@ class GeminiLLMProvider(StructuredLLMProvider):
                     raise
                 cooldown = _cooldown_seconds(exc)
                 self._unavailable_until[self.model] = time.monotonic() + cooldown
+                if switches >= self._MAX_FALLBACK_SWITCHES:
+                    raise
                 next_model = self._next_fallback_model()
                 if next_model is None:
                     raise
+                switches += 1
                 logger.warning(
                     "gemini_model_unavailable_switching",
                     from_model=self.model,
                     to_model=next_model,
                     cooldown_seconds=cooldown,
+                    switch_number=switches,
                 )
                 self.model = next_model
 
