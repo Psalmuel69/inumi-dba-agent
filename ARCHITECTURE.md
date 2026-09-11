@@ -78,7 +78,16 @@ not a class boundary a bug could accidentally erase.
 
 `orchestrator.py::_run_investigation_loop` bounds every investigation to
 `_MAX_INVESTIGATION_TURNS` (6) steps so a confused model can't loop forever.
-Within that bound, a step is decided one of two ways:
+It also bounds a narrower failure mode independently of the turn cap:
+verified live, a model can get stuck restating the same finding as one
+`record_observation` after another instead of ever calling `conclude`, even
+once a plain, complete answer ("no replica configured") was already clear.
+`_MAX_CONSECUTIVE_RECORD_OBSERVATIONS` (2, reset by any other action) stops
+asking once that pattern is clearly stuck, using whatever evidence already
+exists rather than waiting out the rest of the turn budget on further calls
+that were never going to conclude either.
+
+Within the turn/observation bounds, a step is decided one of two ways:
 
 - **Freeform** (the default, and the only mode before playbooks existed):
   every turn calls `LLMProvider.decide_next_action` — the model picks the
