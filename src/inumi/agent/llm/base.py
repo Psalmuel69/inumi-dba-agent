@@ -109,6 +109,7 @@ _FLAT_ACTION_SCHEMA: dict[str, Any] = {
 
 class LLMProvider(ABC):
     provider_name: str = "unknown"
+    model: str
 
     def __init__(self, model: str):
         self.model = model
