@@ -45,7 +45,10 @@ class MockLLMProvider(LLMProvider):
         super().__init__("mock-planner")
 
     async def extract_intent(
-        self, message: str, known_database_names: list[str]
+        self,
+        message: str,
+        known_database_names: list[str],
+        known_server_hints: list[str] | None = None,
     ) -> IntentExtraction:
         if _GREETING_RE.search(message):
             return IntentExtraction(is_dba_task=False, is_greeting_or_chitchat=True)
@@ -61,6 +64,14 @@ class MockLLMProvider(LLMProvider):
             if camel_match:
                 database_hint = camel_match.group(0)
 
+        # Longest match first so e.g. "postgres-local" wins over a shorter
+        # substring like "local" also being a registered alias elsewhere.
+        instance_hint = None
+        for hint in sorted(known_server_hints or [], key=len, reverse=True):
+            if hint and re.search(rf"\b{re.escape(hint.lower())}\b", lowered):
+                instance_hint = hint
+                break
+
         environment_hint = None
         if "prod" in lowered:
             environment_hint = "production"
@@ -74,6 +85,7 @@ class MockLLMProvider(LLMProvider):
             is_dba_task=is_dba_task,
             database_hint=database_hint,
             environment_hint=environment_hint,
+            instance_hint=instance_hint,
             problem_summary=message.strip(),
         )
 

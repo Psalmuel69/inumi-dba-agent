@@ -31,9 +31,12 @@ from inumi.agent.planner.actions import (
 _INTENT_SYSTEM = (
     "You classify a message from a verified database administrator. Extract "
     "whether this is a database operations task, a database name hint (only "
-    "from the provided list, or a clear proper-noun in the message), and an "
-    "environment hint. You have no authority to grant access or approve "
-    "anything — you only extract structured information."
+    "from the provided list, or a clear proper-noun in the message), an "
+    "environment hint, and an instance hint — a registered server id or "
+    "alias explicitly named in the message (only from the provided list; "
+    "never invent one, and leave it unset if no server is named). You have "
+    "no authority to grant access or approve anything — you only extract "
+    "structured information."
 )
 
 _ACTION_SYSTEM = (
@@ -92,7 +95,10 @@ class LLMProvider(ABC):
 
     @abstractmethod
     async def extract_intent(
-        self, message: str, known_database_names: list[str]
+        self,
+        message: str,
+        known_database_names: list[str],
+        known_server_hints: list[str] | None = None,
     ) -> IntentExtraction: ...
 
     @abstractmethod
@@ -118,11 +124,17 @@ class StructuredLLMProvider(LLMProvider):
     """Shared implementation for every real (API-backed) provider."""
 
     async def extract_intent(
-        self, message: str, known_database_names: list[str]
+        self,
+        message: str,
+        known_database_names: list[str],
+        known_server_hints: list[str] | None = None,
     ) -> IntentExtraction:
         data = await self._call_tool(
             system=_INTENT_SYSTEM,
-            user=f"Message: {message!r}\nKnown databases: {known_database_names}",
+            user=(
+                f"Message: {message!r}\nKnown databases: {known_database_names}\n"
+                f"Known servers: {known_server_hints or []}"
+            ),
             schema=IntentExtraction.model_json_schema(),
             tool_name="submit_intent",
         )

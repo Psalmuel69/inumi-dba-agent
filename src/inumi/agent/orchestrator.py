@@ -51,18 +51,31 @@ class AgentOrchestrator:
             provider=state.llm_provider, model=state.llm_model
         )
 
+    async def _list_servers_cached(self) -> list[dict]:
+        try:
+            return await self._tool_client.list_servers()
+        except Exception:  # noqa: BLE001
+            return []
+
     async def _known_database_names(self) -> list[str]:
         """Every discovered database name — helps the planner resolve
         "check CoreBanking" to a real target. Server ids/aliases are NOT
-        included (they're resolved separately, from `instance`)."""
-        try:
-            servers = await self._tool_client.list_servers()
-        except Exception:  # noqa: BLE001
-            return []
+        included (they're resolved separately, via `instance_hint`)."""
         names: list[str] = []
-        for s in servers:
+        for s in await self._list_servers_cached():
             names.extend((s.get("catalog") or {}).get("databases", []))
         return [n for n in dict.fromkeys(names) if n]
+
+    async def _known_server_hints(self) -> list[str]:
+        """Every registered server id + alias — lets the planner recognize
+        "on postgres-local" and narrow an otherwise-ambiguous target. The
+        Gateway still independently re-resolves and validates whatever
+        comes back; this only saves the DBA a disambiguation round-trip."""
+        hints: list[str] = []
+        for s in await self._list_servers_cached():
+            hints.append(s["id"])
+            hints.extend(s.get("aliases") or [])
+        return [h for h in dict.fromkeys(hints) if h]
 
     async def handle_message(
         self,
@@ -84,7 +97,9 @@ class AgentOrchestrator:
 
         llm = self._llm_for(state)
         intent = await llm.extract_intent(
-            message, known_database_names=await self._known_database_names()
+            message,
+            known_database_names=await self._known_database_names(),
+            known_server_hints=await self._known_server_hints(),
         )
         if intent.is_greeting_or_chitchat:
             return AgentReply(text=_HELP_TEXT)
@@ -104,6 +119,8 @@ class AgentOrchestrator:
                 state.database_context["environment"] = intent.environment_hint
             if intent.database_hint:
                 state.database_context["database"] = intent.database_hint
+            if intent.instance_hint:
+                state.database_context["instance"] = intent.instance_hint
         else:
             investigation = state.investigation
 

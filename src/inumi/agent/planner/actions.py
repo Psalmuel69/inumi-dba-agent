@@ -61,5 +61,11 @@ class IntentExtraction(BaseModel):
     is_greeting_or_chitchat: bool = False
     database_hint: str | None = None
     environment_hint: str | None = None
+    # A registered server id/alias explicitly named in the message (e.g. "on
+    # postgres-local"). Only ever a value from the known-servers list handed
+    # to the extractor — never invented — and only narrows a server the
+    # Gateway would otherwise consider ambiguous; it carries no authority of
+    # its own (the Gateway independently re-resolves and validates it).
+    instance_hint: str | None = None
     problem_summary: str = ""
 
