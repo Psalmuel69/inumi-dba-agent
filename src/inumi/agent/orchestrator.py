@@ -95,6 +95,25 @@ def _ungrounded_identifiers(conclusion: Conclude, investigation) -> list[str]:
     return ungrounded
 
 
+def _affected_summary(result: dict | None) -> str:
+    """A write tool's actual outcome (`execution.ExecutionResult.affected`
+    — e.g. `{"terminated": False, "session_id": "13400"}` for kill_session)
+    is real information the Gateway already returns, but the response's own
+    `message` is a hardcoded "Completed." for every EXECUTED call
+    regardless of what `affected` actually says (see
+    `gateway.domain.tool_call_handler`) — a DBA reading only "Completed."
+    has no way to tell a kill that returned `terminated: false` (nothing
+    was actually there to kill — see the double kill_session call this
+    surfaced live: a session already gone by the second attempt) from one
+    that actually terminated something. Read tools never populate
+    `affected` (they populate `rows`/`row_count` instead), so this is a
+    no-op for them — only ever adds detail for a write."""
+    affected = (result or {}).get("affected")
+    if not affected:
+        return ""
+    return " (" + ", ".join(f"{k}={v}" for k, v in affected.items()) + ")"
+
+
 _HELP_TEXT = (
     "I'm Inumi, your AI DBA assistant. I can investigate database health, "
     "performance, blocking, deadlocks, replication, backups, and more, and — "
@@ -499,7 +518,8 @@ class AgentOrchestrator:
         investigation.transcript.append(
             {"tool_id": action.tool_id, "reason": action.reason, "result": response.result or {}}
         )
-        investigation.evidence.append(f"{action.tool_id}: {response.message}")
+        evidence_line = f"{action.tool_id}: {response.message}{_affected_summary(response.result)}"
+        investigation.evidence.append(evidence_line)
         investigation.actions.append({"tool_id": action.tool_id, "result": response.result})
         return None
 

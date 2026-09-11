@@ -129,6 +129,48 @@ async def test_a_failed_status_is_logged_as_a_failed_step_not_mislabeled_as_exec
     assert "adapter connection timeout" in investigation.evidence[-1]
 
 
+@pytest.mark.asyncio
+async def test_a_write_tools_actual_outcome_is_surfaced_not_just_a_generic_completed():
+    """Reproduces a live finding: the Gateway's `message` on EXECUTED is a
+    hardcoded "Completed." regardless of what actually happened — a real
+    kill_session call against a session that was already gone still says
+    "Completed.", with the real answer (`terminated: False`) sitting
+    unseen in `result.affected`. A DBA reading only the evidence line had
+    no way to tell a kill that actually terminated something from one that
+    found nothing there. Read tools never populate `affected` (they use
+    `rows`/`row_count` instead), so this must be a no-op for them."""
+    response = ToolCallResponse(
+        status=ToolCallStatus.EXECUTED,
+        message="Completed.",
+        result={"affected": {"terminated": False, "session_id": "13400"}},
+    )
+    client = _FakeToolClient(response)
+    orchestrator = _orchestrator(client)
+    state, investigation = _state_and_investigation()
+
+    await orchestrator._submit_and_relay(state, investigation, _action(), "dev", "dba_l2@example.com")
+
+    assert investigation.evidence[-1] == (
+        "database.update_statistics: Completed. (terminated=False, session_id=13400)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_read_tools_evidence_line_is_unchanged_by_the_affected_summary():
+    response = ToolCallResponse(
+        status=ToolCallStatus.EXECUTED,
+        message="Completed.",
+        result={"rows": [{"a": 1}], "row_count": 1},
+    )
+    client = _FakeToolClient(response)
+    orchestrator = _orchestrator(client)
+    state, investigation = _state_and_investigation()
+
+    await orchestrator._submit_and_relay(state, investigation, _action(), "dev", "dba_l2@example.com")
+
+    assert investigation.evidence[-1] == "database.update_statistics: Completed."
+
+
 class _TimingOutToolClient:
     """Reproduces the live finding: the Agent's own HTTP call to the Gateway
     can time out (httpcore.ReadTimeout) before any ToolCallResponse ever
