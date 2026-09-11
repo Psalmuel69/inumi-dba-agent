@@ -28,6 +28,18 @@ from inumi.common.models.tool import ToolCallRequest, ToolCallStatus
 
 _MAX_INVESTIGATION_TURNS = 6
 
+# A DENIED response whose failure_code means "the proposed call was shaped
+# wrong" (not "this is not allowed") — the LLM can plausibly fix it given
+# the specific reason, verified live: a real model that omitted a target
+# field self-corrected immediately once the Gateway's exact error was fed
+# back as an observation. Anything else (UNAUTHORIZED, POLICY_DENIED,
+# TOOL_NOT_AVAILABLE, an approval-state problem, RATE_LIMITED, ...) is a
+# permissions/policy fact no retry with different arguments changes, so
+# those still end the turn immediately rather than burn the turn budget
+# (and, with a real provider, API quota) retrying something that can only
+# ever fail the same way.
+_SELF_CORRECTABLE_DENIAL_CODES = {"INVALID_ARGUMENTS", "INVALID_TARGET", "TOOL_NOT_FOUND"}
+
 _HELP_TEXT = (
     "I'm Inumi, your AI DBA assistant. I can investigate database health, "
     "performance, blocking, deadlocks, replication, backups, and more, and — "
@@ -249,6 +261,26 @@ class AgentOrchestrator:
             )
 
         if response.status == ToolCallStatus.DENIED:
+            correctable = (
+                response.failure_code in _SELF_CORRECTABLE_DENIAL_CODES
+                and investigation.turn_count < _MAX_INVESTIGATION_TURNS
+            )
+            if correctable:
+                # Feed the exact rejection back as an observation and let
+                # the loop continue — the LLM gets a concrete next chance to
+                # fix the specific problem instead of the whole turn ending
+                # on a malformed-but-fixable call.
+                investigation.transcript.append(
+                    {
+                        "tool_id": action.tool_id,
+                        "reason": action.reason,
+                        "result": {"error": response.message, "failure_code": response.failure_code},
+                    }
+                )
+                investigation.evidence.append(
+                    f"{action.tool_id} was rejected ({response.failure_code}): {response.message}"
+                )
+                return None
             return AgentReply(
                 text=f"I can't do that: {response.message}",
                 status="denied",
