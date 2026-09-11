@@ -110,6 +110,21 @@ the per-decision latency ceiling below. A playbook only ever pre-selects
 write, still goes through the normal LLM-proposes / Gateway-approves flow
 exactly like a freeform investigation's.
 
+**Grounding the conclusion.** The Pydantic/discriminated-union validation
+that gates every `AgentAction` (`agent.planner.actions.agent_action_adapter`)
+only ever checks an action's *shape* — a `Conclude`'s `summary`/
+`likely_root_cause`/`recommendation` are free text with nothing stopping the
+model from stating something that never happened. Verified live: a real
+conclusion named three CamelCase-looking table names that don't exist in
+the database at all, instead of the real ones its own tool call had
+actually returned. `orchestrator._ungrounded_identifiers` checks any such
+name against everything the investigation actually gathered (transcript,
+evidence, and the DBA's own problem statement — so the DBA's own
+terminology is never mistaken for a hallucination) and, on a miss, rejects
+the conclusion and gives the model one more bounded try — the same
+self-correction pattern used for a fixable Gateway denial above, capped by
+the same turn count as everything else.
+
 ## Latency ceiling on a single LLM decision
 
 Each layer of `StructuredLLMProvider`'s resilience (per-call timeout →

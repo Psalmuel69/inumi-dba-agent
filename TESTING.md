@@ -27,7 +27,7 @@ make live-llm-test    # opt-in: hits real LLM APIs (needs a key)
 ./.venv/Scripts/python.exe -m pytest tests -q   # everything
 ```
 
-213 tests pass (+ 24 opt-in skipped) as of this writing, with zero real
+220 tests pass (+ 24 opt-in skipped) as of this writing, with zero real
 database, LLM, Slack/Teams, or secrets-manager dependency.
 
 ## Deterministic execution without "mock mode"
