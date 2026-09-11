@@ -75,9 +75,9 @@ all — see `tests/security/test_security_suite.py::test_disabled_tool_returns_t
 1. Add a Pydantic argument model to `common/models/tool_arguments.py`.
 2. Add a `ToolDefinition` entry (and its `ARGUMENT_MODELS` mapping) in
    `gateway/domain/tool_catalog.py`.
-3. Implement the corresponding method on `DatabaseAdapter` (and both
-   `SQLServerAdapter`/`PostgreSQLAdapter`, or raise `NotImplementedError`
-   with a clear message if it's engine-specific).
+3. Implement the corresponding method on `DatabaseAdapter` (and each of
+   `SQLServerAdapter`/`PostgreSQLAdapter`/`MySQLAdapter`, or raise
+   `NotImplementedError` with a clear message if it's engine-specific).
 4. Add dispatch wiring in `execution/service.py`'s `_READ_METHODS`/
    `_WRITE_METHODS` (or the restricted-tool dispatch table).
 5. Add policy entries for it in `config/policy.yaml` for every environment

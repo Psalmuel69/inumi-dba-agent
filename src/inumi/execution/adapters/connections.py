@@ -6,7 +6,7 @@ statement/command timeout, lock timeout (Postgres), transaction handling,
 cancellation, connection pooling, and a restricted, diagnostics-oriented
 account.
 
-Driver packages (`pyodbc`, `psycopg`) are optional extras
+Driver packages (`pyodbc`, `psycopg`, `asyncmy`) are optional extras
 (`pip install -e ".[db-drivers]"`) — this module imports them lazily so the
 rest of the platform (and all unit tests, which use `FakeQueryExecutor`
 instead) works without them installed.
@@ -83,6 +83,78 @@ class PostgreSQLQueryExecutor:
         await self._set_timeouts(timeout)
         async with self._conn.cursor() as cur:
             await cur.execute(sql, params or {})
+            return {"rowcount": cur.rowcount}
+
+
+class MySQLQueryExecutor:
+    """Wraps an asyncmy connection (MySQL + MariaDB).
+
+    asyncmy is natively async (no worker thread needed) and uses the
+    PyMySQL `%(name)s` / `%s` paramstyle, which is exactly what both
+    adapters already emit. A per-session statement timeout is set where the
+    engine supports it (`max_execution_time` on MySQL, `max_statement_time`
+    on MariaDB); the diagnostic role is provisioned outside this codebase
+    and supplied via `CredentialProvider`.
+    """
+
+    def __init__(self, credentials: DatabaseCredentials):
+        self._credentials = credentials
+        # Typed as Any so this module stays importable without `asyncmy`.
+        self._conn: Any = None
+
+    async def connect(self) -> None:
+        import asyncmy  # optional extra; see module docstring
+
+        opts = self._credentials.options or {}
+        kwargs: dict[str, Any] = dict(
+            host=self._credentials.host,
+            port=self._credentials.port,
+            user=self._credentials.username,
+            password=self._credentials.password.get_secret_value(),
+            database=self._credentials.database,
+            autocommit=True,
+            connect_timeout=10,
+        )
+        if opts.get("ssl"):
+            kwargs["ssl"] = opts["ssl"]
+        self._conn = await asyncmy.connect(**kwargs)
+
+    async def close(self) -> None:
+        conn = self._conn
+        if conn is not None:
+            self._conn = None
+            conn.close()
+
+    async def _set_timeout(self, timeout: int) -> None:
+        # MySQL: milliseconds, SELECT-only. MariaDB: seconds, all statements.
+        # Neither variable exists on the other engine, so try each and
+        # ignore an "unknown system variable" error.
+        for stmt in (
+            f"SET SESSION max_execution_time = {int(timeout) * 1000}",
+            f"SET SESSION max_statement_time = {int(timeout)}",
+        ):
+            try:
+                async with self._conn.cursor() as cur:
+                    await cur.execute(stmt)
+            except Exception:  # noqa: BLE001 — variable not supported on this engine
+                continue
+
+    async def fetch_all(
+        self, sql: str, params: dict[str, Any] | None = None, *, timeout: int = 30
+    ) -> list[dict[str, Any]]:
+        from asyncmy.cursors import DictCursor
+
+        await self._set_timeout(timeout)
+        async with self._conn.cursor(cursor=DictCursor) as cur:
+            await cur.execute(sql, params or None)
+            return list(await cur.fetchall())
+
+    async def execute(
+        self, sql: str, params: dict[str, Any] | None = None, *, timeout: int = 30
+    ) -> dict[str, Any]:
+        await self._set_timeout(timeout)
+        async with self._conn.cursor() as cur:
+            await cur.execute(sql, params or None)
             return {"rowcount": cur.rowcount}
 
 

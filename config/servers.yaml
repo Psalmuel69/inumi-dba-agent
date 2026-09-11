@@ -121,3 +121,35 @@ servers:
     maintenance_window: { timezone: Africa/Lagos, start: "01:00", end: "04:00" }
     allowed_roles: [DBA_L2, DBA_L3]
     status: active
+
+  - id: mysql-dev-01
+    platform: mysql
+    environment: development
+    host: localhost
+    port: 3306
+    aliases: [dev-mysql]
+    organization: platform-eng
+    region: local
+    criticality: low
+    classification: internal
+    owner: platform-eng
+    support_team: platform-eng
+    maintenance_window: { timezone: Africa/Lagos, start: "00:00", end: "23:59" }
+    allowed_roles: [DBA_L1, DBA_L2, DBA_L3, DBA_MANAGER]
+    status: active
+
+  - id: mariadb-dev-01
+    platform: mariadb
+    environment: development
+    host: localhost
+    port: 3307
+    aliases: [dev-mariadb]
+    organization: platform-eng
+    region: local
+    criticality: low
+    classification: internal
+    owner: platform-eng
+    support_team: platform-eng
+    maintenance_window: { timezone: Africa/Lagos, start: "00:00", end: "23:59" }
+    allowed_roles: [DBA_L1, DBA_L2, DBA_L3, DBA_MANAGER]
+    status: active

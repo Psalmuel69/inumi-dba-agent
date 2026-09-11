@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from inumi.execution.adapters.mysql import MySQLAdapter
 from inumi.execution.adapters.postgresql import PostgreSQLAdapter
 from inumi.execution.adapters.sqlserver import SQLServerAdapter
 from tests.fakes import FakeQueryExecutor
@@ -80,3 +81,69 @@ async def test_restart_instance_is_not_a_sql_statement_on_either_adapter():
     mssql = SQLServerAdapter(FakeQueryExecutor(), "CoreBanking")
     with pytest.raises(NotImplementedError):
         await mssql.failover("corebanking-prd-02")
+
+    mysql = MySQLAdapter(FakeQueryExecutor(), "app_db")
+    with pytest.raises(NotImplementedError):
+        await mysql.restart_instance()
+
+
+@pytest.mark.asyncio
+async def test_mysql_blocking_uses_data_lock_waits_and_innodb_trx():
+    executor = FakeQueryExecutor(canned_rows=[{"blocked_session_id": 42, "blocking_session_id": 7}])
+    adapter = MySQLAdapter(executor, "app_db")
+    rows = await adapter.blocking()
+    assert rows == [{"blocked_session_id": 42, "blocking_session_id": 7}]
+    assert "performance_schema.data_lock_waits" in executor.executed_sql[0]
+    assert "information_schema.INNODB_TRX" in executor.executed_sql[0]
+
+
+@pytest.mark.asyncio
+async def test_mysql_kill_session_issues_kill_statement():
+    executor = FakeQueryExecutor()
+    adapter = MySQLAdapter(executor, "app_db")
+    await adapter.kill_session("9182", "blocking chain")
+    assert executor.executed_sql[0] == "KILL 9182"
+
+
+@pytest.mark.asyncio
+async def test_mysql_kill_session_rejects_non_numeric_session_id():
+    executor = FakeQueryExecutor()
+    adapter = MySQLAdapter(executor, "app_db")
+    with pytest.raises(ValueError):
+        await adapter.kill_session("9182; DROP TABLE x", "attempted injection")
+
+
+@pytest.mark.asyncio
+async def test_mysql_create_index_never_receives_raw_sql_from_caller():
+    executor = FakeQueryExecutor()
+    adapter = MySQLAdapter(executor, "app_db")
+    await adapter.create_index("app_db", "orders", ["created_at"], "IX_orders_created", False)
+    sql = executor.executed_sql[0]
+    assert "CREATE INDEX" in sql
+    assert "`IX_orders_created`" in sql
+    assert "`created_at`" in sql
+
+
+@pytest.mark.asyncio
+async def test_mysql_deadlocks_extracts_the_latest_detected_section():
+    status_text = (
+        "=====================================\n"
+        "LATEST DETECTED DEADLOCK\n"
+        "------------------------\n"
+        "*** (1) TRANSACTION:\nsome transaction detail\n"
+        "------------\n"
+        "WE ROLL BACK TRANSACTION (1)\n"
+        "-----------------------------------------\n"
+        "END OF INNODB MONITOR OUTPUT\n"
+    )
+    executor = FakeQueryExecutor(canned_rows=[{"Type": "InnoDB", "Name": "", "Status": status_text}])
+    adapter = MySQLAdapter(executor, "app_db")
+    rows = await adapter.deadlocks()
+    assert "some transaction detail" in rows[0]["latest_detected_deadlock"]
+
+
+@pytest.mark.asyncio
+async def test_mysql_backups_has_no_builtin_catalog():
+    adapter = MySQLAdapter(FakeQueryExecutor(), "app_db")
+    with pytest.raises(NotImplementedError):
+        await adapter.backups()

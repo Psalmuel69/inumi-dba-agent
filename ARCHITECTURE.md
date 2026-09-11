@@ -18,7 +18,8 @@ DBA CONTROL GATEWAY (gateway/)
 Execution Service (execution/)
  │  the ONLY component with database credentials/network access
  ├─→ SQLServerAdapter
- └─→ PostgreSQLAdapter
+ ├─→ PostgreSQLAdapter
+ └─→ MySQLAdapter (MySQL + MariaDB)
         │
         ▼
      DATABASE
@@ -107,7 +108,10 @@ src/inumi/
 
   execution/
     adapters/           # DatabaseAdapter interface, SQLServerAdapter,
-                        # PostgreSQLAdapter, connections (real drivers)
+                        # PostgreSQLAdapter, MySQLAdapter (MySQL + MariaDB),
+                        # connections (real drivers)
+    discovery/           # ServerDiscoverer per platform (catalog/DMV/stats
+                        # views only, never table data) + run_discovery
     credentials/        # CredentialProvider (local_dev/Vault/AWS/Azure/GCP)
     service.py           # dispatcher: ExecutionRequest -> adapter method
     api/                 # FastAPI app
@@ -127,7 +131,7 @@ src/inumi/
     api/                   # FastAPI app: webhooks + /dev/chat mock channel
 ```
 
-## Adding a database engine (Oracle, MariaDB, ...)
+## Adding a database engine (Oracle, ...)
 
 1. Add the platform to `common.models.target.Platform`.
 2. Implement `execution.adapters.base.DatabaseAdapter` for it, using the

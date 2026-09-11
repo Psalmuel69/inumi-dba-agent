@@ -6,12 +6,15 @@ from inumi.common.models.catalog import ServerCatalog
 from inumi.common.models.target import Platform
 from inumi.execution.credentials.provider import DatabaseCredentials
 from inumi.execution.discovery.base import ServerDiscoverer
+from inumi.execution.discovery.mysql import MySQLDiscoverer
 from inumi.execution.discovery.postgresql import PostgreSQLDiscoverer
 from inumi.execution.discovery.sqlserver import SQLServerDiscoverer
 
 _DISCOVERERS: dict[Platform, type[ServerDiscoverer]] = {
     Platform.SQLSERVER: SQLServerDiscoverer,
     Platform.POSTGRESQL: PostgreSQLDiscoverer,
+    Platform.MYSQL: MySQLDiscoverer,
+    Platform.MARIADB: MySQLDiscoverer,
 }
 
 

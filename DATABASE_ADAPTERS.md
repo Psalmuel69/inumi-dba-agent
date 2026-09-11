@@ -39,17 +39,43 @@ usage), `pg_stat_replication`/`pg_stat_archiver` (replication/WAL), and
 raise `NotImplementedError` — that's Patroni/repmgr/cloud-managed-failover
 territory.
 
+## MySQL / MariaDB (`execution/adapters/mysql.py`)
+
+One `MySQLAdapter` for both engines — they share InnoDB, `information_schema`,
+and (MySQL 5.7+ / MariaDB 10.5+) `performance_schema`. Uses
+`information_schema.PROCESSLIST`/`.TABLES`/`.STATISTICS`/`.ROUTINES`,
+`performance_schema.data_lock_waits` + `information_schema.INNODB_TRX`
+(blocking), `performance_schema.events_statements_summary_by_digest` (top
+queries / query "plan" — MySQL/MariaDB cache no execution plan, so this
+returns the statement digest's aggregate profile instead), and
+`SHOW ENGINE INNODB STATUS` (deadlocks — InnoDB keeps only the latest one).
+Session termination uses `KILL [QUERY] <id>` with `session_id` cast to `int`
+first. `rebuild_index` has no single-index equivalent on these engines, so
+it does a null-rebuild `ALTER TABLE ... ENGINE=InnoDB` (rebuilds every index
+on the table — the result says so). `error_logs` uses
+`performance_schema.error_log`, which is MySQL-only (8.0.22+); on MariaDB
+that tool surfaces `EXECUTION_FAILED` since the error log there is a file,
+not a queryable table. `backups` has no built-in catalog on either engine
+and raises `NotImplementedError` (wire it to your backup tool, same as
+PostgreSQL's WAL-archiving-only `backups`). `restart_instance`/`failover`
+raise `NotImplementedError` for the same reason as the other adapters.
+
 ## Connections (`execution/adapters/connections.py`)
 
 `PostgreSQLQueryExecutor` wraps a native async `psycopg` (v3) connection,
 setting `statement_timeout`/`lock_timeout` per call (spec §48).
 `SQLServerQueryExecutor` wraps a synchronous `pyodbc` connection run via
 `asyncio.to_thread`, translating the adapters' `%(name)s`-style parameters
-to pyodbc's positional `?` placeholders.
+to pyodbc's positional `?` placeholders. `MySQLQueryExecutor` wraps a native
+async `asyncmy` connection (no worker thread needed) — it already speaks the
+`%(name)s` paramstyle the adapters emit, and sets a per-session statement
+timeout using whichever of `max_execution_time` (MySQL) / `max_statement_time`
+(MariaDB) the connected engine supports.
 
-`pyodbc` and `psycopg` are part of the base install. `pyodbc` also needs
-the platform ODBC driver at *runtime* (the `Dockerfile` installs Microsoft
-ODBC Driver 18); it is not needed to install the package or run the tests.
+`pyodbc`, `psycopg`, and `asyncmy` are part of the base install. `pyodbc`
+also needs the platform ODBC driver at *runtime* (the `Dockerfile` installs
+Microsoft ODBC Driver 18); none of the three are needed to install the
+package or run the (non-live) tests.
 
 ## The Execution Service always uses real connections
 
@@ -68,14 +94,13 @@ never in `src/`, so the shipped service has no fake-data path.
 Real adapter *query text* is covered against `FakeQueryExecutor` in
 `tests/unit/test_adapters.py`, and against live engines by the opt-in
 `tests/e2e/test_live_databases.py` (`docker compose up -d postgres-sample`,
-or `docker compose --profile mssql up -d mssql-sample`).
+or `docker compose --profile mssql|mysql|mariadb up -d ...-sample`).
 
-## Adding Oracle / MariaDB
+## Adding Oracle
 
 1. Add the platform to `common.models.target.Platform`.
-2. Implement a new `DatabaseAdapter` subclass using that engine's native
-   diagnostics (e.g., Oracle's `V$SESSION`/`V$LOCK`/AWR views, MariaDB's
-   `information_schema`/`performance_schema`).
+2. Implement a new `DatabaseAdapter` subclass using Oracle's native
+   diagnostics (`V$SESSION`/`V$LOCK`/AWR views).
 3. Implement a `QueryExecutor` for its native driver (or reuse an ODBC
    path).
 4. Implement a `ServerDiscoverer` (`execution/discovery/base.py`) that reads

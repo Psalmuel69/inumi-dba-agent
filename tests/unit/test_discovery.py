@@ -10,6 +10,7 @@ import pytest
 from inumi.common.models.catalog import DiscoveredDatabase, DiscoveredObject, ServerCatalog
 from inumi.common.models.target import Platform
 from inumi.execution.discovery.engine import _discoverer_for
+from inumi.execution.discovery.mysql import MySQLDiscoverer
 from inumi.execution.discovery.postgresql import PostgreSQLDiscoverer
 from inumi.execution.discovery.sqlserver import SQLServerDiscoverer, _quote
 
@@ -17,6 +18,8 @@ from inumi.execution.discovery.sqlserver import SQLServerDiscoverer, _quote
 def test_dispatch_picks_the_right_discoverer():
     assert _discoverer_for(Platform.SQLSERVER) is SQLServerDiscoverer
     assert _discoverer_for(Platform.POSTGRESQL) is PostgreSQLDiscoverer
+    assert _discoverer_for(Platform.MYSQL) is MySQLDiscoverer
+    assert _discoverer_for(Platform.MARIADB) is MySQLDiscoverer
 
 
 def test_dispatch_raises_for_an_unregistered_engine():

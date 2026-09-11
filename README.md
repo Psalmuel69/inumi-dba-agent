@@ -26,7 +26,7 @@ by prompting.
 | `channels`    | Slack + Microsoft Teams webhook adapters. Verifies signatures/tokens, resolves identity, forwards to `agent`. Never touches a database. |
 | `agent`       | The LLM-backed investigation/planning loop (Anthropic / OpenAI / Gemini / DeepSeek, DBA-selectable per conversation, or a deterministic offline planner). Proposes tool calls; has no DB credential and no authorization authority. |
 | `gateway`     | **The security boundary.** Tool registry, target validation, authorization, policy, risk, approval, data minimization, rate limiting, audit. |
-| `execution`   | The only service with database credentials/network access. Dispatches to `SQLServerAdapter`/`PostgreSQLAdapter`. |
+| `execution`   | The only service with database credentials/network access. Dispatches to `SQLServerAdapter`/`PostgreSQLAdapter`/`MySQLAdapter` (MySQL + MariaDB). |
 
 Supporting infrastructure: PostgreSQL (control-plane database), Redis
 (rate limiting in production).
@@ -106,12 +106,13 @@ make docker-up       # full stack via docker compose
 
 Phases 1–9 of the build (foundation → gateway → execution → read tools →
 agent → channels → approvals → controlled writes → restricted-tool
-framework) are implemented and covered by an automated test suite (116
-passing + 22 opt-in: unit, integration, and a dedicated security suite).
-The Execution Service uses real database connections; the Agent supports
-Anthropic, OpenAI, Gemini, and DeepSeek with per-conversation model
-selection. Oracle/MariaDB adapters, a real OIDC identity provider, and the
-real Vault/AWS/Azure/GCP secrets-manager SDK calls are structured for but
-not yet implemented — see the "Extending" / "Adding" sections in
-[DATABASE_ADAPTERS.md](DATABASE_ADAPTERS.md), [ARCHITECTURE.md](ARCHITECTURE.md),
-and [DEPLOYMENT.md](DEPLOYMENT.md).
+framework), server registration + discovery, and MySQL/MariaDB adapters are
+implemented and covered by an automated test suite (134 passing + 24
+opt-in: unit, integration, and a dedicated security suite). The Execution
+Service uses real database connections against SQL Server, PostgreSQL,
+MySQL, and MariaDB; the Agent supports Anthropic, OpenAI, Gemini, and
+DeepSeek with per-conversation model selection. An Oracle adapter, a real
+OIDC identity provider, and the real Vault/AWS/Azure/GCP secrets-manager SDK
+calls are structured for but not yet implemented — see the "Extending" /
+"Adding" sections in [DATABASE_ADAPTERS.md](DATABASE_ADAPTERS.md),
+[ARCHITECTURE.md](ARCHITECTURE.md), and [DEPLOYMENT.md](DEPLOYMENT.md).

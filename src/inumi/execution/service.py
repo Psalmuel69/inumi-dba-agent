@@ -29,6 +29,7 @@ from inumi.common.models.execution import ExecutionRequest, ExecutionResult
 from inumi.common.models.failures import FailureCode
 from inumi.common.models.target import Platform
 from inumi.execution.adapters.base import DatabaseAdapter, QueryExecutor
+from inumi.execution.adapters.mysql import MySQLAdapter
 from inumi.execution.adapters.postgresql import PostgreSQLAdapter
 from inumi.execution.adapters.sqlserver import SQLServerAdapter
 from inumi.execution.credentials.provider import CredentialProvider
@@ -76,9 +77,11 @@ def _adapter_class_for(platform: Platform) -> type[DatabaseAdapter]:
         return SQLServerAdapter
     if platform == Platform.POSTGRESQL:
         return PostgreSQLAdapter
+    if platform in (Platform.MYSQL, Platform.MARIADB):
+        return MySQLAdapter
     raise NotImplementedError(
         f"No adapter registered for platform '{platform.value}'. Adding a new engine "
-        "(e.g. Oracle, MariaDB) means implementing DatabaseAdapter and registering it "
+        "(e.g. Oracle) means implementing DatabaseAdapter and registering it "
         "here — the Agent/Gateway contract does not change."
     )
 
@@ -114,6 +117,10 @@ class ExecutionService:
             from inumi.execution.adapters.connections import SQLServerQueryExecutor
 
             executor: QueryExecutor = SQLServerQueryExecutor(creds)  # type: ignore[assignment]
+        elif request.platform in (Platform.MYSQL, Platform.MARIADB):
+            from inumi.execution.adapters.connections import MySQLQueryExecutor
+
+            executor = MySQLQueryExecutor(creds)  # type: ignore[assignment]
         else:
             from inumi.execution.adapters.connections import PostgreSQLQueryExecutor
 

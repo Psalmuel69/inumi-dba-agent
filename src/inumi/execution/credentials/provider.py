@@ -41,11 +41,10 @@ class CredentialProvider(ABC):
 
 
 class LocalDevCredentialProvider(CredentialProvider):
-    """Development-only provider. Reads `config/dev_credentials.yaml`, which
-    contains only fake, non-routable local credentials for the mock
-    execution mode — never used in production (see `SECRETS_PROVIDER` env
-    var and the Vault/AWS/Azure/GCP adapters below, which fail closed until
-    properly configured)."""
+    """Development-only provider. Reads `config/dev_credentials.yaml`, keyed
+    by server id (`config/servers.yaml`) — never used in production (see
+    `SECRETS_PROVIDER` env var and the Vault/AWS/Azure/GCP adapters below,
+    which fail closed until properly configured)."""
 
     def __init__(self, config_path: str | Path):
         raw = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}

@@ -31,8 +31,8 @@ services:
   # --- Sample "dummy" databases the agent can be pointed at ---------------
   # A ready-to-use PostgreSQL target so `docker compose up` gives a working
   # real-connection demo out of the box. Point config/dev_credentials.yaml's
-  # `postgres-prod-cluster-01` at host `postgres-sample` (from a container)
-  # or `localhost:5435` (from the host).
+  # `analytics-postgres-prod` entry at host `postgres-sample` (from a
+  # container) or `localhost:5435` (from the host).
   postgres-sample:
     image: postgres:16-alpine
     environment:
@@ -62,6 +62,44 @@ services:
       - "1433:1433"
     volumes:
       - ./scripts/seed_sqlserver_sample.sql:/seed/seed.sql:ro
+
+  # Opt-in. Start with:  docker compose --profile mysql up -d mysql-sample
+  mysql-sample:
+    profiles: ["mysql"]
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: change-me-root
+      MYSQL_DATABASE: sample_app
+      MYSQL_USER: inumi_diag
+      MYSQL_PASSWORD: change-me
+    ports:
+      - "3306:3306"
+    volumes:
+      - ./scripts/seed_mysql_sample.sql:/docker-entrypoint-initdb.d/seed.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-pchange-me-root"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Opt-in. Start with:  docker compose --profile mariadb up -d mariadb-sample
+  mariadb-sample:
+    profiles: ["mariadb"]
+    image: mariadb:11
+    environment:
+      MARIADB_ROOT_PASSWORD: change-me-root
+      MARIADB_DATABASE: sample_app
+      MARIADB_USER: inumi_diag
+      MARIADB_PASSWORD: change-me
+    ports:
+      - "3307:3306"
+    volumes:
+      - ./scripts/seed_mysql_sample.sql:/docker-entrypoint-initdb.d/seed.sql:ro
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   # --- Application services ----------------------------------------------
   migrate:
