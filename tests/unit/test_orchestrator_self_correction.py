@@ -106,3 +106,24 @@ async def test_a_self_correctable_denial_does_not_loop_past_the_turn_budget():
 
     assert reply is not None
     assert reply.status == "denied"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_status_is_logged_as_a_failed_step_not_mislabeled_as_executed():
+    """FAILED (an adapter-level failure — spec §8's execution layer, not a
+    Gateway policy decision) was previously unhandled here and fell through
+    to the EXECUTED branch, logging a failure as if it had succeeded. Playbooks
+    make this more likely to surface (they proactively call diagnostics a
+    given engine/topology may not implement) — must be recorded plainly and
+    the investigation must still be able to continue."""
+    response = ToolCallResponse(status=ToolCallStatus.FAILED, message="adapter connection timeout")
+    client = _FakeToolClient(response)
+    orchestrator = _orchestrator(client)
+    state, investigation = _state_and_investigation()
+
+    reply = await orchestrator._submit_and_relay(state, investigation, _action(), "dev", "dba_l2@example.com")
+
+    assert reply is None  # the loop continues — a single failed diagnostic doesn't end the investigation
+    assert investigation.transcript[-1]["result"]["error"] == "adapter connection timeout"
+    assert "failed" in investigation.evidence[-1].lower()
+    assert "adapter connection timeout" in investigation.evidence[-1]

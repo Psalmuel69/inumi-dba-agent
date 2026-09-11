@@ -40,6 +40,14 @@ class InvestigationState:
     actions: list[dict[str, Any]] = dataclasses.field(default_factory=list)
     transcript: list[dict[str, Any]] = dataclasses.field(default_factory=list)
     turn_count: int = 0
+    # Set once, when the investigation starts, from a deterministic keyword
+    # match on the problem text (see agent.playbooks.library.match_playbook)
+    # — None means this investigation is freeform, exactly as before
+    # playbooks existed. Only the id is kept here (not the Playbook object
+    # itself) so this state stays a plain, easily-inspectable/serializable
+    # dataclass; look the object up via `get_playbook` when needed.
+    playbook_id: str | None = None
+    playbook_step: int = 0
 
 
 @dataclasses.dataclass

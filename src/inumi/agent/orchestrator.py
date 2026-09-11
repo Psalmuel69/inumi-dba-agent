@@ -21,6 +21,7 @@ from inumi.agent.planner.actions import (
     ProposeToolCall,
     RecordObservation,
 )
+from inumi.agent.playbooks.library import PLAYBOOKS, get_playbook, match_playbook
 from inumi.agent.reply import AgentReply, ApprovalCard
 from inumi.agent.tool_client import ToolClient
 from inumi.common.ids import new_id
@@ -46,7 +47,8 @@ _HELP_TEXT = (
     "with your role's approval where required — take controlled remediation "
     "actions. Try: \"Why is CoreBanking slow?\" or \"Check blocking on "
     "CoreBanking production.\"\n\nCommands: /help, /status, /approve <id>, "
-    "/reject <id>, /models, /model <provider> <model>, /servers, /catalog <id>, /discover"
+    "/reject <id>, /models, /model <provider> <model>, /servers, /catalog <id>, "
+    "/discover, /playbooks"
 )
 
 
@@ -127,6 +129,14 @@ class AgentOrchestrator:
 
         if state.investigation is None or state.investigation.status == "CONCLUDED":
             investigation = self._context.start_investigation(state, intent.problem_summary)
+            # Deterministic, zero-LLM-call keyword match against a small
+            # library of known scenarios (slow queries, high CPU, blocking,
+            # ...) — see agent.playbooks.library for the rationale. None
+            # means no known scenario matched; the loop below falls back to
+            # the original fully-freeform behavior, unchanged.
+            playbook = match_playbook(intent.problem_summary or message)
+            if playbook is not None:
+                investigation.playbook_id = playbook.playbook_id
             if intent.environment_hint:
                 state.database_context["environment"] = intent.environment_hint
             if intent.database_hint:
@@ -173,8 +183,29 @@ class AgentOrchestrator:
         tool_requirements: dict[str, list[str]] | None = None,
     ) -> AgentReply:
         while investigation.turn_count < _MAX_INVESTIGATION_TURNS:
+            step_action = self._next_playbook_action(investigation, available_ids)
+            if step_action is not None:
+                # Deterministic step from a matched playbook — propose it
+                # directly, skipping the LLM call entirely for this turn.
+                # This is the actual point of a playbook: for a *known*
+                # scenario, the sequence of diagnostics to run is already
+                # decided, so there's nothing for the LLM to figure out here
+                # — asking it anyway would only add latency and a chance of
+                # a malformed completion for a call whose shape was never in
+                # question. The LLM still gets one full turn at the end (once
+                # playbook_step exhausts the step list, below falls through
+                # to the normal decide_next_action call) to interpret
+                # everything gathered and conclude.
+                investigation.turn_count += 1
+                reply = await self._submit_and_relay(
+                    state, investigation, step_action, channel, channel_account_id
+                )
+                if reply is not None:
+                    return reply
+                continue  # executed (or failed-but-logged) — advance to the next step
+
             action = await llm.decide_next_action(
-                problem_statement=investigation.problem,
+                problem_statement=self._problem_statement_for_llm(investigation),
                 available_tool_ids=available_ids,
                 transcript=investigation.transcript,
                 turn_count=investigation.turn_count,
@@ -216,6 +247,50 @@ class AgentOrchestrator:
             text="I've run several diagnostic steps without reaching a confirmed root "
             "cause. Here's what I found:\n" + "\n".join(f"- {e}" for e in investigation.evidence),
             investigation_id=investigation.investigation_id,
+        )
+
+    def _next_playbook_action(self, investigation, available_ids: list[str]) -> ProposeToolCall | None:
+        """The next step of this investigation's matched playbook, as a
+        ready-to-submit ProposeToolCall — or None if there's no active
+        playbook, or its steps are exhausted (falls back to the LLM either
+        way). `investigation.playbook_step` always advances, even for a
+        step that turns out to be unavailable — a fixed-argument step would
+        fail the same way every time, so retrying it is never useful, and
+        an unavailable tool is skipped silently (no turn spent, no Gateway
+        round-trip) rather than surfaced as a denial for something the DBA
+        never asked for by name."""
+        playbook = get_playbook(investigation.playbook_id)
+        if playbook is None:
+            return None
+        while investigation.playbook_step < len(playbook.steps):
+            step = playbook.steps[investigation.playbook_step]
+            investigation.playbook_step += 1
+            if step.tool_id not in available_ids:
+                continue
+            return ProposeToolCall(
+                tool_id=step.tool_id,
+                arguments=dict(step.arguments),
+                target={},
+                reason=f"[{playbook.name} playbook] {step.purpose}",
+            )
+        return None
+
+    @staticmethod
+    def _problem_statement_for_llm(investigation) -> str:
+        """The problem text handed to decide_next_action — unchanged for a
+        freeform investigation. Once a matched playbook's steps are all
+        used up, append its conclusion guidance so the one LLM call that
+        follows (interpreting everything the playbook gathered) knows what
+        "done" looks like for this specific scenario, and is nudged to
+        conclude now rather than keep investigating freeform on top of it."""
+        playbook = get_playbook(investigation.playbook_id)
+        if playbook is None or investigation.playbook_step < len(playbook.steps):
+            return investigation.problem
+        return (
+            f"{investigation.problem}\n\nYou just followed the '{playbook.name}' "
+            f"playbook — see the transcript for what was checked and found. "
+            f"{playbook.conclusion_guidance} If the evidence gathered is enough "
+            "to conclude, conclude now rather than proposing further tool calls."
         )
 
     async def _submit_and_relay(
@@ -287,6 +362,23 @@ class AgentOrchestrator:
                 investigation_id=investigation.investigation_id,
             )
 
+        if response.status == ToolCallStatus.FAILED:
+            # An adapter-level failure (e.g. a diagnostic not implemented
+            # for this engine, a transient connection error) — distinct
+            # from DENIED (a policy fact) and previously unhandled here,
+            # which meant it fell through to the "EXECUTED" branch below and
+            # got logged as if the call had actually succeeded. That's a
+            # real correctness gap a playbook makes more likely to surface
+            # (it proactively calls diagnostics like get_replication_status
+            # that a given engine/topology may not implement) — record it
+            # plainly as a failed step and keep going; a single failed
+            # diagnostic shouldn't abort the rest of the investigation.
+            investigation.transcript.append(
+                {"tool_id": action.tool_id, "reason": action.reason, "result": {"error": response.message}}
+            )
+            investigation.evidence.append(f"{action.tool_id} failed: {response.message}")
+            return None
+
         # EXECUTED
         investigation.transcript.append(
             {"tool_id": action.tool_id, "reason": action.reason, "result": response.result or {}}
@@ -345,10 +437,20 @@ class AgentOrchestrator:
             inv = state.investigation
             if inv is None:
                 return AgentReply(text="No active investigation on this conversation.")
+            playbook = get_playbook(inv.playbook_id)
+            playbook_note = (
+                f" Following the '{playbook.name}' playbook (step "
+                f"{min(inv.playbook_step, len(playbook.steps))}/{len(playbook.steps)})."
+                if playbook is not None
+                else ""
+            )
             return AgentReply(
-                text=f"Investigation {inv.investigation_id}: {inv.status}. {len(inv.evidence)} observations so far.",
+                text=f"Investigation {inv.investigation_id}: {inv.status}."
+                f"{playbook_note} {len(inv.evidence)} observations so far.",
                 investigation_id=inv.investigation_id,
             )
+        if stripped == "/playbooks":
+            return self._handle_playbooks_command()
         if stripped.startswith("/approve "):
             approval_id = stripped.split(" ", 1)[1].strip()
             if state.pending_approval and state.pending_approval.approval_id != approval_id:
@@ -374,6 +476,14 @@ class AgentOrchestrator:
         if stripped == "/discover" or stripped.startswith("/discover "):
             return await self._handle_discover_command(stripped, channel, channel_account_id)
         return None
+
+    def _handle_playbooks_command(self) -> AgentReply:
+        lines = [f"- {p.name}: {p.description}" for p in PLAYBOOKS]
+        return AgentReply(
+            text="I automatically follow one of these fixed diagnostic sequences "
+            "when your message matches its scenario, instead of investigating "
+            "fully freeform:\n" + "\n".join(lines)
+        )
 
     async def _handle_servers_command(self) -> AgentReply:
         servers = await self._tool_client.list_servers()
@@ -469,7 +579,11 @@ class AgentOrchestrator:
 
     @staticmethod
     def _format_report(investigation, conclusion: Conclude) -> str:
-        lines = [f"Summary: {conclusion.summary}"]
+        lines = []
+        playbook = get_playbook(investigation.playbook_id)
+        if playbook is not None:
+            lines.append(f"Followed the '{playbook.name}' playbook.")
+        lines.append(f"Summary: {conclusion.summary}")
         if investigation.evidence:
             lines.append("Evidence: " + "; ".join(investigation.evidence))
         if conclusion.likely_root_cause:
