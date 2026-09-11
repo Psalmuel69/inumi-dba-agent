@@ -101,10 +101,12 @@ async def refresh_one(
     server_id: str, body: RefreshRequest, state: GatewayState = Depends(get_state)
 ) -> dict:
     await _require_manager(state, body)
+    if state.server_registry.by_id(server_id) is None:
+        raise HTTPException(status_code=404, detail=f"No registered server '{server_id}'.")
     try:
         catalog = await _orchestrator(state).refresh_server(server_id)
-    except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 — an unreachable server is a normal outcome here
+        return {"server_id": server_id, "databases": [], "warnings": [], "error": str(exc)}
     return {
         "server_id": server_id,
         "databases": catalog.database_names(),

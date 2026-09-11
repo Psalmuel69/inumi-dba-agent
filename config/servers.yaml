@@ -138,6 +138,22 @@ servers:
     allowed_roles: [DBA_L1, DBA_L2, DBA_L3, DBA_MANAGER]
     status: active
 
+  - id: postgres-local
+    platform: postgresql
+    environment: development
+    host: localhost
+    port: 5432
+    aliases: [local, mylocal, local-postgres]
+    organization: platform-eng
+    region: local
+    criticality: low
+    classification: internal
+    owner: platform-eng
+    support_team: platform-eng
+    maintenance_window: { timezone: Africa/Lagos, start: "00:00", end: "23:59" }
+    allowed_roles: [DBA_L1, DBA_L2, DBA_L3, DBA_MANAGER]
+    status: active
+
   - id: mariadb-dev-01
     platform: mariadb
     environment: development

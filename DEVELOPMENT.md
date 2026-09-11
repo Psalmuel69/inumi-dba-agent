@@ -66,6 +66,15 @@ Each command runs against `sqlite+aiosqlite:///./inumi_dev.db` by default
 (see `.env.example`); for a closer-to-production setup, run
 `docker compose up postgres redis` first and point `CONTROL_DB_URL` at it.
 
+**On Windows**, start the Execution Service with `python -m inumi.execution`
+instead of `make run-execution` / raw `uvicorn`. psycopg's async mode needs
+a selector-based event loop, and uvicorn forces `ProactorEventLoop` on
+Windows unless told not to *before* it starts — `uvicorn inumi.execution.api.app:app`
+can't set that in time (the app module is imported after uvicorn's loop
+already exists). `python -m inumi.execution` sets the policy first. The
+other three services don't open real database connections, so
+`make run-gateway`/`run-agent`/`run-channels` are unaffected.
+
 ## Local end-to-end smoke test without any UI
 
 ```bash

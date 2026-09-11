@@ -9,6 +9,9 @@ channel adapter call this service directly.
 
 from __future__ import annotations
 
+import asyncio
+import sys
+
 from fastapi import Depends, FastAPI, Header, HTTPException
 
 from inumi.common.config import Settings, get_settings
@@ -21,6 +24,17 @@ from inumi.execution.discovery.engine import run_discovery
 from inumi.execution.service import ExecutionService
 
 logger = get_logger(__name__)
+
+# psycopg's async connection mode (used by PostgreSQLQueryExecutor) requires
+# a selector-based event loop; Windows' asyncio default (ProactorEventLoop)
+# raises `InterfaceError` on connect. Setting the policy here is necessary
+# for any in-process caller (tests, a REPL) but NOT sufficient for
+# `uvicorn inumi.execution.api.app:app` — uvicorn's `asyncio.run()` creates
+# its event loop before it imports this module, so the policy must also be
+# set earlier than that; see `python -m inumi.execution` (`__main__.py`),
+# which is the Windows-safe way to start this service directly.
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 
 def create_app(settings: Settings | None = None, *, adapter_factory=None) -> FastAPI:
