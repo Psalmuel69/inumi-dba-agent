@@ -50,3 +50,50 @@ def test_action_system_prompt_has_a_schema_object_scoped_example():
     assert '"schema": "Person"' in _ACTION_SYSTEM
     assert '"object": "Person"' in _ACTION_SYSTEM
     assert "database.update_statistics" in _ACTION_SYSTEM
+
+
+def test_target_and_arguments_declare_real_properties_not_a_bare_object():
+    """Reproduces the actual live fix: prose alone wasn't enough — a real
+    model's own `reason` text said "I will now provide the required
+    session_id and reason arguments" and still left `arguments: {}` every
+    time. Only giving `arguments`/`target` real declared `properties` (a
+    concrete template to fill in, not just a description of one) fixed it
+    — confirmed by rerunning the exact failing case, first attempt, same
+    model that had failed six times in a row."""
+    props = _FLAT_ACTION_SCHEMA["properties"]
+    assert "properties" in props["arguments"], "arguments must declare real sub-properties"
+    assert "properties" in props["target"], "target must declare real sub-properties"
+
+    for key in ("session_id", "reason", "schema", "table"):
+        assert key in props["arguments"]["properties"]
+    for key in ("environment", "instance", "database", "schema", "object", "session_id"):
+        assert key in props["target"]["properties"]
+
+    # environment must stay a real enum here too, not just on IntentExtraction.
+    assert props["target"]["properties"]["environment"]["enum"] == [
+        "development",
+        "uat",
+        "production",
+    ]
+
+
+def test_arguments_properties_cover_every_field_every_enabled_tool_actually_uses():
+    """If a new tool_arguments.py model adds a field this schema doesn't
+    know about, the model has no template slot for it and this test catches
+    that before it becomes another live "the model understood but the
+    structured output stayed empty" incident."""
+    from inumi.common.models import tool_arguments
+
+    # Excluded: the raw-SQL tool args (execute_sql/execute_readonly_sql) are
+    # disabled by default and out of this round's scope — deliberately not
+    # giving the model an `sql` template slot to reach for.
+    excluded = {"ExecuteSqlArgs", "ReadOnlySqlArgs"}
+    known = set(_FLAT_ACTION_SCHEMA["properties"]["arguments"]["properties"])
+    for name in dir(tool_arguments):
+        if name in excluded:
+            continue
+        cls = getattr(tool_arguments, name)
+        if isinstance(cls, type) and issubclass(cls, tool_arguments._StrictArgs):
+            for field_name, field in cls.model_fields.items():
+                key = field.alias if isinstance(field.alias, str) else field_name
+                assert key in known, f"{cls.__name__}.{field_name} (-> {key!r}) has no schema slot"

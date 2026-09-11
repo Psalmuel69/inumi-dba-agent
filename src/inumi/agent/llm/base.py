@@ -108,23 +108,75 @@ _FLAT_ACTION_SCHEMA: dict[str, Any] = {
         },
         "question": {"type": "string", "description": "For action=ask_clarification"},
         "tool_id": {"type": "string", "description": "For action=propose_tool_call"},
-        "arguments": {"type": "object", "description": "For action=propose_tool_call"},
+        # Both `target` and `arguments` declare real `properties` (not just
+        # a bare `{"type": "object"}`) — verified live this made the actual
+        # difference: a real model's own `reason` text said, twice, "I will
+        # now provide the required session_id and reason arguments" / "I
+        # must ensure I am providing them correctly in the arguments
+        # object" — it fully understood what was needed from the prose
+        # alone, and still left `arguments: {}` every time. A property-less
+        # object type gives a smaller/weaker model nothing to literally fill
+        # in; declaring the real slots (a superset across every tool — only
+        # the ones the chosen tool actually needs get used, per the
+        # `tool_requirements` list injected into the user message) gives it
+        # an actual template instead of only a description to act on.
+        "arguments": {
+            "type": "object",
+            "description": (
+                "For action=propose_tool_call. Only include the keys the "
+                "chosen tool's required-arguments list actually names — "
+                "never invent a value, pull each one from what the DBA "
+                "said or a prior tool result in this investigation."
+            ),
+            "properties": {
+                "session_id": {"type": "string"},
+                "query_id": {"type": "string"},
+                "reason": {"type": "string"},
+                "schema": {"type": "string"},
+                "table": {"type": "string"},
+                "columns": {"type": "array", "items": {"type": "string"}},
+                "name": {"type": "string"},
+                "unique": {"type": "boolean"},
+                "index_name": {"type": "string"},
+                "parameter": {"type": "string"},
+                "value": {"type": "string"},
+                "target_instance": {"type": "string"},
+                "order_by": {"type": "string"},
+                "limit": {"type": "integer"},
+                "since_minutes": {"type": "integer"},
+                "database_name": {"type": "string"},
+                "backup_id": {"type": "string"},
+                "predicate_description": {"type": "string"},
+            },
+        },
         "target": {
             "type": "object",
             "description": (
                 "For action=propose_tool_call. Only ever these exact keys, "
                 "only the ones the tool actually needs (never invent a "
                 "value — pull each one from what the DBA said or from a "
-                "prior tool result in this investigation): "
-                "environment (EXACTLY one of \"development\", \"uat\", "
-                "\"production\" — the full word, never an abbreviation like "
-                "\"dev\"/\"prod\"; using anything else is rejected as an "
-                "invalid target, not treated as a typo), instance, "
-                "database, schema (the SCHEMA name, e.g. 'dbo' or "
-                "'Person' — never combine schema.table into one string), "
-                "object (the bare table/index name, no schema prefix), "
-                "session_id, query_id."
+                "prior tool result in this investigation). schema is the "
+                "SCHEMA name only (e.g. 'dbo' or 'Person' — never combine "
+                "schema.table into one string); object is the bare "
+                "table/index name, no schema prefix."
             ),
+            "properties": {
+                "environment": {
+                    "type": "string",
+                    "enum": ["development", "uat", "production"],
+                    "description": (
+                        "The full word — never an abbreviation like "
+                        "\"dev\"/\"prod\"; using anything else is rejected "
+                        "as an invalid target, not treated as a typo."
+                    ),
+                },
+                "instance": {"type": "string"},
+                "database": {"type": "string"},
+                "schema": {"type": "string"},
+                "object": {"type": "string"},
+                "session_id": {"type": "string"},
+                "query_id": {"type": "string"},
+            },
         },
         "reason": {"type": "string", "description": "For action=propose_tool_call"},
         "text": {"type": "string", "description": "For action=record_observation"},
