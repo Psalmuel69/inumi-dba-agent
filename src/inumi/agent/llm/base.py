@@ -175,38 +175,48 @@ class StructuredLLMProvider(LLMProvider):
         known_database_names: list[str],
         known_server_hints: list[str] | None = None,
     ) -> IntentExtraction:
-        try:
-            data = await self._call_with_retry(
-                lambda: self._call_tool(
-                    system=_INTENT_SYSTEM,
-                    user=(
-                        f"Message: {message!r}\nKnown databases: {known_database_names}\n"
-                        f"Known servers: {known_server_hints or []}"
-                    ),
-                    schema=IntentExtraction.model_json_schema(),
-                    tool_name="submit_intent",
+        last_raw: dict[str, Any] | None = None
+
+        async def attempt() -> IntentExtraction:
+            nonlocal last_raw
+            data = await self._call_tool(
+                system=_INTENT_SYSTEM,
+                user=(
+                    f"Message: {message!r}\nKnown databases: {known_database_names}\n"
+                    f"Known servers: {known_server_hints or []}"
                 ),
-                what="extract_intent",
+                schema=IntentExtraction.model_json_schema(),
+                tool_name="submit_intent",
             )
-        except Exception as exc:  # noqa: BLE001 — provider/network failure, never crash the chat
-            logger.warning(
-                "extract_intent_call_failed", provider=self.provider_name, model=self.model, error=str(exc)
-            )
+            last_raw = data
+            # Validated here too, not just after — a malformed completion
+            # gets retried the same as a network failure, since (verified
+            # live) the same prompt often succeeds cleanly on the very next
+            # attempt; only *persistent* malformation falls through below.
+            return IntentExtraction.model_validate(data)
+
+        try:
+            return await self._call_with_retry(attempt, what="extract_intent")
+        except Exception as exc:  # noqa: BLE001 — never crash the chat either way
+            if last_raw is not None:
+                logger.warning(
+                    "extract_intent_validation_failed",
+                    provider=self.provider_name,
+                    model=self.model,
+                    raw_response=last_raw,
+                    error=str(exc),
+                )
+            else:
+                logger.warning(
+                    "extract_intent_call_failed",
+                    provider=self.provider_name,
+                    model=self.model,
+                    error=str(exc),
+                )
             # Proceed as a best-effort DBA task on the raw message rather than
             # stalling here — decide_next_action gets its own chance right
             # after this to hit the same outage and report it plainly to the
             # DBA, which is the more useful place to surface "try again".
-            return IntentExtraction(is_dba_task=True, problem_summary=message.strip())
-        try:
-            return IntentExtraction.model_validate(data)
-        except Exception as exc:  # noqa: BLE001 — never crash on a malformed completion
-            logger.warning(
-                "extract_intent_validation_failed",
-                provider=self.provider_name,
-                model=self.model,
-                raw_response=data,
-                error=str(exc),
-            )
             return IntentExtraction(is_dba_task=True, problem_summary=message.strip())
 
     async def decide_next_action(
@@ -217,29 +227,53 @@ class StructuredLLMProvider(LLMProvider):
         transcript: list[dict[str, Any]],
         turn_count: int,
     ) -> AgentAction:
-        try:
-            data = await self._call_with_retry(
-                lambda: self._call_tool(
-                    system=_ACTION_SYSTEM,
-                    user=(
-                        f"Problem: {problem_statement}\n"
-                        f"Available tool ids (you may ONLY use these): {available_tool_ids}\n"
-                        f"Transcript of tool calls so far: {transcript}\n"
-                        f"Turn number: {turn_count}"
-                    ),
-                    schema=_FLAT_ACTION_SCHEMA,
-                    tool_name="submit_decision",
+        last_raw: dict[str, Any] | None = None
+
+        async def attempt() -> AgentAction:
+            nonlocal last_raw
+            data = await self._call_tool(
+                system=_ACTION_SYSTEM,
+                user=(
+                    f"Problem: {problem_statement}\n"
+                    f"Available tool ids (you may ONLY use these): {available_tool_ids}\n"
+                    f"Transcript of tool calls so far: {transcript}\n"
+                    f"Turn number: {turn_count}"
                 ),
-                what="decide_next_action",
+                schema=_FLAT_ACTION_SCHEMA,
+                tool_name="submit_decision",
             )
-        except Exception as exc:  # noqa: BLE001 — provider/network failure, never crash the chat
+            last_raw = data
+            # Validated here too, not just after — a malformed completion
+            # (verified live: real models sometimes drop a required field
+            # despite the prompt spelling it out) gets retried the same as a
+            # network failure, since the same prompt often succeeds cleanly
+            # on the very next attempt; only a *persistent* problem falls
+            # through to the messages below.
+            return agent_action_adapter.validate_python(data)
+
+        try:
+            action = await self._call_with_retry(attempt, what="decide_next_action")
+        except Exception as exc:  # noqa: BLE001 — never crash the chat either way
+            if last_raw is not None:
+                # Got a response, every attempt just failed to validate.
+                # This was previously silent, which made a real, one-line
+                # prompt bug (missing `reason` on read-only tool calls) look
+                # like an unexplained model failure — always log what the
+                # provider actually returned.
+                logger.warning(
+                    "decide_next_action_validation_failed",
+                    provider=self.provider_name,
+                    model=self.model,
+                    raw_response=last_raw,
+                    error=str(exc),
+                )
+                return AskClarification(
+                    question="I couldn't work out a safe next step — could you tell me more "
+                    "about what you'd like me to check?"
+                )
             # A transient upstream outage/rate-limit (e.g. Gemini 503 "high
-            # demand") must degrade to a clear message, not a raw 500 — the
-            # SDK already retries internally, so a failure here means it
-            # gave up; telling the DBA to retry the request is the honest,
-            # useful response, distinct from "I couldn't work out a safe
-            # next step" below (which is about a *malformed* completion, not
-            # a missing one).
+            # demand") must degrade to a clear message, not a raw 500 —
+            # distinct from the malformed-completion message above.
             logger.warning(
                 "decide_next_action_call_failed",
                 provider=self.provider_name,
@@ -251,24 +285,6 @@ class StructuredLLMProvider(LLMProvider):
                     f"The {self.provider_name} service is temporarily unavailable "
                     "(high demand or a transient error) — please try again in a moment."
                 )
-            )
-        try:
-            action = agent_action_adapter.validate_python(data)
-        except Exception as exc:  # noqa: BLE001 — never crash on a malformed completion
-            # This was previously silent, which made a real, one-line prompt
-            # bug (missing `reason` on read-only tool calls) look like an
-            # unexplained model failure. Always log what the provider
-            # actually returned so a validation mismatch is diagnosable.
-            logger.warning(
-                "decide_next_action_validation_failed",
-                provider=self.provider_name,
-                model=self.model,
-                raw_response=data,
-                error=str(exc),
-            )
-            return AskClarification(
-                question="I couldn't work out a safe next step — could you tell me more "
-                "about what you'd like me to check?"
             )
         if isinstance(action, ProposeToolCall) and action.tool_id not in available_tool_ids:
             # The model named a tool it wasn't offered — refuse rather than

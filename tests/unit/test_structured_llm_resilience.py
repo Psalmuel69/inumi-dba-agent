@@ -76,6 +76,32 @@ async def test_decide_next_action_recovers_after_a_transient_failure():
 
 
 @pytest.mark.asyncio
+async def test_decide_next_action_retries_a_malformed_completion_not_just_call_failures():
+    """Reproduces the live finding: a completion missing a required field
+    (not a network/outage failure) is *also* worth one more try — the same
+    prompt was observed to succeed on a later attempt in production."""
+
+    class _MalformedThenOk(_FakeStructuredProvider):
+        async def _call_tool(self, *, system, user, schema, tool_name):
+            self.call_count += 1
+            if self.call_count == 1:
+                return {"action": "propose_tool_call", "tool_id": "database.get_health"}  # no reason
+            return {
+                "action": "propose_tool_call",
+                "tool_id": "database.get_health",
+                "reason": "Baseline check.",
+            }
+
+    provider = _MalformedThenOk()
+    action = await provider.decide_next_action(
+        problem_statement="check health", available_tool_ids=["database.get_health"],
+        transcript=[], turn_count=0,
+    )
+    assert isinstance(action, ProposeToolCall)
+    assert provider.call_count == 2
+
+
+@pytest.mark.asyncio
 async def test_decide_next_action_degrades_on_a_malformed_completion():
     provider = _FakeStructuredProvider(
         tool_result={"action": "propose_tool_call", "tool_id": "database.get_health"}
