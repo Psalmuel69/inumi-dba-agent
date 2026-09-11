@@ -6,6 +6,7 @@ shedding (503 "high demand" persisting across several same-model retries)."""
 
 from __future__ import annotations
 
+import asyncio
 import time
 
 import pytest
@@ -74,6 +75,29 @@ def test_is_model_unavailable_error_does_not_misclassify_a_request_specific_fail
     model itself is unavailable, so it must not trigger a model switch
     (StructuredLLMProvider's own same-model retry handles it instead)."""
     assert not _is_model_unavailable_error(ValueError("Gemini returned no function call."))
+
+
+def test_is_model_unavailable_error_treats_a_timeout_as_unavailable():
+    """Reproduces a live finding: a generateContent call with no timeout at
+    all hung for minutes with nothing raised — the retry/fallback machinery
+    only reacts to a raised exception, so a bare hang bypassed it entirely
+    and the client-side timeout was the only thing that ever ended it."""
+    assert _is_model_unavailable_error(TimeoutError())
+
+
+@pytest.mark.asyncio
+async def test_a_hanging_call_times_out_and_switches_to_the_next_model():
+    provider = GeminiLLMProvider("fake-key", _MODEL_FALLBACK_CHAIN[0])
+    provider._REQUEST_TIMEOUT_SECONDS = 0.05  # instance override, keep the test fast
+
+    async def call():
+        if provider.model == _MODEL_FALLBACK_CHAIN[0]:
+            await asyncio.sleep(10)  # never actually reached — wait_for cuts it off
+        return "ok"
+
+    result = await provider._with_model_fallback(call)
+    assert result == "ok"
+    assert provider.model == _MODEL_FALLBACK_CHAIN[1]
 
 
 @pytest.mark.asyncio
