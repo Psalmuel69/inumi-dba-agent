@@ -24,16 +24,21 @@ _MIN_MAJOR_VERSION = 3
 _DEFAULT_MODEL = "gemini-3.6-flash"
 _KNOWN_MODELS = ["gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash", "gemini-3.5-flash"]
 
-# The free tier's daily quota is per (project, model) — a project easily
-# burns through one model's 20 req/day during real interactive testing.
-# Ranked fallback chain tried, in order, when the *current* model reports
-# quota exhaustion (never for any other kind of error — that stays with
-# StructuredLLMProvider's own same-model retry). Real, currently-serving
-# 3.x+ models, verified live 2026-09-11; refresh via list_models() if this
-# goes stale. Mutating `self.model` on exhaustion (rather than raising) is
-# deliberate — the LLMRegistry caches one provider instance per (provider,
-# model) key, so the switch sticks for the rest of this process's requests
-# instead of rediscovering the same exhausted model every time.
+# The free tier's daily quota is per (project, model), and capacity
+# ("high demand") shedding is also observed per-model — a project easily
+# burns through one model's 20 req/day during real interactive testing, and
+# a specific model can stay overloaded across several same-model retries in
+# a row (observed live: three straight 503s on gemini-3.7-flash, ~15-20s
+# apart, well past what a couple of quick retries can ride out). Ranked
+# fallback chain tried, in order, whenever the *current* model reports
+# either kind of "this model specifically isn't working right now" — never
+# for any other kind of error, which stays with StructuredLLMProvider's own
+# same-model retry. Real, currently-serving 3.x+ models, verified live
+# 2026-09-11; refresh via list_models() if this goes stale. Mutating
+# `self.model` on failure (rather than raising) is deliberate — the
+# LLMRegistry caches one provider instance per (provider, model) key, so
+# the switch sticks for the rest of this process's requests instead of
+# rediscovering the same bad model every time.
 _MODEL_FALLBACK_CHAIN = [
     "gemini-3.6-flash",
     "gemini-3.7-flash",
@@ -54,9 +59,21 @@ def _meets_min_version(model_name: str) -> bool:
     return int(match.group(1)) >= _MIN_MAJOR_VERSION
 
 
-def _is_quota_error(exc: Exception) -> bool:
+def _is_model_unavailable_error(exc: Exception) -> bool:
+    """True for a failure that's specifically about *this model* right now
+    — a daily quota (429/RESOURCE_EXHAUSTED) or capacity shedding
+    (503/UNAVAILABLE/"high demand") — as opposed to a request-specific
+    problem (a malformed schema, an auth failure) that switching models
+    would not fix."""
     text = str(exc)
-    return "RESOURCE_EXHAUSTED" in text or "429" in text or "quota" in text.lower()
+    return (
+        "RESOURCE_EXHAUSTED" in text
+        or "429" in text
+        or "quota" in text.lower()
+        or "UNAVAILABLE" in text
+        or "503" in text
+        or "high demand" in text.lower()
+    )
 
 
 def _clean_schema(schema: dict[str, Any]) -> dict[str, Any]:
@@ -84,7 +101,7 @@ class GeminiLLMProvider(StructuredLLMProvider):
         super().__init__(model or _DEFAULT_MODEL)
         self._api_key = api_key
         self._client = None
-        self._quota_exhausted_models: set[str] = set()
+        self._unavailable_models: set[str] = set()
 
     def _get_client(self):
         if self._client is None:
@@ -95,27 +112,29 @@ class GeminiLLMProvider(StructuredLLMProvider):
 
     def _next_fallback_model(self) -> str | None:
         for candidate in _MODEL_FALLBACK_CHAIN:
-            if candidate != self.model and candidate not in self._quota_exhausted_models:
+            if candidate != self.model and candidate not in self._unavailable_models:
                 return candidate
         return None
 
     async def _with_model_fallback(self, call: Callable[[], Awaitable[Any]]) -> Any:
-        """Run `call()` against `self.model`; on a quota-exhausted error,
-        switch to the next untried model in the fallback chain and retry the
-        SAME request, rather than surfacing the error — a daily quota is a
-        property of (project, model), not of the request itself."""
+        """Run `call()` against `self.model`; on a quota or capacity error
+        specific to this model, switch to the next untried model in the
+        fallback chain and retry the SAME request, rather than surfacing the
+        error or waiting out a same-model retry that may not clear in time —
+        both a daily quota and demand-based shedding are a property of
+        (project, model), not of the request itself."""
         while True:
             try:
                 return await call()
             except Exception as exc:
-                if not _is_quota_error(exc):
+                if not _is_model_unavailable_error(exc):
                     raise
-                self._quota_exhausted_models.add(self.model)
+                self._unavailable_models.add(self.model)
                 next_model = self._next_fallback_model()
                 if next_model is None:
                     raise
                 logger.warning(
-                    "gemini_model_quota_exhausted_switching",
+                    "gemini_model_unavailable_switching",
                     from_model=self.model,
                     to_model=next_model,
                 )
