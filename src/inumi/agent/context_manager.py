@@ -48,6 +48,13 @@ class InvestigationState:
     # dataclass; look the object up via `get_playbook` when needed.
     playbook_id: str | None = None
     playbook_step: int = 0
+    # How many record_observation actions the LLM has proposed *in a row*
+    # (reset by any other action) — see orchestrator._MAX_CONSECUTIVE_
+    # RECORD_OBSERVATIONS: a real model can get stuck restating the same
+    # finding as one observation after another instead of ever calling
+    # conclude, burning the whole turn budget on a case that was already
+    # answerable after the first one.
+    consecutive_record_observations: int = 0
 
 
 @dataclasses.dataclass

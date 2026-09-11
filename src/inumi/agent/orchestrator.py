@@ -35,6 +35,20 @@ logger = get_logger(__name__)
 
 _MAX_INVESTIGATION_TURNS = 6
 
+# How many record_observation actions in a row (never interrupted by a new
+# tool call or a conclude) are tolerated before giving up on asking the LLM
+# to conclude and using whatever evidence already exists instead. Verified
+# live: a real model can get stuck restating the same finding as one
+# observation after another rather than ever emitting action=conclude —
+# reproduced on the replication playbook specifically, where the real
+# answer ("no replica configured") was already clear after the very first
+# observation, yet the model spent its remaining turns re-recording that
+# same conclusion as evidence and hit the full turn cap without ever
+# reaching the DBA. Small and deliberate: this is meant to catch a stuck
+# pattern fast, not to second-guess a model that's still making real
+# progress (any other action resets the count to 0).
+_MAX_CONSECUTIVE_RECORD_OBSERVATIONS = 2
+
 # A DENIED response whose failure_code means "the proposed call was shaped
 # wrong" (not "this is not allowed") — the LLM can plausibly fix it given
 # the specific reason, verified live: a real model that omitted a target
@@ -277,6 +291,16 @@ class AgentOrchestrator:
                     return reply
                 continue  # executed (or failed-but-logged) — advance to the next step
 
+            if investigation.consecutive_record_observations >= _MAX_CONSECUTIVE_RECORD_OBSERVATIONS:
+                # Stop asking rather than wait out the rest of the turn
+                # budget on a model that's already shown it isn't going to
+                # conclude on its own — same safe fallback the turn cap
+                # itself produces below, just reached sooner and without
+                # spending further LLM calls on a pattern already proven
+                # stuck.
+                investigation.status = "CONCLUDED"
+                return self._no_root_cause_reply(investigation)
+
             action = await llm.decide_next_action(
                 problem_statement=self._problem_statement_for_llm(investigation),
                 available_tool_ids=available_ids,
@@ -287,15 +311,18 @@ class AgentOrchestrator:
             investigation.turn_count += 1
 
             if isinstance(action, AskClarification):
+                investigation.consecutive_record_observations = 0
                 return AgentReply(
                     text=action.question, status="clarification", investigation_id=investigation.investigation_id
                 )
 
             if isinstance(action, RecordObservation):
+                investigation.consecutive_record_observations += 1
                 investigation.evidence.append(action.text)
                 continue
 
             if isinstance(action, ProposeToolCall):
+                investigation.consecutive_record_observations = 0
                 reply = await self._submit_and_relay(
                     state, investigation, action, channel, channel_account_id
                 )
@@ -304,6 +331,7 @@ class AgentOrchestrator:
                 continue  # executed successfully — loop for the next step
 
             if isinstance(action, Conclude):
+                investigation.consecutive_record_observations = 0
                 ungrounded = _ungrounded_identifiers(action, investigation)
                 if ungrounded:
                     # Don't accept an unverified claim at face value — the
@@ -351,6 +379,14 @@ class AgentOrchestrator:
                 )
 
         investigation.status = "CONCLUDED"
+        return self._no_root_cause_reply(investigation)
+
+    @staticmethod
+    def _no_root_cause_reply(investigation) -> AgentReply:
+        """Shared by both places an investigation ends without ever
+        reaching action=conclude: the turn cap itself, and the earlier,
+        faster exit above once the model has shown it's stuck restating
+        observations instead of concluding."""
         return AgentReply(
             text="I've run several diagnostic steps without reaching a confirmed root "
             "cause. Here's what I found:\n" + "\n".join(f"- {e}" for e in investigation.evidence),
@@ -386,20 +422,36 @@ class AgentOrchestrator:
     @staticmethod
     def _problem_statement_for_llm(investigation) -> str:
         """The problem text handed to decide_next_action — unchanged for a
-        freeform investigation. Once a matched playbook's steps are all
-        used up, append its conclusion guidance so the one LLM call that
-        follows (interpreting everything the playbook gathered) knows what
-        "done" looks like for this specific scenario, and is nudged to
-        conclude now rather than keep investigating freeform on top of it."""
+        freeform investigation with no observations yet. Once a matched
+        playbook's steps are all used up, append its conclusion guidance so
+        the one LLM call that follows (interpreting everything the playbook
+        gathered) knows what "done" looks like for this specific scenario,
+        and is nudged to conclude now rather than keep investigating
+        freeform on top of it. Separately, once the model has already
+        recorded an observation without concluding, add an escalating nudge
+        before `_MAX_CONSECUTIVE_RECORD_OBSERVATIONS` cuts it off entirely
+        — verified live: a real model can restate the same finding as one
+        observation after another instead of ever calling conclude, even
+        when a plain, complete answer (including "nothing wrong was found"
+        or "X isn't configured") was already available."""
         playbook = get_playbook(investigation.playbook_id)
-        if playbook is None or investigation.playbook_step < len(playbook.steps):
-            return investigation.problem
-        return (
-            f"{investigation.problem}\n\nYou just followed the '{playbook.name}' "
-            f"playbook — see the transcript for what was checked and found. "
-            f"{playbook.conclusion_guidance} If the evidence gathered is enough "
-            "to conclude, conclude now rather than proposing further tool calls."
-        )
+        problem = investigation.problem
+        if playbook is not None and investigation.playbook_step >= len(playbook.steps):
+            problem = (
+                f"{problem}\n\nYou just followed the '{playbook.name}' "
+                f"playbook — see the transcript for what was checked and found. "
+                f"{playbook.conclusion_guidance} If the evidence gathered is enough "
+                "to conclude, conclude now rather than proposing further tool calls."
+            )
+        if investigation.consecutive_record_observations:
+            problem += (
+                "\n\nYou have already recorded an observation without concluding. Do "
+                "not record another restatement of the same finding — if you have "
+                "enough information to answer the DBA's question (\"nothing wrong "
+                "was found\" or \"X isn't configured\" both count as complete "
+                "answers), you MUST use action=conclude now instead."
+            )
+        return problem
 
     async def _submit_and_relay(
         self, state: ConversationState, investigation, action: ProposeToolCall, channel: str, channel_account_id: str
