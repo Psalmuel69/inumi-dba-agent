@@ -63,7 +63,12 @@ _ACTION_SYSTEM = (
     "right now — for a read or a write, no exceptions)\n"
     "- record_observation requires: text\n"
     "- conclude requires: summary\n"
-    "Include every required field for the action you choose, every time."
+    "Include every required field for the action you choose, every time.\n\n"
+    'Example of a fully valid propose_tool_call, every required field present: '
+    '{"action": "propose_tool_call", "tool_id": "database.get_health", '
+    '"reason": "Establishing a health baseline before investigating further.", '
+    '"arguments": {}, "target": {}}. A response with `reason` but no `tool_id` '
+    "(or vice versa) is not valid and will be rejected."
 )
 
 _SUMMARY_SYSTEM = (
