@@ -12,6 +12,9 @@ confused model can't loop forever.
 
 from __future__ import annotations
 
+import json
+import re
+
 from inumi.agent.context_manager import ContextManager, ConversationState, PendingApproval
 from inumi.agent.llm.base import LLMProvider
 from inumi.agent.llm.registry import LLMRegistry
@@ -43,6 +46,54 @@ _MAX_INVESTIGATION_TURNS = 6
 # (and, with a real provider, API quota) retrying something that can only
 # ever fail the same way.
 _SELF_CORRECTABLE_DENIAL_CODES = {"INVALID_ARGUMENTS", "INVALID_TARGET", "TOOL_NOT_FOUND"}
+
+# Same heuristic agent.llm.mock already uses to spot a table/database name in
+# free text ("a CamelCase word is probably a schema object"). Used here to
+# catch the *other* direction: a conclusion's free-text fields naming an
+# object that was never actually seen anywhere in this investigation —
+# verified live: a real conclusion named three such identifiers
+# (AccountBalanceOutstandings, AccountBalances, TransactionPostingHistory_2)
+# that don't exist in the database at all, instead of the real table names
+# (Branch, production.location, ...) its own tool call had actually
+# returned — likely primed by "CoreBanking"-style example names used
+# throughout this file's own system prompts/help text.
+_CAMEL_CASE_NAME_RE = re.compile(r"\b[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)+\b")
+
+
+def _ungrounded_identifiers(conclusion: Conclude, investigation) -> list[str]:
+    """CamelCase-looking identifiers the conclusion's summary/root-cause/
+    recommendation text claims, that don't appear anywhere this
+    investigation's transcript, running evidence, or the DBA's own problem
+    statement — the last one specifically so a term the DBA themselves used
+    (e.g. "AlwaysOn") is never flagged just because it isn't a tool call's
+    own output. This is a heuristic, not a proof of hallucination — it only
+    ever causes one more self-correction turn (see the Conclude branch
+    below), never blocks a conclusion from ever landing."""
+    # Excludes this same check's own past rejection notes — they necessarily
+    # quote the rejected name back (for a human reading the transcript), and
+    # without this exclusion that quoting would "ground" the name for every
+    # later attempt in the same investigation, defeating the whole check on
+    # a second try. Caught by test_repeated_ungrounded_conclusions_fall_
+    # through_to_the_safe_fallback before this ever shipped.
+    real_transcript = [t for t in investigation.transcript if t.get("tool_id") != "internal.grounding_check"]
+    real_evidence = [e for e in investigation.evidence if not e.startswith("(a draft conclusion naming")]
+    haystack = " ".join(
+        [json.dumps(real_transcript, default=str), investigation.problem, " ".join(real_evidence)]
+    ).lower()
+    claimed = " ".join(
+        filter(None, [conclusion.summary, conclusion.likely_root_cause, conclusion.recommendation])
+    )
+    seen: set[str] = set()
+    ungrounded: list[str] = []
+    for match in _CAMEL_CASE_NAME_RE.finditer(claimed):
+        name = match.group(0)
+        if name in seen:
+            continue
+        seen.add(name)
+        if name.lower() not in haystack:
+            ungrounded.append(name)
+    return ungrounded
+
 
 _HELP_TEXT = (
     "I'm Inumi, your AI DBA assistant. I can investigate database health, "
@@ -234,6 +285,41 @@ class AgentOrchestrator:
                 continue  # executed successfully — loop for the next step
 
             if isinstance(action, Conclude):
+                ungrounded = _ungrounded_identifiers(action, investigation)
+                if ungrounded:
+                    # Don't accept an unverified claim at face value — the
+                    # same self-correction pattern used for a fixable
+                    # DENIED response above: feed back exactly what's
+                    # wrong and let the model try again, bounded by the
+                    # same turn cap as everything else (the outer while
+                    # loop's own check is what actually stops this if the
+                    # model keeps insisting — it then falls through to the
+                    # safe "no confirmed root cause" message below rather
+                    # than ever surfacing an unverified claim).
+                    note = (
+                        f"Your conclusion named {', '.join(ungrounded)}, which does not "
+                        "appear anywhere in this investigation's evidence or the "
+                        "DBA's own message — never state something as a finding "
+                        "unless it actually came from a tool result or what the "
+                        "DBA said. Revise your conclusion using only that."
+                    )
+                    investigation.transcript.append(
+                        {
+                            "tool_id": "internal.grounding_check",
+                            "reason": "Verifying the conclusion before reporting it.",
+                            "result": {"rejected": ungrounded, "message": note},
+                        }
+                    )
+                    investigation.evidence.append(
+                        f"(a draft conclusion naming {', '.join(ungrounded)} was rejected — "
+                        "not found in any evidence gathered)"
+                    )
+                    logger.warning(
+                        "conclusion_rejected_ungrounded_identifiers",
+                        investigation_id=investigation.investigation_id,
+                        names=ungrounded,
+                    )
+                    continue
                 investigation.status = "CONCLUDED"
                 if action.likely_root_cause:
                     investigation.findings.append(action.likely_root_cause)
