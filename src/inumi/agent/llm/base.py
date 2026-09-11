@@ -68,7 +68,15 @@ _ACTION_SYSTEM = (
     '{"action": "propose_tool_call", "tool_id": "database.get_health", '
     '"reason": "Establishing a health baseline before investigating further.", '
     '"arguments": {}, "target": {}}. A response with `reason` but no `tool_id` '
-    "(or vice versa) is not valid and will be rejected."
+    "(or vice versa) is not valid and will be rejected.\n\n"
+    "For a tool scoped to a specific table or index (update_statistics, "
+    "create_index, rebuild_index, get_indexes, get_statistics), `target` "
+    "MUST include `schema` and `object` — leaving them out fails the "
+    'request even though `target` itself is optional. Example: refreshing '
+    'statistics on Person.Person: {"action": "propose_tool_call", '
+    '"tool_id": "database.update_statistics", "reason": "Refreshing stale '
+    'statistics before the query planner relies on them.", "target": '
+    '{"schema": "Person", "object": "Person"}, "arguments": {}}.'
 )
 
 _SUMMARY_SYSTEM = (
@@ -91,7 +99,19 @@ _FLAT_ACTION_SCHEMA: dict[str, Any] = {
         "question": {"type": "string", "description": "For action=ask_clarification"},
         "tool_id": {"type": "string", "description": "For action=propose_tool_call"},
         "arguments": {"type": "object", "description": "For action=propose_tool_call"},
-        "target": {"type": "object", "description": "For action=propose_tool_call"},
+        "target": {
+            "type": "object",
+            "description": (
+                "For action=propose_tool_call. Only ever these exact keys, "
+                "only the ones the tool actually needs (never invent a "
+                "value — pull each one from what the DBA said or from a "
+                "prior tool result in this investigation): "
+                "environment, instance, database, schema (the SCHEMA name, "
+                "e.g. 'dbo' or 'Person' — never combine schema.table into "
+                "one string), object (the bare table/index name, no schema "
+                "prefix), session_id, query_id."
+            ),
+        },
         "reason": {"type": "string", "description": "For action=propose_tool_call"},
         "text": {"type": "string", "description": "For action=record_observation"},
         "summary": {"type": "string", "description": "For action=conclude"},
