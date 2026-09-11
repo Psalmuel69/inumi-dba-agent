@@ -24,7 +24,7 @@ by prompting.
 | Service       | Responsibility                                                                 |
 |---------------|----------------------------------------------------------------------------------|
 | `channels`    | Slack + Microsoft Teams webhook adapters. Verifies signatures/tokens, resolves identity, forwards to `agent`. Never touches a database. |
-| `agent`       | The LLM-backed investigation/planning loop (Anthropic / OpenAI / Gemini / DeepSeek, DBA-selectable per conversation, or a deterministic offline planner). Proposes tool calls; has no DB credential and no authorization authority. |
+| `agent`       | The LLM-backed investigation/planning loop (Anthropic / OpenAI / Gemini / DeepSeek, DBA-selectable per conversation, or a deterministic offline planner). Proposes tool calls; has no DB credential and no authorization authority. For a recognized scenario (slow queries, high CPU, blocking, ...) it follows a fixed, named [playbook](ARCHITECTURE.md#investigation-loop-freeform-vs-playbook-driven) instead of investigating fully freeform. |
 | `gateway`     | **The security boundary.** Tool registry, target validation, authorization, policy, risk, approval, data minimization, rate limiting, audit. |
 | `execution`   | The only service with database credentials/network access. Dispatches to `SQLServerAdapter`/`PostgreSQLAdapter`/`MySQLAdapter` (MySQL + MariaDB). |
 
@@ -41,7 +41,7 @@ python -m venv .venv
 ./.venv/Scripts/python.exe -m pip install -e ".[dev]"
 cp .env.example .env
 cp config/dev_credentials.example.yaml config/dev_credentials.yaml
-./.venv/Scripts/python.exe -m pytest        # 134 pass, 22 opt-in skipped
+./.venv/Scripts/python.exe -m pytest        # 210 pass, 24 opt-in skipped
 ```
 
 Run the full stack (bundled sample PostgreSQL target included):
@@ -70,8 +70,18 @@ catalog and statistics views only, never table or view contents. Ask it
 `OPENAI_API_KEY`, `GEMINI_API_KEY`, `DEEPSEEK_API_KEY` (e.g.
 `ANTHROPIC_API_KEY=sk-ant-... docker compose up`). Each configured provider
 becomes selectable in chat with `/models` and `/model <provider> <model>`.
-With no key set, the agent uses a deterministic offline planner. See
+With no key set, the agent uses a deterministic offline planner. A single
+investigative decision is never worse than ~20s late no matter how many
+retries or model fallbacks happen underneath — see
 [POLICY_MODEL.md](POLICY_MODEL.md#llm-selection).
+
+**Playbooks.** For a recognized scenario (slow queries, high CPU, blocking,
+deadlocks, replication lag, connection saturation, ...) the agent follows a
+fixed, named diagnostic sequence instead of deciding each step freeform —
+faster and more consistent for the handful of situations that come up over
+and over. Ask `/playbooks` in chat to see the current list, or read
+[ARCHITECTURE.md](ARCHITECTURE.md#investigation-loop-freeform-vs-playbook-driven)
+for how and why.
 
 See [DEVELOPMENT.md](DEVELOPMENT.md) for the full local setup and
 [TOOL_CATALOG.md](TOOL_CATALOG.md) for what `@Inumi` can currently do.
@@ -107,12 +117,17 @@ make docker-up       # full stack via docker compose
 Phases 1–9 of the build (foundation → gateway → execution → read tools →
 agent → channels → approvals → controlled writes → restricted-tool
 framework), server registration + discovery, and MySQL/MariaDB adapters are
-implemented and covered by an automated test suite (134 passing + 24
+implemented and covered by an automated test suite (210 passing + 24
 opt-in: unit, integration, and a dedicated security suite). The Execution
 Service uses real database connections against SQL Server, PostgreSQL,
 MySQL, and MariaDB; the Agent supports Anthropic, OpenAI, Gemini, and
-DeepSeek with per-conversation model selection. An Oracle adapter, a real
-OIDC identity provider, and the real Vault/AWS/Azure/GCP secrets-manager SDK
-calls are structured for but not yet implemented — see the "Extending" /
-"Adding" sections in [DATABASE_ADAPTERS.md](DATABASE_ADAPTERS.md),
-[ARCHITECTURE.md](ARCHITECTURE.md), and [DEPLOYMENT.md](DEPLOYMENT.md).
+DeepSeek with per-conversation model selection, bounded-latency resilience
+(retry → model fallback → a hard ~20s ceiling on any single decision, so a
+provider outage degrades to a clear message in seconds, never a multi-minute
+hang), and, for a recognized scenario, playbook-driven investigation (see
+[ARCHITECTURE.md](ARCHITECTURE.md#investigation-loop-freeform-vs-playbook-driven)).
+An Oracle adapter, a real OIDC identity provider, and the real
+Vault/AWS/Azure/GCP secrets-manager SDK calls are structured for but not yet
+implemented — see the "Extending" / "Adding" sections in
+[DATABASE_ADAPTERS.md](DATABASE_ADAPTERS.md), [ARCHITECTURE.md](ARCHITECTURE.md),
+and [DEPLOYMENT.md](DEPLOYMENT.md).

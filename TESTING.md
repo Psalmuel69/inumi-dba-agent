@@ -5,8 +5,8 @@
 ```
 tests/
   unit/          # policy, risk, target validation, approval, data masking,
-                  # authorization, LLM registry, adapters (via
-                  # FakeQueryExecutor), SQL validator, config — no network
+                  # authorization, LLM registry + resilience, playbooks,
+                  # adapters (via FakeQueryExecutor), SQL validator, config — no network
   integration/    # Gateway HTTP API, full tool-call pipeline, agent
                   # orchestrator, dual approval, channel webhooks — all wired
                   # via httpx.ASGITransport (in-process, no real sockets)
@@ -27,7 +27,7 @@ make live-llm-test    # opt-in: hits real LLM APIs (needs a key)
 ./.venv/Scripts/python.exe -m pytest tests -q   # everything
 ```
 
-116 tests pass (+ 22 opt-in skipped) as of this writing, with zero real
+210 tests pass (+ 24 opt-in skipped) as of this writing, with zero real
 database, LLM, Slack/Teams, or secrets-manager dependency.
 
 ## Deterministic execution without "mock mode"

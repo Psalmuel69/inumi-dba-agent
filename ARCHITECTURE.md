@@ -74,6 +74,54 @@ not a class boundary a bug could accidentally erase.
 6. Agent relays the result (or an approval card) back through the Channel
    Adapter to the human.
 
+## Investigation loop: freeform vs. playbook-driven
+
+`orchestrator.py::_run_investigation_loop` bounds every investigation to
+`_MAX_INVESTIGATION_TURNS` (6) steps so a confused model can't loop forever.
+Within that bound, a step is decided one of two ways:
+
+- **Freeform** (the default, and the only mode before playbooks existed):
+  every turn calls `LLMProvider.decide_next_action` — the model picks the
+  next tool from the ones it was offered, or concludes.
+- **Playbook-driven**: on a new investigation, `agent.playbooks.library
+  .match_playbook` runs a deterministic, zero-LLM-call keyword match
+  against the problem text. For 11 known scenarios (slow queries, high CPU,
+  high memory, blocking, deadlocks, connection saturation, replication lag,
+  backup health, storage/transaction log, error logs, general health), this
+  picks a fixed, named sequence of read-only diagnostic calls. Each step of
+  a matched playbook is submitted directly — **no LLM call in between** —
+  and the LLM is asked only once, after the sequence completes, to
+  interpret everything gathered and conclude (nudged by the playbook's own
+  conclusion guidance). Unmatched problem text runs fully freeform,
+  unchanged.
+
+Why this exists: freeform investigation was already *capable* of running
+any read-only tool in any order and reaching a correct answer — a playbook
+adds no new capability. What it fixes is that, for a *known* scenario type,
+the freeform loop had no fixed shape or stopping point: verified live, one
+real investigation ran several unrelated diagnostics after it already had
+its answer and exhausted the turn budget without concluding. A playbook is
+a named, reviewable, deterministic answer to "what do we check, in what
+order, for this kind of problem" — and because the sequence is fixed in
+advance, it also means fewer LLM round-trips per investigation (each one
+a chance for a malformed completion or added latency), which matters under
+the per-decision latency ceiling below. A playbook only ever pre-selects
+*which* read-only diagnostics to run — a recommended remediation, or any
+write, still goes through the normal LLM-proposes / Gateway-approves flow
+exactly like a freeform investigation's.
+
+## Latency ceiling on a single LLM decision
+
+Each layer of `StructuredLLMProvider`'s resilience (per-call timeout →
+model-fallback with cooldown, Gemini-specific → one same-model retry) is
+individually reasonable but has no bearing on the others' worst case —
+verified live, their product left one real decision hanging for minutes
+with a provider under sustained load. `_OVERALL_DEADLINE_SECONDS` (20s)
+wraps the whole thing: no matter how many retries or model switches happen
+underneath, a single `decide_next_action`/`extract_intent` call degrades to
+a clear "try again" message within ~20s, never longer. This is the actual
+production guarantee — not any individual timeout's own value.
+
 ## The identity re-resolution point (why "UX check" ≠ "security boundary")
 
 Channel Adapters and the Agent both *can* check whether a channel account is
@@ -120,6 +168,7 @@ src/inumi/
     llm/                 # base (LLMProvider), mock, anthropic/openai/gemini/
                         # deepseek providers, registry (provider+model selection)
     planner/actions.py    # structured AgentAction union
+    playbooks/library.py   # fixed diagnostic sequences for known scenarios
     orchestrator.py        # investigation loop
     context_manager.py     # conversation/investigation state (in-process)
     tool_client.py          # HTTP client to the Gateway

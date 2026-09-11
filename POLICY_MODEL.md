@@ -131,6 +131,18 @@ With no key set at all, `effective_default_llm()` returns `("mock", …)` —
 and `validate_for_production()` refuses to start the process in that state
 when `INUMI_ENV=production`.
 
+**Resilience.** A provider outage or malformed completion never crashes the
+chat or hangs it indefinitely — it degrades to a clear message. Each
+`decide_next_action`/`extract_intent` call gets one same-model retry
+(`StructuredLLMProvider._CALL_RETRIES`), and the Gemini provider
+additionally switches to the next model in a ranked fallback chain on a
+quota or capacity error specific to the current model (cooling that model
+down rather than blacklisting it permanently — see `_cooldown_seconds`,
+which prefers the API's own `retryDelay` hint). Whatever combination of
+retries and model switches happens underneath, one call is never worse than
+`StructuredLLMProvider._OVERALL_DEADLINE_SECONDS` (20s) late — see
+[ARCHITECTURE.md](ARCHITECTURE.md#latency-ceiling-on-a-single-llm-decision).
+
 **Per-conversation selection** (chat commands, `agent/orchestrator.py`):
 
 - `/models` — lists each configured provider and the models its key can

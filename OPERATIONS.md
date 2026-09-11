@@ -23,6 +23,13 @@
   an adapter implementation actually exists for it (see
   [TOOL_CATALOG.md](TOOL_CATALOG.md) — several restricted tools have an
   argument schema but deliberately no execution path yet).
+- **Adding/changing a playbook:** edit `agent/playbooks/library.py` —
+  each entry is a `playbook_id`, trigger phrases (matched word-boundary,
+  case-insensitive), a fixed list of read-only diagnostic steps, and
+  conclusion guidance for the LLM's final call. Restart the Agent to pick
+  up changes (loaded once at import time, like the tool catalog). See
+  [ARCHITECTURE.md](ARCHITECTURE.md#investigation-loop-freeform-vs-playbook-driven).
+  Ask `/playbooks` in chat to see what's currently registered.
 
 ## Monitoring what matters
 
@@ -39,6 +46,11 @@ Per spec §42, track (via the OpenTelemetry wiring in
 - Rate-limit rejections — sustained hits usually mean either abuse or a
   legitimately-busy incident response that needs a temporary limit bump
   (edit `config/rate_limits.yaml` and redeploy the Gateway).
+- `llm_call_deadline_exceeded` (structured log, Agent) — a single decision
+  hit the ~20s hard ceiling; sustained occurrences mean the configured
+  provider is degraded/exhausted across its whole fallback chain, not a
+  one-off blip. `gemini_model_unavailable_switching` shows which model and
+  why (quota vs. capacity) leading up to it.
 
 ## Approval queue hygiene
 
