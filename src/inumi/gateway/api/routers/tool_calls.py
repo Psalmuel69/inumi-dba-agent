@@ -19,6 +19,7 @@ from inumi.gateway.api.deps import (
     resolve_identity,
 )
 from inumi.gateway.api.state import GatewayState
+from inumi.gateway.domain.discovery import DiscoveryOrchestrator
 from inumi.gateway.domain.tool_call_handler import ToolCallHandler
 
 router = APIRouter(prefix="/v1/tool-calls", tags=["tool-calls"], dependencies=[Depends(require_agent_service_token)])
@@ -41,6 +42,12 @@ async def submit_tool_call(
         data_minimizer=state.data_minimizer,
         execution_client=state.execution_client,
         session=session,
+        discovery=DiscoveryOrchestrator(
+            registry=state.server_registry,
+            catalog_store=state.catalog_store,
+            execution_client=state.execution_client,
+            settings=state.settings,
+        ),
         agent_version="agent/0.1.0",
         channel=body.channel,
         identity_provider_name=state.settings.identity_provider,

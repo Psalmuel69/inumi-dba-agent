@@ -24,7 +24,7 @@ using Inumi to respond to a *database* incident, see the worked example in
 4. If the action executed and shouldn't have: rotate `SERVICE_JWT_SECRET`
    immediately (invalidates all in-flight service tokens across
    Channels/Agent/Gateway/Execution) and audit `config/policy.yaml` /
-   `config/inventory.yaml` for unauthorized edits (these are the only two
+   `config/servers.yaml` for unauthorized edits (these are the only two
    files that can widen what's possible without a code change).
 
 ## Suspected credential compromise

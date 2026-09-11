@@ -11,13 +11,17 @@ from abc import ABC, abstractmethod
 
 import httpx
 
-from inumi.common.models.execution import ExecutionRequest, ExecutionResult
+from inumi.common.models.catalog import ServerCatalog
+from inumi.common.models.execution import DiscoveryRequest, ExecutionRequest, ExecutionResult
 from inumi.common.service_auth import ServiceTokenIssuer
 
 
 class ExecutionClient(ABC):
     @abstractmethod
     async def execute(self, request: ExecutionRequest) -> ExecutionResult: ...
+
+    @abstractmethod
+    async def discover(self, request: DiscoveryRequest) -> ServerCatalog: ...
 
 
 class HttpExecutionClient(ExecutionClient):
@@ -46,6 +50,19 @@ class HttpExecutionClient(ExecutionClient):
             response.raise_for_status()
             return ExecutionResult.model_validate(response.json())
 
+    async def discover(self, request: DiscoveryRequest) -> ServerCatalog:
+        token = self._issuer.issue(service_name="gateway", audience=self._audience)
+        async with httpx.AsyncClient(
+            base_url=self._base_url, transport=self._transport, timeout=300
+        ) as client:
+            response = await client.post(
+                "/v1/discover",
+                json=request.model_dump(mode="json"),
+                headers={"X-Service-Token": token},
+            )
+            response.raise_for_status()
+            return ServerCatalog.model_validate(response.json())
+
 
 class InProcessExecutionClient(ExecutionClient):
     """Calls an `ExecutionService` instance directly with no HTTP hop.
@@ -60,3 +77,14 @@ class InProcessExecutionClient(ExecutionClient):
 
     async def execute(self, request: ExecutionRequest) -> ExecutionResult:
         return await self._service.execute(request)
+
+    async def discover(self, request: DiscoveryRequest) -> ServerCatalog:
+        creds = await self._service._credentials.get_credentials(request.server_id)
+        from inumi.execution.discovery.engine import run_discovery
+
+        return await run_discovery(
+            server_id=request.server_id,
+            platform=request.platform,
+            credentials=creds,
+            max_objects_per_database=request.max_objects_per_database,
+        )

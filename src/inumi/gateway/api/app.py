@@ -6,14 +6,23 @@ only thing between the Agent's tool requests and the Execution Service.
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
 from inumi.common.config import Settings, get_settings
 from inumi.common.observability import configure_logging, get_logger
-from inumi.gateway.api.routers import approvals, audit, investigations, tool_calls, tools
+from inumi.gateway.api.routers import (
+    approvals,
+    audit,
+    catalog,
+    investigations,
+    tool_calls,
+    tools,
+)
 from inumi.gateway.api.state import GatewayState
+from inumi.gateway.domain.discovery import DiscoveryOrchestrator
 
 logger = get_logger(__name__)
 
@@ -35,7 +44,16 @@ def create_app(settings: Settings | None = None, *, execution_transport=None) ->
             # Local dev/test convenience only — real deployments apply the
             # Alembic migrations in migrations/versions instead.
             await state.db.create_all()
+
+        # Optional eager estate crawl (INUMI_DISCOVERY_ON_STARTUP=true).
+        # Off by default — the catalog also refreshes lazily on first use
+        # and via `/discover`. Never blocks startup; failures are logged.
+        discovery_task: asyncio.Task | None = None
+        if settings.discovery_on_startup:
+            discovery_task = asyncio.create_task(_startup_discovery(state))
         yield
+        if discovery_task is not None:
+            discovery_task.cancel()
         await state.db.dispose()
 
     app = FastAPI(title="Inumi DBA Control Gateway", version="0.1.0", lifespan=lifespan)
@@ -46,6 +64,7 @@ def create_app(settings: Settings | None = None, *, execution_transport=None) ->
     app.include_router(approvals.router)
     app.include_router(investigations.router)
     app.include_router(audit.router)
+    app.include_router(catalog.router)
 
     @app.get("/health")
     async def health() -> dict:
@@ -56,6 +75,22 @@ def create_app(settings: Settings | None = None, *, execution_transport=None) ->
         return {"status": "ready"}
 
     return app
+
+
+async def _startup_discovery(state: GatewayState) -> None:
+    try:
+        orchestrator = DiscoveryOrchestrator(
+            registry=state.server_registry,
+            catalog_store=state.catalog_store,
+            execution_client=state.execution_client,
+            settings=state.settings,
+        )
+        results = await orchestrator.refresh_all()
+        logger.info("startup_discovery_complete", results=results)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("startup_discovery_failed", error=str(exc))
 
 
 app = create_app()

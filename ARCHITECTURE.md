@@ -57,7 +57,7 @@ not a class boundary a bug could accidentally erase.
    through the identical Gateway pipeline.
 3. **Gateway** (`gateway/domain/tool_call_handler.py`) runs the full
    pipeline: tool registry lookup → argument schema validation → target
-   parsing/enrichment → inventory resolution → **independent identity
+   parsing/enrichment → server resolution + catalog validation → **independent identity
    re-resolution** (see below) → rate limiting → policy evaluation → risk
    assessment → approval creation-or-verification → dispatch to the
    Execution Service → data minimization → audit.
@@ -132,8 +132,13 @@ src/inumi/
 1. Add the platform to `common.models.target.Platform`.
 2. Implement `execution.adapters.base.DatabaseAdapter` for it, using the
    engine's native diagnostics (equivalent of DMVs / `pg_stat_*`).
-3. Register it in `execution.service._adapter_class_for`.
-4. Add inventory entries in `config/inventory.yaml` with that platform.
+3. Implement `execution.discovery.base.ServerDiscoverer` for it (reads
+   catalog/stats views only — never table data).
+4. Register both in `execution.service._adapter_class_for` and
+   `execution.discovery.engine._DISCOVERERS`.
+5. Register servers of that platform in `config/servers.yaml`. Databases,
+   tables, indexes and extensions are discovered automatically — they are
+   never listed by hand.
 
 Nothing in the Agent or Gateway contract changes — they only ever see the
 canonical `DatabaseTarget`/`ToolDefinition`/`ExecutionRequest` models.

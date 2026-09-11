@@ -48,7 +48,7 @@ as a tool-intrinsic floor) — never in an agent prompt.
 
 1. **Outside maintenance window** — if the tool has `availability_impact=true`
    and the target database's `maintenance_window` (from
-   `config/inventory.yaml`, timezone-aware) doesn't currently cover "now."
+   `config/servers.yaml`, timezone-aware) doesn't currently cover "now."
 2. **Current load is critical** — if `current_load_critical=True` is passed
    in (a hook for future integration with a live health check) and the tool
    is a write operation.

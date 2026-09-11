@@ -78,9 +78,14 @@ or `docker compose --profile mssql up -d mssql-sample`).
    `information_schema`/`performance_schema`).
 3. Implement a `QueryExecutor` for its native driver (or reuse an ODBC
    path).
-4. Register the platform → adapter mapping in
-   `execution/service.py::_adapter_class_for`.
-5. Add inventory entries with the new platform in `config/inventory.yaml`.
+4. Implement a `ServerDiscoverer` (`execution/discovery/base.py`) that reads
+   the engine's catalog/stats views — database list, objects, extensions —
+   and never any table data.
+5. Register the platform → adapter mapping in
+   `execution/service.py::_adapter_class_for` and the discoverer in
+   `execution/discovery/engine.py::_DISCOVERERS`.
+6. Register servers of the new platform in `config/servers.yaml`. The
+   databases and objects under each are discovered automatically.
 
 The Agent and Gateway contracts (`ToolDefinition`, `DatabaseTarget`,
 `ExecutionRequest`) do not change.

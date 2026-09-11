@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from inumi.common.config import Settings
 from inumi.common.identity import IdentityProvider, MockIdentityProvider
 from inumi.common.service_auth import ServiceTokenIssuer, ServiceTokenVerifier
-from inumi.gateway.domain.catalog import CatalogStore, InMemoryCatalogStore
+from inumi.gateway.domain.catalog import CatalogStore
 from inumi.gateway.domain.data_policy import DataMinimizer
 from inumi.gateway.domain.policy_engine import PolicyEngine
 from inumi.gateway.domain.rate_limiter import InMemoryRateLimitBackend, RateLimiter
@@ -19,6 +19,7 @@ from inumi.gateway.domain.risk_engine import RiskEngine
 from inumi.gateway.domain.servers import ServerRegistry
 from inumi.gateway.domain.target_validation import TargetValidator
 from inumi.gateway.domain.tool_registry import ToolRegistry
+from inumi.gateway.infrastructure.catalog_store import DbCatalogStore
 from inumi.gateway.infrastructure.db.session import Database
 from inumi.gateway.infrastructure.execution_client import ExecutionClient, HttpExecutionClient
 
@@ -56,12 +57,13 @@ class GatewayState:
         execution client at an in-process ASGI app (via
         `httpx.ASGITransport`) instead of a real network address."""
         server_registry = ServerRegistry(settings.servers_config_path)
-        catalog_store: CatalogStore = InMemoryCatalogStore()
+        database = Database(settings.control_db_url)
+        catalog_store: CatalogStore = DbCatalogStore(database.session_factory)
         issuer = ServiceTokenIssuer(settings.service_jwt_secret, settings.service_jwt_issuer)
         verifier = ServiceTokenVerifier(settings.service_jwt_secret, settings.service_jwt_issuer)
         return cls(
             settings=settings,
-            db=Database(settings.control_db_url),
+            db=database,
             identity_provider=_build_identity_provider(settings),
             tool_registry=ToolRegistry(settings),
             server_registry=server_registry,

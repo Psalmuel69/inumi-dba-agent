@@ -43,6 +43,38 @@ class ToolClient:
             response.raise_for_status()
             return [ToolDefinition.model_validate(t) for t in response.json()]
 
+    async def list_servers(self) -> list[dict[str, Any]]:
+        async with httpx.AsyncClient(base_url=self._base_url, transport=self._transport) as client:
+            response = await client.get("/v1/catalog/servers", headers=self._headers())
+            response.raise_for_status()
+            return response.json()
+
+    async def get_server_catalog(self, server_id: str) -> dict[str, Any]:
+        async with httpx.AsyncClient(base_url=self._base_url, transport=self._transport) as client:
+            response = await client.get(
+                f"/v1/catalog/servers/{server_id}", headers=self._headers()
+            )
+            if response.status_code == 404:
+                return {}
+            response.raise_for_status()
+            return response.json()
+
+    async def refresh_catalog(
+        self, channel: str, channel_account_id: str, server_id: str | None = None
+    ) -> dict[str, Any]:
+        path = "/v1/catalog/refresh" + (f"/{server_id}" if server_id else "")
+        async with httpx.AsyncClient(
+            base_url=self._base_url, transport=self._transport, timeout=300
+        ) as client:
+            response = await client.post(
+                path,
+                json={"channel": channel, "channel_account_id": channel_account_id},
+                headers=self._headers(),
+            )
+            if response.status_code >= 400:
+                return {"status": "ERROR", "detail": response.json().get("detail", "error")}
+            return response.json()
+
     async def submit(self, request: ToolCallRequest) -> ToolCallResponse:
         async with httpx.AsyncClient(base_url=self._base_url, transport=self._transport, timeout=60) as client:
             response = await client.post(

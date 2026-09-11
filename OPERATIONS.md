@@ -5,10 +5,16 @@
 - **Adding a DBA:** add them to the real enterprise IdP group(s) referenced
   in `config/identity.yaml`'s `identity.groups`/`identity.roles` — nothing
   in this codebase needs to change or redeploy.
-- **Onboarding a database:** add an entry to `config/inventory.yaml` with
-  its environment, criticality, `allowed_roles`, and maintenance window. It
-  is immediately usable — the Agent selects targets from this inventory,
-  never from a freehand connection string (spec §11).
+- **Onboarding a server:** add an entry to `config/servers.yaml` with its
+  host/port, environment, criticality, `allowed_roles`, maintenance window,
+  and any per-database overrides, then store its credential in the secrets
+  manager under the same server id. The Gateway discovers the databases,
+  tables, indexes and extensions on that server automatically (on first use,
+  on `/discover`, or eagerly at startup with
+  `INUMI_DISCOVERY_ON_STARTUP=true`); individual databases are never
+  registered by hand. The Agent selects targets from the registry + the
+  discovered catalog, never from a freehand connection string (spec §11).
+  Discovery reads catalog and statistics views only — never table contents.
 - **Changing what requires approval:** edit `config/policy.yaml`. Changes
   take effect on the Gateway's next restart (config is loaded once at
   process start — restart the Gateway deployment to pick up policy edits).

@@ -31,9 +31,9 @@ from inumi.gateway.domain.audit import AuditLog
 from inumi.gateway.domain.authorization import authorize
 from inumi.gateway.domain.data_policy import DataMinimizer
 from inumi.gateway.domain.policy_engine import PolicyDecision, PolicyEngine
-from inumi.gateway.domain.servers import ServerRegistry
 from inumi.gateway.domain.rate_limiter import RateLimiter
 from inumi.gateway.domain.risk_engine import RiskEngine
+from inumi.gateway.domain.servers import ServerRegistry
 from inumi.gateway.domain.sql_validator import validate_readonly_sql
 from inumi.gateway.domain.target_validation import TargetValidator
 from inumi.gateway.domain.tool_catalog import ARGUMENT_MODELS
@@ -73,12 +73,14 @@ class ToolCallHandler:
         data_minimizer: DataMinimizer,
         execution_client: ExecutionClient,
         session: AsyncSession,
+        discovery=None,
         agent_version: str = "unknown",
         channel: str = "unknown",
         identity_provider_name: str = "unknown",
     ):
         self._tools = tool_registry
         self._registry = registry
+        self._discovery = discovery
         self._targets = target_validator
         self._policy = policy_engine
         self._risk = risk_engine
@@ -160,6 +162,17 @@ class ToolCallHandler:
         except ValidationError as exc:
             raise InumiError(FailureCode.INVALID_TARGET, f"Invalid target: {exc.errors()[:3]}") from exc
         target = _enrich_target(raw_target, args_dict)
+
+        # Lazily (re)discover the target server's catalog so validation can
+        # check the database/object against real, current metadata. Only for
+        # read-only operations, and never fatal.
+        if self._discovery is not None and tool.operation_type.value == "READ":
+            try:
+                server = self._registry.resolve(target)
+                await self._discovery.ensure_fresh(server.id)
+            except Exception:  # noqa: BLE001 — validate() will surface the real error
+                pass
+
         ctx = await self._targets.validate(target, tool.required_target_scope)
 
         # 3.5. Real-parser SQL validation for the (disabled-by-default) read-only

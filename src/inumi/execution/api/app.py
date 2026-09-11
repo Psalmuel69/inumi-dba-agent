@@ -1,9 +1,10 @@
 """Execution Service FastAPI app (spec §18, §31).
 
-Exposes exactly one privileged endpoint, `/v1/execute`, and it is only ever
-reachable with a valid, audience-scoped service token minted by the Gateway
-(`inumi.common.service_auth`) — there is no route, header, or flag that lets
-the Agent or a channel adapter call this service directly.
+Exposes two privileged endpoints — `/v1/execute` (run one typed operation)
+and `/v1/discover` (crawl a server's metadata into a catalog) — and both
+are only ever reachable with a valid, audience-scoped service token minted
+by the Gateway. There is no route, header, or flag that lets the Agent or a
+channel adapter call this service directly.
 """
 
 from __future__ import annotations
@@ -11,10 +12,12 @@ from __future__ import annotations
 from fastapi import Depends, FastAPI, Header, HTTPException
 
 from inumi.common.config import Settings, get_settings
-from inumi.common.models.execution import ExecutionRequest, ExecutionResult
+from inumi.common.models.catalog import ServerCatalog
+from inumi.common.models.execution import DiscoveryRequest, ExecutionRequest, ExecutionResult
 from inumi.common.observability import configure_logging, get_logger
 from inumi.common.service_auth import ServiceTokenVerifier
 from inumi.execution.credentials.provider import build_credential_provider
+from inumi.execution.discovery.engine import run_discovery
 from inumi.execution.service import ExecutionService
 
 logger = get_logger(__name__)
@@ -66,6 +69,31 @@ def create_app(settings: Settings | None = None, *, adapter_factory=None) -> Fas
             error_code=result.error_code,
         )
         return result
+
+    @app.post(
+        "/v1/discover",
+        response_model=ServerCatalog,
+        dependencies=[Depends(require_gateway_service_token)],
+    )
+    async def discover(request: DiscoveryRequest) -> ServerCatalog:
+        logger.info("discovery_started", server_id=request.server_id, platform=request.platform.value)
+        if adapter_factory is not None:
+            # Test mode — no real connection; hand back an empty catalog.
+            return ServerCatalog(server_id=request.server_id)
+        creds = await credential_provider.get_credentials(request.server_id)
+        catalog = await run_discovery(
+            server_id=request.server_id,
+            platform=request.platform,
+            credentials=creds,
+            max_objects_per_database=request.max_objects_per_database,
+        )
+        logger.info(
+            "discovery_completed",
+            server_id=request.server_id,
+            databases=len(catalog.databases),
+            warnings=len(catalog.warnings),
+        )
+        return catalog
 
     return app
 

@@ -82,56 +82,29 @@ class RoleBindingRecord(Base):
 
 
 # ---------------------------------------------------------------------------
-# Database inventory
+# Discovered catalog (populated by the discovery crawler via the Gateway)
 # ---------------------------------------------------------------------------
 
 
-class DatabaseInventoryRecord(Base):
-    """Mirrors config/inventory.yaml into the control DB for query/audit
-    convenience. The Gateway's TargetValidator loads inventory from config at
-    boot (spec §11) and this table is kept in sync by an admin sync job; the
-    Agent never writes to this table directly."""
+class ServerCatalogRecord(Base):
+    """One row per registered server — the latest discovered catalog, as
+    JSON (`inumi.common.models.catalog.ServerCatalog`). The in-memory
+    `CatalogStore` is authoritative at runtime; this table lets the catalog
+    survive a Gateway restart and be shared across replicas. The Agent
+    never writes here."""
 
-    __tablename__ = "database_inventory"
+    __tablename__ = "server_catalogs"
 
-    database_id: Mapped[str] = mapped_column(String, primary_key=True)
-    environment: Mapped[str] = mapped_column(String, nullable=False, index=True)
-    platform: Mapped[str] = mapped_column(String, nullable=False)
-    organization: Mapped[str] = mapped_column(String, default="")
-    instance: Mapped[str] = mapped_column(String, nullable=False, index=True)
-    cluster: Mapped[str] = mapped_column(String, default="")
-    database_name: Mapped[str] = mapped_column(String, default="")
-    region: Mapped[str] = mapped_column(String, default="")
-    criticality: Mapped[str] = mapped_column(String, default="standard")
-    classification: Mapped[str] = mapped_column(String, default="internal")
-    owner: Mapped[str] = mapped_column(String, default="")
-    support_team: Mapped[str] = mapped_column(String, default="")
-    maintenance_window: Mapped[dict] = mapped_column(JSON, default=dict)
-    allowed_roles: Mapped[list] = mapped_column(JSON, default=list)
-    status: Mapped[str] = mapped_column(String, default="active")
-
-
-class DatabaseEnvironmentRecord(Base):
-    __tablename__ = "database_environments"
-
-    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("env"))
-    name: Mapped[str] = mapped_column(String, unique=True, nullable=False)
-    is_production: Mapped[bool] = mapped_column(Boolean, default=False)
-
-
-class DatabasePolicyRecord(Base):
-    """Mirrors config/policy.yaml for audit/reporting; live decisions are made
-    from the loaded PolicyEngine config, not from this table."""
-
-    __tablename__ = "database_policies"
-
-    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("pol"))
-    environment: Mapped[str] = mapped_column(String, nullable=False, index=True)
-    tool_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
-    role: Mapped[str] = mapped_column(String, nullable=False)
-    decision: Mapped[str] = mapped_column(String, nullable=False)
-    version_hash: Mapped[str] = mapped_column(String, default="")
-    loaded_at: Mapped[dt.datetime] = mapped_column(default=_utcnow)
+    server_id: Mapped[str] = mapped_column(String, primary_key=True)
+    discovered_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+    engine_version: Mapped[str] = mapped_column(String, default="")
+    engine_edition: Mapped[str] = mapped_column(String, default="")
+    catalog: Mapped[dict] = mapped_column(JSON, default=dict)
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
 
 
 # ---------------------------------------------------------------------------

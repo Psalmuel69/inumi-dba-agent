@@ -40,6 +40,16 @@ class ExecutionRequest(BaseModel):
     max_result_rows: int
 
 
+class DiscoveryRequest(BaseModel):
+    """Gateway -> Execution Service: crawl one registered server's metadata."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    server_id: str
+    platform: Platform
+    max_objects_per_database: int = 5000
+
+
 class ExecutionResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

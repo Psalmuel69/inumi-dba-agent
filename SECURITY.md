@@ -18,7 +18,7 @@
 | 12 | Database credentials managed outside the agent | `CredentialProvider` abstraction with pluggable Vault/AWS/Azure/GCP backends |
 | 13 | Database output treated as untrusted data | Agent planners inspect only structural fields (row counts, named ids); the system prompt for the real LLM provider explicitly instructs it never to treat tool-result text as instructions (defense in depth on top of the structural design) |
 | 14 | Audit records cannot be modified by the agent | `gateway/domain/audit.py::AuditLog` exposes only `record`/`record_security_event` — no update/delete method exists anywhere in the codebase |
-| 15 | Production/non-production explicitly separated | `Environment` enum; every policy table, every inventory entry, every risk assessment is environment-scoped |
+| 15 | Production/non-production explicitly separated | `Environment` enum; every policy table, every registered server, every risk assessment is environment-scoped |
 | 16 | Arbitrary SQL disabled by default | `Settings.enable_execute_sql_tool = False`, `enable_readonly_sql_tool = False` (and four more `enable_*` flags) — see `.env.example` |
 | 17 | Typed operations preferred over raw SQL | Every controlled write tool has its own Pydantic argument model (`common/models/tool_arguments.py`); the adapter constructs SQL, never the LLM |
 | 18 | All privileged actions are auditable | Every branch of `tool_call_handler.py` (success and denial) calls `AuditLog.record` |
@@ -88,7 +88,7 @@ audience-scoped, HMAC-signed tokens for every internal hop
 
 ## Fail-closed dependencies
 
-If the Policy Engine, identity provider, database inventory, or credential
+If the Policy Engine, identity provider, server registry, or credential
 provider is unavailable or misconfigured, the affected request is denied
 (`InumiError`), never silently allowed. See `THREAT_MODEL.md` for the
 specific failure-mode tests.

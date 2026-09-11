@@ -34,7 +34,7 @@ _HELP_TEXT = (
     "with your role's approval where required — take controlled remediation "
     "actions. Try: \"Why is CoreBanking slow?\" or \"Check blocking on "
     "CoreBanking production.\"\n\nCommands: /help, /status, /approve <id>, "
-    "/reject <id>, /models, /model <provider> <model>"
+    "/reject <id>, /models, /model <provider> <model>, /servers, /catalog <id>, /discover"
 )
 
 
@@ -50,6 +50,19 @@ class AgentOrchestrator:
         return self._llm_registry.for_conversation(
             provider=state.llm_provider, model=state.llm_model
         )
+
+    async def _known_database_names(self) -> list[str]:
+        """Every discovered database name — helps the planner resolve
+        "check CoreBanking" to a real target. Server ids/aliases are NOT
+        included (they're resolved separately, from `instance`)."""
+        try:
+            servers = await self._tool_client.list_servers()
+        except Exception:  # noqa: BLE001
+            return []
+        names: list[str] = []
+        for s in servers:
+            names.extend((s.get("catalog") or {}).get("databases", []))
+        return [n for n in dict.fromkeys(names) if n]
 
     async def handle_message(
         self,
@@ -70,7 +83,9 @@ class AgentOrchestrator:
             return command_reply
 
         llm = self._llm_for(state)
-        intent = await llm.extract_intent(message, known_database_names=[])
+        intent = await llm.extract_intent(
+            message, known_database_names=await self._known_database_names()
+        )
         if intent.is_greeting_or_chitchat:
             return AgentReply(text=_HELP_TEXT)
         if not intent.is_dba_task:
@@ -291,7 +306,63 @@ class AgentOrchestrator:
             return await self._handle_model_command(state, stripped)
         if stripped.startswith("/model "):
             return await self._handle_model_command(state, stripped)
+        if stripped == "/servers":
+            return await self._handle_servers_command()
+        if stripped == "/catalog" or stripped.startswith("/catalog "):
+            return await self._handle_catalog_command(stripped)
+        if stripped == "/discover" or stripped.startswith("/discover "):
+            return await self._handle_discover_command(stripped, channel, channel_account_id)
         return None
+
+    async def _handle_servers_command(self) -> AgentReply:
+        servers = await self._tool_client.list_servers()
+        if not servers:
+            return AgentReply(text="No servers are registered.")
+        lines = []
+        for s in servers:
+            cat = s.get("catalog")
+            summary = (
+                f"{cat['database_count']} databases, discovered "
+                f"{(cat['discovered_at'] or '')[:16]}"
+                if cat
+                else "not yet discovered — run /discover"
+            )
+            lines.append(
+                f"- {s['id']}  [{s['environment']}/{s['platform']}, {s['criticality']}]  {summary}"
+            )
+        return AgentReply(text="Registered servers:\n" + "\n".join(lines))
+
+    async def _handle_catalog_command(self, stripped: str) -> AgentReply:
+        parts = stripped.split(maxsplit=1)
+        if len(parts) < 2:
+            return AgentReply(text="Usage: /catalog <server-id>  (see /servers)")
+        data = await self._tool_client.get_server_catalog(parts[1].strip())
+        cat = (data or {}).get("catalog")
+        if not cat:
+            return AgentReply(
+                text=f"No catalog for '{parts[1].strip()}' yet — run /discover {parts[1].strip()}"
+            )
+        lines = [f"{data['server']['id']} — {cat['engine_edition']} {cat['engine_version']}"]
+        for db in cat["databases"][:40]:
+            kinds: dict[str, int] = {}
+            for o in db["objects"]:
+                kinds[o["kind"]] = kinds.get(o["kind"], 0) + 1
+            size = f"{db['size_bytes'] / 1e6:.0f}MB" if db.get("size_bytes") else "?"
+            exts = f", {len(db['extensions'])} extensions" if db.get("extensions") else ""
+            lines.append(f"  {db['name']} ({db['state']}, {size}) — {dict(kinds)}{exts}")
+        if cat.get("warnings"):
+            lines.append(f"  warnings: {cat['warnings'][:3]}")
+        return AgentReply(text="\n".join(lines))
+
+    async def _handle_discover_command(
+        self, stripped: str, channel: str, channel_account_id: str
+    ) -> AgentReply:
+        parts = stripped.split(maxsplit=1)
+        server_id = parts[1].strip() if len(parts) > 1 else None
+        result = await self._tool_client.refresh_catalog(channel, channel_account_id, server_id)
+        if result.get("status") == "ERROR":
+            return AgentReply(text=f"Discovery failed: {result.get('detail')}", status="error")
+        return AgentReply(text=f"Discovery complete:\n{result}")
 
     async def _handle_model_command(self, state: ConversationState, stripped: str) -> AgentReply:
         registry = self._llm_registry

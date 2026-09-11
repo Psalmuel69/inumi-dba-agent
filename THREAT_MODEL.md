@@ -163,7 +163,7 @@ outside this repo.
 is set, hoping to be resolved against production's broader privileges, or
 vice versa.
 
-**Mitigation:** `DatabaseInventory.find_candidates` filters strictly by
+**Mitigation:** `ServerRegistry.find_candidates` filters strictly by
 `environment` first and never widens across it.
 
 **Test:** `tests/unit/test_target_validation.py::test_cannot_cross_environments_implicitly`,
@@ -227,7 +227,7 @@ guess at a tool call. See rule #20 in SECURITY.md.
 |---|---|
 | Policy Engine config missing/invalid | Fails to start (fail closed at boot) |
 | Identity provider unreachable | `resolve_identity` returns 401 (`UNAUTHORIZED`) |
-| Database inventory missing an entry | `INVALID_TARGET` |
+| Target server not in `config/servers.yaml` (or its database/object not in the discovered catalog) | `INVALID_TARGET` |
 | Credential provider misconfigured | `DEPENDENCY_UNAVAILABLE` → surfaced as `EXECUTION_FAILED`, never a fallback credential |
 | Audit write fails | Exception propagates — a tool call that cannot be audited does not silently "succeed anyway" (session is not committed) |
 

@@ -1,77 +1,33 @@
-"""Discovered catalog — what Inumi has learned about each registered server.
+"""Catalog storage for the Gateway.
 
-Populated by the discovery crawler (`inumi.execution.discovery`, run through
-the Execution Service — the only component with database access) and cached
-in the control-plane database. Everything here is DBA *metadata*: database
-names/states/sizes, schema and object names, index stats, available
-extensions, server/instance properties. **Never table or view row data.**
-
-Object names and comments coming from a database are untrusted strings —
-treated as data, never instructions (spec §23).
+The catalog *models* live in `inumi.common.models.catalog` (shared with the
+Execution Service's discovery crawler). This module is just the store the
+Gateway reads for target validation and `/catalog`, and writes after a
+discovery run.
 """
 
 from __future__ import annotations
 
-import datetime as dt
 from abc import ABC, abstractmethod
 
-from pydantic import BaseModel, ConfigDict, Field
+from inumi.common.models.catalog import (
+    DiscoveredDatabase,
+    DiscoveredExtension,
+    DiscoveredObject,
+    ServerCatalog,
+)
 
-
-class DiscoveredObject(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    schema_name: str
-    name: str
-    kind: str  # table | view | index | procedure | function | sequence
-    row_estimate: int | None = None
-    size_bytes: int | None = None
-    properties: dict = Field(default_factory=dict)
-
-
-class DiscoveredExtension(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    name: str
-    installed_version: str | None = None
-    default_version: str | None = None
-    available: bool = True
-
-
-class DiscoveredDatabase(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    name: str
-    state: str = "unknown"
-    size_bytes: int | None = None
-    options: dict = Field(default_factory=dict)
-    objects: list[DiscoveredObject] = Field(default_factory=list)
-    extensions: list[DiscoveredExtension] = Field(default_factory=list)
-
-
-class ServerCatalog(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    server_id: str
-    discovered_at: dt.datetime | None = None
-    engine_version: str = ""
-    engine_edition: str = ""
-    instance_properties: dict = Field(default_factory=dict)
-    databases: list[DiscoveredDatabase] = Field(default_factory=list)
-
-    def database(self, name: str) -> DiscoveredDatabase | None:
-        lowered = name.strip().lower()
-        return next((d for d in self.databases if d.name.lower() == lowered), None)
-
-    def database_names(self) -> list[str]:
-        return [d.name for d in self.databases]
+__all__ = [
+    "DiscoveredDatabase",
+    "DiscoveredExtension",
+    "DiscoveredObject",
+    "ServerCatalog",
+    "CatalogStore",
+    "InMemoryCatalogStore",
+]
 
 
 class CatalogStore(ABC):
-    """Read/write access to the discovered catalog. The Gateway reads it for
-    target validation and to answer `/servers` / `/catalog`; the Execution
-    Service (via the Gateway) writes it after a discovery run."""
-
     @abstractmethod
     async def get(self, server_id: str) -> ServerCatalog | None: ...
 
@@ -83,7 +39,7 @@ class CatalogStore(ABC):
 
 
 class InMemoryCatalogStore(CatalogStore):
-    """Process-local. Fine for a single Gateway instance; a DB-backed store
+    """Process-local. A DB-backed store
     (`inumi.gateway.infrastructure.catalog_store`) is used when the control
     DB is available so the catalog survives a restart and is shared across
     replicas."""

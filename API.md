@@ -42,6 +42,21 @@ Returns the approval's current state (never the raw action hash).
 
 Read-only projections of control-plane state.
 
+### `GET /v1/catalog/servers`, `GET /v1/catalog/servers/{server_id}`
+
+The registered servers (`config/servers.yaml`) plus, per server, the latest
+discovered catalog — engine version/edition, database list, and per-database
+object counts (tables, views, indexes, procedures) and available extensions.
+Catalog discovery reads catalog and statistics views only; it never reads
+table or view contents. `404` if the server id is not registered.
+
+### `POST /v1/catalog/refresh`, `POST /v1/catalog/refresh/{server_id}`
+
+Re-runs discovery now (otherwise it refreshes lazily on first use and every
+`DISCOVERY_REFRESH_MINUTES`). Body: `{channel, channel_account_id}` —
+independently re-resolved and required to hold `DBA_MANAGER` (`403`
+otherwise). `404` if the server id is not registered.
+
 ### `GET /health`, `GET /ready`
 
 ## Execution Service (`execution/api/app.py`) — default port 8002
@@ -51,6 +66,15 @@ Read-only projections of control-plane state.
 Only callable by the Gateway (audience `inumi-execution`). Body:
 `ExecutionRequest`; response: `ExecutionResult`. Never exposed to any other
 service or to the public internet in a real deployment (spec §30).
+
+### `POST /v1/discover`
+
+Only callable by the Gateway. Body: `DiscoveryRequest` (`server_id`,
+`platform`, `max_objects_per_database`); response: `ServerCatalog`. Opens a
+real connection via the same `CredentialProvider` as `/v1/execute` and reads
+the engine's catalog/DMV/stats views — server properties, `sys.databases` /
+`pg_database`, object lists with row estimates and sizes, available
+extensions. It issues no query that returns user table/view data.
 
 ### `GET /health`, `GET /ready`
 

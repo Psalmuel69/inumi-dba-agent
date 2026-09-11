@@ -41,7 +41,7 @@ python -m venv .venv
 ./.venv/Scripts/python.exe -m pip install -e ".[dev]"
 cp .env.example .env
 cp config/dev_credentials.example.yaml config/dev_credentials.yaml
-./.venv/Scripts/python.exe -m pytest        # 116 pass, 22 opt-in skipped
+./.venv/Scripts/python.exe -m pytest        # 134 pass, 22 opt-in skipped
 ```
 
 Run the full stack (bundled sample PostgreSQL target included):
@@ -57,6 +57,14 @@ curl -X POST http://localhost:8003/dev/chat \
   -H "Content-Type: application/json" \
   -d '{"user": "dba_l2@example.com", "message": "Check blocking on the production PostgreSQL cluster."}'
 ```
+
+**Registering databases.** You don't. Register each *server* in
+`config/servers.yaml` (host, environment, criticality, allowed roles,
+maintenance window, per-database overrides) and store its diagnostic
+credential in the secrets manager under the same id. Inumi discovers the
+databases, tables, indexes and extensions on that server itself — reading
+catalog and statistics views only, never table or view contents. Ask it
+`/servers`, `/catalog <server>`, or `/discover` in chat.
 
 **Choosing an LLM.** Set a key for any of `ANTHROPIC_API_KEY`,
 `OPENAI_API_KEY`, `GEMINI_API_KEY`, `DEEPSEEK_API_KEY` (e.g.
