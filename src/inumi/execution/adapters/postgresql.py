@@ -99,7 +99,7 @@ class PostgreSQLAdapter(DatabaseAdapter):
             from pg_stat_statements
             where queryid = %(query_id)s
         """
-        return await self._executor.fetch_all(sql, {"query_id": query_id})
+        return await self._pg_stat_statements_query(sql, {"query_id": query_id})
 
     async def top_queries(self, order_by: str, limit: int) -> list[dict[str, Any]]:
         order_column = {
@@ -116,7 +116,31 @@ class PostgreSQLAdapter(DatabaseAdapter):
             order by {order_column} desc
             limit %(limit)s
         """
-        return await self._executor.fetch_all(sql, {"limit": limit})
+        return await self._pg_stat_statements_query(sql, {"limit": limit})
+
+    async def _pg_stat_statements_query(
+        self, sql: str, params: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        try:
+            return await self._executor.fetch_all(sql, params)
+        except Exception as exc:  # noqa: BLE001 — narrowed to the one known-optional dependency
+            # pg_stat_statements is an optional extension (the module
+            # docstring already says "where installed") — a server that
+            # doesn't have it enabled must surface that plainly to the DBA
+            # instead of a bare EXECUTION_FAILED. Any other failure (a real
+            # connection/permissions/syntax problem) still propagates.
+            if "pg_stat_statements" not in str(exc):
+                raise
+            return [
+                {
+                    "note": (
+                        "The pg_stat_statements extension is not installed/enabled on "
+                        "this server, so per-query statistics aren't available. Run "
+                        "`CREATE EXTENSION pg_stat_statements;` (after adding it to "
+                        "shared_preload_libraries and restarting) to enable this."
+                    )
+                }
+            ]
 
     async def indexes(self, schema: str, table: str) -> list[dict[str, Any]]:
         sql = """

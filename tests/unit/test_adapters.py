@@ -30,6 +30,42 @@ async def test_postgres_kill_session_calls_pg_terminate_backend():
 
 
 @pytest.mark.asyncio
+async def test_postgres_top_queries_degrades_when_pg_stat_statements_is_missing():
+    """Reproduces a live finding: pg_stat_statements is an optional
+    extension (the module docstring already says "where installed"), but
+    a server without it enabled used to bare-fail with EXECUTION_FAILED
+    and no diagnosable reason. Must degrade to an informative row instead."""
+    executor = FakeQueryExecutor(
+        fetch_error=RuntimeError('relation "pg_stat_statements" does not exist')
+    )
+    adapter = PostgreSQLAdapter(executor, "TestDatabase")
+    rows = await adapter.top_queries("cpu", 10)
+    assert len(rows) == 1
+    assert "pg_stat_statements" in rows[0]["note"]
+
+
+@pytest.mark.asyncio
+async def test_postgres_query_plan_degrades_when_pg_stat_statements_is_missing():
+    executor = FakeQueryExecutor(
+        fetch_error=RuntimeError('relation "pg_stat_statements" does not exist')
+    )
+    adapter = PostgreSQLAdapter(executor, "TestDatabase")
+    rows = await adapter.query_plan("12345")
+    assert len(rows) == 1
+    assert "pg_stat_statements" in rows[0]["note"]
+
+
+@pytest.mark.asyncio
+async def test_postgres_top_queries_does_not_swallow_an_unrelated_failure():
+    """Only the known-optional pg_stat_statements dependency degrades — a
+    real connection/permissions/syntax problem must still propagate."""
+    executor = FakeQueryExecutor(fetch_error=RuntimeError("connection reset by peer"))
+    adapter = PostgreSQLAdapter(executor, "TestDatabase")
+    with pytest.raises(RuntimeError, match="connection reset"):
+        await adapter.top_queries("cpu", 10)
+
+
+@pytest.mark.asyncio
 async def test_postgres_create_index_never_receives_raw_sql_from_caller():
     """The Agent supplies structured arguments (schema/table/columns/name),
     never a SQL string — the adapter itself is what constructs SQL."""

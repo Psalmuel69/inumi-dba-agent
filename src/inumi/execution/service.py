@@ -28,11 +28,14 @@ from inumi.common.config import Settings
 from inumi.common.models.execution import ExecutionRequest, ExecutionResult
 from inumi.common.models.failures import FailureCode
 from inumi.common.models.target import Platform
+from inumi.common.observability import get_logger
 from inumi.execution.adapters.base import DatabaseAdapter, QueryExecutor
 from inumi.execution.adapters.mysql import MySQLAdapter
 from inumi.execution.adapters.postgresql import PostgreSQLAdapter
 from inumi.execution.adapters.sqlserver import SQLServerAdapter
 from inumi.execution.credentials.provider import CredentialProvider
+
+logger = get_logger(__name__)
 
 # A test/integration seam: given an ExecutionRequest, return a ready
 # DatabaseAdapter (and an optional handle to close). Production never sets
@@ -156,7 +159,20 @@ class ExecutionService:
                 error_detail=str(exc),
                 duration_ms=int((time.monotonic() - start) * 1000),
             )
-        except Exception:  # noqa: BLE001 — deliberately broad: never leak internals
+        except Exception as exc:  # noqa: BLE001 — deliberately broad: never leak internals
+            # error_detail below promises "server-side logs" — this is that
+            # log. Without it, a real driver-level failure (a missing
+            # extension, a permissions gap, a syntax error from a platform
+            # quirk) is invisible from the client's genuinely-necessary
+            # generic message, and undiagnosable without reproducing by hand.
+            logger.error(
+                "execution_failed",
+                tool_id=request.tool_id,
+                server_id=request.server_id,
+                execution_id=request.execution_id,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
             return ExecutionResult(
                 execution_id=request.execution_id,
                 success=False,

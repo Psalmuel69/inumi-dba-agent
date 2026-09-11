@@ -85,3 +85,31 @@ async def test_without_configured_credentials_execution_fails_closed():
     result = await service.execute(_request("database.get_health", max_execution_time=5))
     assert result.success is False
     assert result.error_code == "EXECUTION_FAILED"
+
+
+@pytest.mark.asyncio
+async def test_an_unhandled_failure_is_logged_server_side_not_just_swallowed(capsys):
+    """Reproduces a live finding: `error_detail` tells the caller "See
+    server-side logs for detail" — but nothing was ever actually logged, so
+    a real driver-level failure (a missing extension, in the live case) was
+    undiagnosable without manually reproducing it. The failure itself must
+    still degrade to the same generic client-facing message (never leak
+    internals to the Agent/DBA), but the real cause must land in the logs."""
+
+    class _BoomAdapter:
+        async def health(self):
+            raise RuntimeError("relation \"pg_stat_statements\" does not exist")
+
+    async def factory(request):
+        return _BoomAdapter(), None
+
+    service = ExecutionService(_settings(), credential_provider=None, adapter_factory=factory)  # type: ignore[arg-type]
+    result = await service.execute(_request("database.get_health"))
+
+    assert result.success is False
+    assert result.error_code == "EXECUTION_FAILED"
+    assert "server-side logs" in result.error_detail
+
+    logged = capsys.readouterr().out
+    assert "execution_failed" in logged
+    assert "pg_stat_statements" in logged
