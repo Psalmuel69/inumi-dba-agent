@@ -105,6 +105,27 @@ def _cooldown_seconds(exc: Exception) -> float:
 def _clean_schema(schema: dict[str, Any]) -> dict[str, Any]:
     """Drop keys Gemini's schema validator rejects (`description` on the
     root, `$schema`, `title`, `additionalProperties`)."""
+    # Pydantic v2 represents `X | None` as anyOf: [<X's schema>, {"type":
+    # "null"}] — Gemini's schema subset has no anyOf, and this function used
+    # to just drop it via the allow-list below, silently discarding the
+    # actual type/enum along with it. That meant EVERY Optional field in
+    # this codebase's schemas (IntentExtraction.database_hint/
+    # environment_hint/instance_hint, all `str | None`) reached Gemini as an
+    # unconstrained `{}` — confirmed live: a real model wrote environment
+    # "dev" because nothing ever told it the field was constrained to
+    # {development, uat, production} in the first place. Flatten instead:
+    # keep the non-null branch's constraints and mark nullable.
+    if "anyOf" in schema:
+        variants = schema["anyOf"]
+        non_null = [v for v in variants if v.get("type") != "null"]
+        is_nullable = any(v.get("type") == "null" for v in variants)
+        if len(non_null) == 1:
+            schema = {**schema, **non_null[0]}
+            schema.pop("anyOf", None)
+            if is_nullable:
+                schema["nullable"] = True
+        # else: a real multi-type union — rare in this codebase's schemas;
+        # falls through and loses type info same as before this fix.
     allowed = {"type", "properties", "required", "enum", "items", "nullable"}
     out: dict[str, Any] = {}
     for k, v in schema.items():

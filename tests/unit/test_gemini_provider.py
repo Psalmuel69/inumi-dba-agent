@@ -17,10 +17,12 @@ from inumi.agent.llm.gemini_provider import (
     _MAX_COOLDOWN_SECONDS,
     _MODEL_FALLBACK_CHAIN,
     GeminiLLMProvider,
+    _clean_schema,
     _cooldown_seconds,
     _is_model_unavailable_error,
     _meets_min_version,
 )
+from inumi.agent.planner.actions import IntentExtraction
 
 
 def test_default_and_fallback_models_are_gemini_3_or_later():
@@ -191,3 +193,57 @@ async def test_a_model_switch_sticks_for_the_next_call_on_the_same_instance():
     result = await provider._with_model_fallback(second_call)
     assert result == "ok"
     assert seen == [_MODEL_FALLBACK_CHAIN[1]]
+
+
+# --- _clean_schema: anyOf (Optional field) flattening -----------------------
+#
+# Reproduces a live finding: a DBA asked the agent about a database without
+# naming an environment in an earlier turn, then wrote "dev" when the agent
+# proposed a target — "dev" is not a valid Environment value, and the model
+# kept proposing it because nothing ever told it the field was constrained.
+# Root cause: Pydantic v2 represents `X | None` as
+# `anyOf: [<X's schema>, {"type": "null"}]`, and _clean_schema used to just
+# drop `anyOf` (not in its allow-list), silently discarding the type/enum
+# along with it — so EVERY Optional field in this codebase's schemas
+# (IntentExtraction.database_hint/environment_hint/instance_hint) reached
+# Gemini as an unconstrained `{}`.
+
+
+def test_clean_schema_flattens_an_optional_field_to_nullable():
+    raw = {"anyOf": [{"type": "string"}, {"type": "null"}], "default": None, "title": "X"}
+    cleaned = _clean_schema(raw)
+    assert cleaned == {"type": "string", "nullable": True}
+
+
+def test_clean_schema_preserves_the_enum_on_an_optional_literal_field():
+    raw = {
+        "anyOf": [{"type": "string", "enum": ["a", "b"]}, {"type": "null"}],
+        "default": None,
+    }
+    cleaned = _clean_schema(raw)
+    assert cleaned == {"type": "string", "enum": ["a", "b"], "nullable": True}
+
+
+def test_clean_schema_on_the_real_intent_extraction_schema_keeps_every_field_typed():
+    """No Optional field is left as an unconstrained {} after cleaning —
+    the actual bug: every one of these used to lose its type entirely."""
+    cleaned = _clean_schema(IntentExtraction.model_json_schema())
+    props = cleaned["properties"]
+    for field in ("database_hint", "environment_hint", "instance_hint"):
+        assert props[field].get("type") == "string", f"{field} lost its type"
+        assert props[field].get("nullable") is True
+
+    # And specifically: environment_hint is now a real enum, not a free
+    # string a model could fill with "dev"/"prod"/anything else.
+    assert props["environment_hint"]["enum"] == ["development", "uat", "production"]
+
+
+def test_environment_hint_rejects_an_abbreviation():
+    """Pins the Pydantic-level guarantee behind the schema fix above:
+    IntentExtraction itself refuses "dev" — it was never a valid
+    Environment value, only ever accepted because nothing constrained it."""
+    with pytest.raises(Exception, match="development.*uat.*production|literal_error"):
+        IntentExtraction(is_dba_task=True, environment_hint="dev")
+    # The real values still work.
+    for value in ("development", "uat", "production"):
+        IntentExtraction(is_dba_task=True, environment_hint=value)

@@ -60,7 +60,15 @@ class IntentExtraction(BaseModel):
     is_dba_task: bool
     is_greeting_or_chitchat: bool = False
     database_hint: str | None = None
-    environment_hint: str | None = None
+    # A Literal (not the Environment enum) so the generated JSON schema is a
+    # flat {"enum": [...]}, never a $defs/$ref an Enum class would produce —
+    # Gemini's function-calling schema subset supports neither. Verified
+    # live: before this was constrained at all, a real model wrote "dev"
+    # (never a valid Environment value) because nothing told it the field
+    # was constrained — DatabaseTarget then rejects it outright as an
+    # invalid enum member, not as a missing/empty field, so it read to the
+    # DBA as an unexplained repeated INVALID_TARGET rather than a typo.
+    environment_hint: Literal["development", "uat", "production"] | None = None
     # A registered server id/alias explicitly named in the message (e.g. "on
     # postgres-local"). Only ever a value from the known-servers list handed
     # to the extractor — never invented — and only narrows a server the
