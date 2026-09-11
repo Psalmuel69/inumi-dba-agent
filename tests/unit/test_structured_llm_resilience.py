@@ -102,6 +102,31 @@ async def test_decide_next_action_retries_a_malformed_completion_not_just_call_f
 
 
 @pytest.mark.asyncio
+async def test_a_fresh_call_failure_after_an_earlier_validation_failure_is_not_mislabeled():
+    """Reproduces the live finding: attempt 1 returns a malformed completion
+    (validation fails), attempt 2 hits a fresh outage before any response
+    comes back at all. The final message must be the outage one — a stale
+    `last_raw` from attempt 1 must not make this look like a validation
+    problem on attempt 2, which never even got a response to validate."""
+
+    class _MalformedThenOutage(_FakeStructuredProvider):
+        async def _call_tool(self, *, system, user, schema, tool_name):
+            self.call_count += 1
+            if self.call_count == 1:
+                return {"action": "propose_tool_call", "tool_id": "database.get_health"}  # no reason
+            raise RuntimeError("503 UNAVAILABLE: high demand")
+
+    provider = _MalformedThenOutage()
+    action = await provider.decide_next_action(
+        problem_statement="check health", available_tool_ids=["database.get_health"],
+        transcript=[], turn_count=0,
+    )
+    assert isinstance(action, AskClarification)
+    assert "temporarily unavailable" in action.question.lower()
+    assert provider.call_count == provider._CALL_RETRIES + 1
+
+
+@pytest.mark.asyncio
 async def test_decide_next_action_degrades_on_a_malformed_completion():
     provider = _FakeStructuredProvider(
         tool_result={"action": "propose_tool_call", "tool_id": "database.get_health"}

@@ -179,6 +179,12 @@ class StructuredLLMProvider(LLMProvider):
 
         async def attempt() -> IntentExtraction:
             nonlocal last_raw
+            # Reset per attempt: if *this* attempt fails before reaching the
+            # call's response (e.g. a fresh outage on a retry after a prior
+            # attempt's response had already failed validation), the stale
+            # previous response must not be reported as if it were this
+            # attempt's — that mislabels a call failure as a validation one.
+            last_raw = None
             data = await self._call_tool(
                 system=_INTENT_SYSTEM,
                 user=(
@@ -231,6 +237,8 @@ class StructuredLLMProvider(LLMProvider):
 
         async def attempt() -> AgentAction:
             nonlocal last_raw
+            # Reset per attempt — see the matching comment in extract_intent.
+            last_raw = None
             data = await self._call_tool(
                 system=_ACTION_SYSTEM,
                 user=(
