@@ -19,13 +19,16 @@ from inumi.agent.planner.actions import AskClarification, IntentExtraction, Prop
 
 class _FakeStructuredProvider(StructuredLLMProvider):
     provider_name = "fake"
+    _CALL_RETRY_DELAY_SECONDS = 0  # keep the retry-on-failure tests instant
 
     def __init__(self, *, tool_result: dict[str, Any] | None = None, tool_error: Exception | None = None):
         super().__init__("fake-model")
         self._tool_result = tool_result
         self._tool_error = tool_error
+        self.call_count = 0
 
     async def _call_tool(self, *, system: str, user: str, schema: dict, tool_name: str) -> dict:
+        self.call_count += 1
         if self._tool_error is not None:
             raise self._tool_error
         return self._tool_result or {}
@@ -43,6 +46,33 @@ async def test_decide_next_action_degrades_on_a_transient_provider_outage():
     )
     assert isinstance(action, AskClarification)
     assert "fake" in action.question and "try again" in action.question.lower()
+    # First attempt + _CALL_RETRIES retries, all failing the same way.
+    assert provider.call_count == provider._CALL_RETRIES + 1
+
+
+@pytest.mark.asyncio
+async def test_decide_next_action_recovers_after_a_transient_failure():
+    """A call that fails once and then succeeds must not be treated as a
+    permanent outage — this is the whole point of retrying."""
+
+    class _FlakyThenOk(_FakeStructuredProvider):
+        async def _call_tool(self, *, system, user, schema, tool_name):
+            self.call_count += 1
+            if self.call_count == 1:
+                raise RuntimeError("503 UNAVAILABLE: high demand")
+            return {
+                "action": "propose_tool_call",
+                "tool_id": "database.get_health",
+                "reason": "Baseline check.",
+            }
+
+    provider = _FlakyThenOk()
+    action = await provider.decide_next_action(
+        problem_statement="check health", available_tool_ids=["database.get_health"],
+        transcript=[], turn_count=0,
+    )
+    assert isinstance(action, ProposeToolCall)
+    assert provider.call_count == 2
 
 
 @pytest.mark.asyncio

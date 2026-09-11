@@ -17,7 +17,9 @@ to implement three SDK-specific primitives: `_call_tool`, `_call_text`,
 
 from __future__ import annotations
 
+import asyncio
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from inumi.agent.planner.actions import (
@@ -136,6 +138,37 @@ class LLMProvider(ABC):
 class StructuredLLMProvider(LLMProvider):
     """Shared implementation for every real (API-backed) provider."""
 
+    # Extra attempts after the first, for a call that fails outright (not a
+    # malformed-response validation failure — that's never retried, a retry
+    # can't fix a schema mismatch). Deliberately small: the SDKs already
+    # retry retryable HTTP statuses (5xx/429) internally via tenacity before
+    # ever raising to us, so by the time we see an exception here the SDK
+    # has already given up once — this just gives real, load-shedding-driven
+    # outages (Gemini's own error text: "usually temporary") one more shot
+    # rather than immediately telling the DBA to ask again themselves.
+    _CALL_RETRIES = 2
+    _CALL_RETRY_DELAY_SECONDS = 3.0
+
+    async def _call_with_retry(self, fn: Callable[[], Awaitable[Any]], *, what: str) -> Any:
+        last_exc: Exception | None = None
+        for attempt in range(self._CALL_RETRIES + 1):
+            try:
+                return await fn()
+            except Exception as exc:  # noqa: BLE001 — retried, then re-raised for the caller to degrade
+                last_exc = exc
+                if attempt < self._CALL_RETRIES:
+                    logger.info(
+                        "llm_call_retrying",
+                        provider=self.provider_name,
+                        model=self.model,
+                        what=what,
+                        attempt=attempt + 1,
+                        error=str(exc),
+                    )
+                    await asyncio.sleep(self._CALL_RETRY_DELAY_SECONDS)
+        assert last_exc is not None  # loop always runs >=1 iteration
+        raise last_exc
+
     async def extract_intent(
         self,
         message: str,
@@ -143,14 +176,17 @@ class StructuredLLMProvider(LLMProvider):
         known_server_hints: list[str] | None = None,
     ) -> IntentExtraction:
         try:
-            data = await self._call_tool(
-                system=_INTENT_SYSTEM,
-                user=(
-                    f"Message: {message!r}\nKnown databases: {known_database_names}\n"
-                    f"Known servers: {known_server_hints or []}"
+            data = await self._call_with_retry(
+                lambda: self._call_tool(
+                    system=_INTENT_SYSTEM,
+                    user=(
+                        f"Message: {message!r}\nKnown databases: {known_database_names}\n"
+                        f"Known servers: {known_server_hints or []}"
+                    ),
+                    schema=IntentExtraction.model_json_schema(),
+                    tool_name="submit_intent",
                 ),
-                schema=IntentExtraction.model_json_schema(),
-                tool_name="submit_intent",
+                what="extract_intent",
             )
         except Exception as exc:  # noqa: BLE001 — provider/network failure, never crash the chat
             logger.warning(
@@ -182,16 +218,19 @@ class StructuredLLMProvider(LLMProvider):
         turn_count: int,
     ) -> AgentAction:
         try:
-            data = await self._call_tool(
-                system=_ACTION_SYSTEM,
-                user=(
-                    f"Problem: {problem_statement}\n"
-                    f"Available tool ids (you may ONLY use these): {available_tool_ids}\n"
-                    f"Transcript of tool calls so far: {transcript}\n"
-                    f"Turn number: {turn_count}"
+            data = await self._call_with_retry(
+                lambda: self._call_tool(
+                    system=_ACTION_SYSTEM,
+                    user=(
+                        f"Problem: {problem_statement}\n"
+                        f"Available tool ids (you may ONLY use these): {available_tool_ids}\n"
+                        f"Transcript of tool calls so far: {transcript}\n"
+                        f"Turn number: {turn_count}"
+                    ),
+                    schema=_FLAT_ACTION_SCHEMA,
+                    tool_name="submit_decision",
                 ),
-                schema=_FLAT_ACTION_SCHEMA,
-                tool_name="submit_decision",
+                what="decide_next_action",
             )
         except Exception as exc:  # noqa: BLE001 — provider/network failure, never crash the chat
             # A transient upstream outage/rate-limit (e.g. Gemini 503 "high
