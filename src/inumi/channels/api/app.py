@@ -72,7 +72,12 @@ def create_app(settings: Settings | None = None, *, agent_transport=None) -> Fas
         async with httpx.AsyncClient(
             base_url=settings.agent_base_url,
             transport=agent_transport,
-            timeout=60,
+            # A real LLM-backed investigation is several reasoning turns,
+            # each with its own model call plus a Gateway round-trip — easily
+            # a couple of minutes, unlike the near-instant deterministic mock
+            # planner. Matches the Gateway's own 300s execution/discovery
+            # timeouts rather than risking a client-side cutoff mid-thought.
+            timeout=300,
         ) as client:
             response = await client.post(
                 "/v1/chat",
@@ -95,7 +100,7 @@ def create_app(settings: Settings | None = None, *, agent_transport=None) -> Fas
         async with httpx.AsyncClient(
             base_url=settings.agent_base_url,
             transport=agent_transport,
-            timeout=60,
+            timeout=300,  # see _call_agent_chat — same real-LLM latency reasoning
         ) as client:
             response = await client.post(
                 "/v1/chat/events",

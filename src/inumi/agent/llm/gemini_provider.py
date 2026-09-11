@@ -9,12 +9,28 @@ the strict discriminated-union validation happens afterwards via
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from inumi.agent.llm.base import StructuredLLMProvider
 
-_DEFAULT_MODEL = "gemini-2.5-pro"
-_KNOWN_MODELS = ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"]
+# Gemini 2.x and earlier are deliberately excluded from selection — operator
+# policy, not a technical limitation. `_meets_min_version` is what actually
+# enforces this (against the live `models.list()` result); these two
+# constants are only the fallback used if that call fails, so they must
+# name real, currently-serving models — not a guessed/rounded id.
+_MIN_MAJOR_VERSION = 3
+_DEFAULT_MODEL = "gemini-3.5-flash"
+_KNOWN_MODELS = ["gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash"]
+
+_VERSION_RE = re.compile(r"gemini-(\d+)")
+
+
+def _meets_min_version(model_name: str) -> bool:
+    match = _VERSION_RE.search(model_name)
+    if match is None:
+        return False
+    return int(match.group(1)) >= _MIN_MAJOR_VERSION
 
 
 def _clean_schema(schema: dict[str, Any]) -> dict[str, Any]:
@@ -97,7 +113,7 @@ class GeminiLLMProvider(StructuredLLMProvider):
                 actions = getattr(m, "supported_actions", None) or []
                 if "generateContent" in actions or not actions:
                     name = (m.name or "").removeprefix("models/")
-                    if name.startswith("gemini"):
+                    if name.startswith("gemini") and _meets_min_version(name):
                         models.append(name)
             return sorted(set(models)) or list(_KNOWN_MODELS)
         except Exception:  # noqa: BLE001
