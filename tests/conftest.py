@@ -5,10 +5,11 @@ import pytest_asyncio
 
 from inumi.common.config import Settings
 from inumi.common.identity import MockIdentityProvider
-from inumi.gateway.domain.inventory import DatabaseInventory
+from inumi.gateway.domain.catalog import InMemoryCatalogStore
 from inumi.gateway.domain.policy_engine import PolicyEngine
 from inumi.gateway.domain.rate_limiter import InMemoryRateLimitBackend, RateLimiter
-from inumi.gateway.domain.target_validation import TargetValidator
+from inumi.gateway.domain.servers import ServerRegistry
+from inumi.gateway.domain.target_validation import TargetContext, TargetValidator
 from inumi.gateway.domain.tool_registry import ToolRegistry
 from inumi.gateway.infrastructure.db.session import Database
 
@@ -24,13 +25,46 @@ def identity_provider() -> MockIdentityProvider:
 
 
 @pytest.fixture
-def inventory() -> DatabaseInventory:
-    return DatabaseInventory("config/inventory.yaml")
+def server_registry() -> ServerRegistry:
+    return ServerRegistry("config/servers.yaml")
 
 
 @pytest.fixture
-def target_validator(inventory: DatabaseInventory) -> TargetValidator:
-    return TargetValidator(inventory)
+def catalog_store() -> InMemoryCatalogStore:
+    return InMemoryCatalogStore()
+
+
+@pytest.fixture
+def target_validator(
+    server_registry: ServerRegistry, catalog_store: InMemoryCatalogStore
+) -> TargetValidator:
+    return TargetValidator(server_registry, catalog_store)
+
+
+@pytest.fixture
+def make_ctx(server_registry: ServerRegistry):
+    """Factory: build a TargetContext for a registered server id (+ optional
+    database, honouring any per-db override)."""
+
+    from inumi.common.models.target import DatabaseTarget
+
+    def _make(server_id: str, database: str = "AppDB") -> TargetContext:
+        server = server_registry.by_id(server_id)
+        assert server is not None, f"no such server in config/servers.yaml: {server_id}"
+        eff = server.effective_for(database)
+        return TargetContext(
+            target=DatabaseTarget(
+                environment=server.environment, instance=server.id, database=database
+            ),
+            server=server,
+            database=database,
+            criticality=eff.criticality,
+            classification=eff.classification,
+            allowed_roles=eff.allowed_roles,
+            discovered_database=None,
+        )
+
+    return _make
 
 
 @pytest.fixture

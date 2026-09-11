@@ -6,7 +6,7 @@ fully-authorized, already-approved `ExecutionRequest` from the Gateway (never
 directly from the Agent — see `execution.api.app` for the service-auth
 enforcement that guarantees this) and:
 
-  1. looks up credentials for the target `database_id` via `CredentialProvider`
+  1. looks up credentials for the target `server_id` via `CredentialProvider`
   2. opens a scoped connection to the real database
   3. dispatches to the one typed adapter method matching `tool_id`
   4. enforces `max_execution_time` via a hard timeout
@@ -102,7 +102,12 @@ class ExecutionService:
         if self._adapter_factory is not None:
             return await self._adapter_factory(request)
 
-        creds = await self._credentials.get_credentials(request.database_id)
+        creds = await self._credentials.get_credentials(request.server_id)
+        # Connect to the specific database this request targets (Postgres
+        # binds a connection to one db; SQL Server / MySQL `USE` it). Falls
+        # back to the credential's own default db for server-level ops.
+        if request.database:
+            creds = creds.model_copy(update={"database": request.database})
         adapter_cls = _adapter_class_for(request.platform)
 
         if request.platform == Platform.SQLSERVER:

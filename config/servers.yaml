@@ -1,0 +1,123 @@
+# =============================================================================
+# Server registry (spec §10, §11 — server-level).
+#
+# You register SERVERS, not individual databases. The discovery crawler
+# (inumi.execution.discovery) enumerates the databases, schemas, tables,
+# indexes, and available extensions on each one into the catalog, refreshed
+# on a schedule.
+#
+# The security invariant is unchanged: the Agent can only target a server in
+# this list, and a database/object discovery actually found on it. It can
+# never name an arbitrary host or connection string.
+#
+# `allowed_roles`, `criticality`, `classification`, and `maintenance_window`
+# apply to the whole server; `database_overrides` carries per-database
+# exceptions for the few that need them.
+#
+# Credentials for `<id>` come from the secrets manager (SECRETS_PROVIDER),
+# or config/dev_credentials.yaml when SECRETS_PROVIDER=local_dev. The
+# diagnostic login should be least-privilege (VIEW SERVER STATE / pg_monitor,
+# no SELECT on user tables — Inumi never reads table data).
+#
+# Fake data only. Fictitious "core-banking" example mirrors the design spec.
+# =============================================================================
+
+servers:
+  - id: sqlserver-dev-01
+    platform: sqlserver
+    environment: development
+    host: localhost
+    port: 1433
+    aliases: [dev-sql, sampledev]
+    organization: platform-eng
+    region: local
+    criticality: low
+    classification: internal
+    owner: platform-eng
+    support_team: platform-eng
+    maintenance_window: { timezone: Africa/Lagos, start: "00:00", end: "23:59" }
+    allowed_roles: [DBA_L1, DBA_L2, DBA_L3, DBA_MANAGER]
+    status: active
+
+  - id: sqlserver-uat-01
+    platform: sqlserver
+    environment: uat
+    host: localhost
+    port: 1434
+    aliases: [uat-sql]
+    organization: platform-eng
+    region: local
+    criticality: standard
+    classification: internal
+    owner: platform-eng
+    support_team: platform-eng
+    maintenance_window: { timezone: Africa/Lagos, start: "22:00", end: "23:59" }
+    allowed_roles: [DBA_L2, DBA_L3, DBA_MANAGER]
+    status: active
+
+  - id: corebanking-sqlserver-prod
+    platform: sqlserver
+    environment: production
+    host: 192.168.0.100
+    port: 1433
+    aliases: [core-banking, corebanking, corebanking-prd-01]
+    organization: core-banking
+    region: primary
+    criticality: critical
+    classification: restricted
+    owner: core-banking
+    support_team: core-banking-dba
+    maintenance_window: { timezone: Africa/Lagos, start: "01:00", end: "04:00" }
+    allowed_roles: [DBA_L2, DBA_L3]
+    database_overrides:
+      master: { criticality: low }
+      msdb: { criticality: standard }
+    status: active
+
+  - id: postgres-dev-01
+    platform: postgresql
+    environment: development
+    host: localhost
+    port: 5433
+    aliases: [dev-postgres]
+    organization: platform-eng
+    region: local
+    criticality: low
+    classification: internal
+    owner: platform-eng
+    support_team: platform-eng
+    maintenance_window: { timezone: Africa/Lagos, start: "00:00", end: "23:59" }
+    allowed_roles: [DBA_L1, DBA_L2, DBA_L3, DBA_MANAGER]
+    status: active
+
+  - id: postgres-uat-01
+    platform: postgresql
+    environment: uat
+    host: localhost
+    port: 5434
+    aliases: [uat-postgres]
+    organization: platform-eng
+    region: local
+    criticality: standard
+    classification: internal
+    owner: platform-eng
+    support_team: platform-eng
+    maintenance_window: { timezone: Africa/Lagos, start: "22:00", end: "23:59" }
+    allowed_roles: [DBA_L2, DBA_L3, DBA_MANAGER]
+    status: active
+
+  - id: analytics-postgres-prod
+    platform: postgresql
+    environment: production
+    host: localhost
+    port: 5435
+    aliases: [analytics, analytics-cluster, postgres-prod-cluster-01]
+    organization: analytics
+    region: primary
+    criticality: high
+    classification: restricted
+    owner: analytics
+    support_team: analytics-dba
+    maintenance_window: { timezone: Africa/Lagos, start: "01:00", end: "04:00" }
+    allowed_roles: [DBA_L2, DBA_L3]
+    status: active

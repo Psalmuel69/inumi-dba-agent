@@ -11,7 +11,7 @@ from __future__ import annotations
 from inumi.common.models.risk import BlastRadius, ReasonCode, RiskAssessment, RiskLevel
 from inumi.common.models.target import Environment
 from inumi.common.models.tool import ToolDefinition
-from inumi.gateway.domain.inventory import InventoryEntry
+from inumi.gateway.domain.target_validation import TargetContext
 
 _BASE_SCORE = {
     RiskLevel.LOW: 10,
@@ -47,7 +47,7 @@ class RiskEngine:
         *,
         tool: ToolDefinition,
         environment: Environment,
-        inventory_entry: InventoryEntry,
+        ctx: TargetContext,
         affected_object_count: int = 1,
         affected_session_count: int = 1,
         current_load_critical: bool = False,
@@ -70,10 +70,10 @@ class RiskEngine:
             reasons.append(ReasonCode.NON_PRODUCTION)
 
         if impactful:
-            score += _CRITICALITY_POINTS.get(inventory_entry.criticality, 0)
-        if inventory_entry.criticality == "critical":
+            score += _CRITICALITY_POINTS.get(ctx.criticality, 0)
+        if ctx.criticality == "critical":
             reasons.append(ReasonCode.CRITICAL_DATABASE)
-        elif inventory_entry.criticality == "high":
+        elif ctx.criticality == "high":
             reasons.append(ReasonCode.HIGH_CRITICALITY_DATABASE)
 
         if tool.data_modification:

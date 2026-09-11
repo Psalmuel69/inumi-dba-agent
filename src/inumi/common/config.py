@@ -40,9 +40,12 @@ class Settings(BaseSettings):
     oidc_client_secret: str = ""
 
     policy_config_path: str = "./config/policy.yaml"
-    inventory_config_path: str = "./config/inventory.yaml"
+    servers_config_path: str = "./config/servers.yaml"
     identity_config_path: str = "./config/identity.yaml"
     rate_limit_config_path: str = "./config/rate_limits.yaml"
+    # How often the discovery crawler refreshes each server's catalog.
+    discovery_refresh_minutes: int = 60
+    discovery_max_objects_per_database: int = 5000
 
     # --- LLM providers (spec §34) -------------------------------------------
     # A provider becomes *selectable* the moment its API key is present. The

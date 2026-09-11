@@ -7,13 +7,13 @@ claimed in chat text or by the LLM:
 
   1. Is this person a member of the DBA team at all?
   2. Does their verified role even appear in this tool's allowed_roles?
-  3. Does their verified role appear in this *database's* allowed_roles
-     (spec §11 — e.g. CoreBanking production requires DBA_L2+)?
+  3. Does their verified role appear in the target server's allowed_roles
+     (or a per-database override) — spec §11?
   4. Is this tool permitted in this target's environment at all?
 
-A conversation switching from one database to another, or the passage of
-time invalidating a cached role, must re-run this check — nothing here is
-cached across a conversation turn (spec §37).
+A conversation switching from one server/database to another, or the
+passage of time invalidating a cached role, must re-run this check —
+nothing here is cached across a conversation turn (spec §37).
 """
 
 from __future__ import annotations
@@ -21,13 +21,13 @@ from __future__ import annotations
 from inumi.common.models.failures import FailureCode, InumiError
 from inumi.common.models.identity import VerifiedIdentity
 from inumi.common.models.tool import ToolDefinition
-from inumi.gateway.domain.inventory import InventoryEntry
+from inumi.gateway.domain.target_validation import TargetContext
 
 
 def authorize(
     identity: VerifiedIdentity,
     tool: ToolDefinition,
-    inventory_entry: InventoryEntry,
+    ctx: TargetContext,
 ) -> None:
     """Raises InumiError(UNAUTHORIZED) on any failure; returns None on success."""
     if not identity.is_dba():
@@ -50,15 +50,15 @@ def authorize(
             f"Your role does not permit use of '{tool.tool_id}'.",
         )
 
-    if inventory_entry.allowed_roles and not (user_roles & set(inventory_entry.allowed_roles)):
+    if ctx.allowed_roles and not (user_roles & set(ctx.allowed_roles)):
+        where = f"{ctx.server.id}/{ctx.database}" if ctx.database else ctx.server.id
         raise InumiError(
             FailureCode.UNAUTHORIZED,
-            f"Your role does not permit access to database '{inventory_entry.id}'.",
+            f"Your role does not permit access to '{where}'.",
         )
 
-    if inventory_entry.environment not in tool.allowed_environments:
+    if ctx.environment not in tool.allowed_environments:
         raise InumiError(
             FailureCode.UNAUTHORIZED,
-            f"'{tool.tool_id}' is not permitted in environment "
-            f"'{inventory_entry.environment.value}'.",
+            f"'{tool.tool_id}' is not permitted in environment '{ctx.environment.value}'.",
         )

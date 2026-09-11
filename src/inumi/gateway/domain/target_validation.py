@@ -1,9 +1,10 @@
-"""Target validation (spec §10, §11).
+"""Target validation (spec §10, §11 — server-level).
 
-Confirms a proposed target (a) carries every field a given tool requires,
-and (b) resolves to exactly one real, active inventory entry. The LLM never
-gets to supply a target that skips this step — every tool call goes through
-`TargetValidator.validate` before policy/risk evaluation even begins.
+Confirms a proposed target (a) resolves to exactly one registered server,
+(b) names a database/schema/object that discovery actually found on it
+(when the catalog is populated), and (c) carries every field the tool
+requires. The LLM never gets to supply a target that skips this — every
+tool call goes through `TargetValidator.validate` before policy/risk.
 """
 
 from __future__ import annotations
@@ -11,75 +12,138 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from inumi.common.models.failures import FailureCode, InumiError
-from inumi.common.models.target import DatabaseTarget
-from inumi.gateway.domain.inventory import AmbiguousTargetError, DatabaseInventory, InventoryEntry
+from inumi.common.models.identity import DBARole
+from inumi.common.models.target import DatabaseTarget, Environment, Platform
+from inumi.gateway.domain.catalog import CatalogStore, DiscoveredDatabase
+from inumi.gateway.domain.servers import AmbiguousServerError, ServerEntry, ServerRegistry
 
-# Maps the ToolDefinition.required_target_scope string labels (which mirror
-# DatabaseTarget field names directly, per spec §10's worked examples) to the
-# fields that must be non-empty on the target.
-_FIELD_ALIASES = {
-    "schema": "schema_name",
-    "object": "object_name",
-}
+_FIELD_ALIASES = {"schema": "schema_name", "object": "object_name"}
 
 
 @dataclass(frozen=True)
-class ResolvedTarget:
+class TargetContext:
+    """Everything downstream (authz / policy / risk / execution) needs about
+    a resolved target. Replaces the old per-database `InventoryEntry`."""
+
     target: DatabaseTarget
-    inventory_entry: InventoryEntry
+    server: ServerEntry
+    database: str
+    criticality: str
+    classification: str
+    allowed_roles: list[DBARole]
+    discovered_database: DiscoveredDatabase | None
+
+    # --- adapters for the engines that used to read InventoryEntry ---------
+
+    @property
+    def id(self) -> str:  # server id
+        return self.server.id
+
+    @property
+    def environment(self) -> Environment:
+        return self.server.environment
+
+    @property
+    def platform(self) -> Platform:
+        return self.server.platform
+
+    @property
+    def maintenance_window(self) -> dict:
+        return self.server.maintenance_window
 
 
 class TargetValidator:
-    def __init__(self, inventory: DatabaseInventory):
-        self._inventory = inventory
+    def __init__(self, registry: ServerRegistry, catalog: CatalogStore):
+        self._registry = registry
+        self._catalog = catalog
 
     def _check_required_fields(
-        self, target: DatabaseTarget, entry: InventoryEntry, required_scope: list[str]
+        self, target: DatabaseTarget, server: ServerEntry, database: str, required_scope: list[str]
     ) -> None:
-        # Fields the inventory itself can supply (instance/database/cluster)
-        # don't have to be typed by the user — spec §10: "not every operation
-        # requires every field" from the *caller*. Anything the inventory
-        # can't know about (session_id, query_id, schema, object) must still
-        # come from the actual request.
         effective = {
             "environment": target.environment.value,
-            "instance": target.instance or entry.instance,
-            "database": target.database or entry.database_name,
-            "cluster": target.cluster or entry.cluster,
+            "instance": target.instance or server.id,
+            "cluster": target.cluster or server.id,
+            "database": database,
             "schema_name": target.schema_name,
             "object_name": target.object_name,
             "session_id": target.session_id,
             "query_id": target.query_id,
         }
-        missing = []
-        for field_name in required_scope:
-            attr = _FIELD_ALIASES.get(field_name, field_name)
-            if not effective.get(attr):
-                missing.append(field_name)
+        missing = [
+            name for name in required_scope
+            if not effective.get(_FIELD_ALIASES.get(name, name))
+        ]
         if missing:
             raise InumiError(
                 FailureCode.INVALID_TARGET,
                 f"Missing required target field(s) for this operation: {', '.join(missing)}.",
             )
 
-    def validate(self, target: DatabaseTarget, required_scope: list[str]) -> ResolvedTarget:
+    async def validate(
+        self, target: DatabaseTarget, required_scope: list[str]
+    ) -> TargetContext:
+        # 1. server
         try:
-            entry = self._inventory.resolve(target)
-        except AmbiguousTargetError as exc:
+            server = self._registry.resolve(target)
+        except AmbiguousServerError as exc:
             names = ", ".join(f"{c.id} ({c.environment.value})" for c in exc.candidates)
             raise InumiError(
                 FailureCode.INVALID_TARGET,
-                f"Multiple databases match this target — please specify which one: {names}.",
+                f"Multiple servers match this target — please say which one: {names}.",
             ) from exc
         except LookupError as exc:
             raise InumiError(
                 FailureCode.INVALID_TARGET,
-                "No database in the inventory matches the given target.",
+                "No registered server matches the given target.",
             ) from exc
 
-        if entry.status != "active":
-            raise InumiError(FailureCode.INVALID_TARGET, f"Database '{entry.id}' is not active.")
+        # 2. database — validated against the discovered catalog if we have one
+        catalog = await self._catalog.get(server.id)
+        database = (target.database or "").strip()
+        discovered_db: DiscoveredDatabase | None = None
 
-        self._check_required_fields(target, entry, required_scope)
+        if catalog and catalog.databases:
+            if not database:
+                # A tool that needs a database, on a server we've discovered,
+                # but none named: help the caller pick.
+                if "database" in required_scope:
+                    names = ", ".join(catalog.database_names()[:20])
+                    raise InumiError(
+                        FailureCode.INVALID_TARGET,
+                        f"Which database on {server.id}? Discovered: {names}",
+                    )
+            else:
+                discovered_db = catalog.database(database)
+                if discovered_db is None:
+                    names = ", ".join(catalog.database_names()[:20])
+                    raise InumiError(
+                        FailureCode.INVALID_TARGET,
+                        f"Database '{database}' was not found on {server.id}. "
+                        f"Discovered databases: {names}",
+                    )
+                database = discovered_db.name  # canonical casing
 
-        return ResolvedTarget(target=target, inventory_entry=entry)
+        # 3. required fields
+        self._check_required_fields(target, server, database, required_scope)
+
+        # 4. schema / object (only when the catalog knows the database)
+        if discovered_db is not None and target.object_name:
+            object_names = {o.name.lower() for o in discovered_db.objects}
+            if object_names and target.object_name.lower() not in object_names:
+                raise InumiError(
+                    FailureCode.INVALID_TARGET,
+                    f"Object '{target.object_name}' was not found in "
+                    f"{server.id}/{database}.",
+                )
+
+        eff = server.effective_for(database)
+        return TargetContext(
+            target=target,
+            server=server,
+            database=database,
+            criticality=eff.criticality,
+            classification=eff.classification,
+            allowed_roles=eff.allowed_roles,
+            discovered_database=discovered_db,
+        )

@@ -24,7 +24,7 @@ import yaml
 from inumi.common.models.identity import DBARole
 from inumi.common.models.target import Environment
 from inumi.common.models.tool import ToolDefinition
-from inumi.gateway.domain.inventory import InventoryEntry
+from inumi.gateway.domain.target_validation import TargetContext
 
 
 class PolicyDecision(str, Enum):
@@ -43,9 +43,9 @@ class PolicyEvaluation:
 
 
 def is_within_maintenance_window(
-    entry: InventoryEntry, now_utc: dt.datetime | None = None
+    window: dict | None, now_utc: dt.datetime | None = None
 ) -> bool:
-    window = entry.maintenance_window or {}
+    window = window or {}
     if not window.get("start") or not window.get("end"):
         return True  # no window configured -> not restricted by one
     now_utc = now_utc or dt.datetime.now(dt.UTC)
@@ -87,7 +87,7 @@ class PolicyEngine:
         environment: Environment,
         tool: ToolDefinition,
         role: DBARole,
-        inventory_entry: InventoryEntry,
+        ctx: TargetContext,
         change_id: str | None = None,
         current_load_critical: bool = False,
         now_utc: dt.datetime | None = None,
@@ -104,7 +104,7 @@ class PolicyEngine:
             if role.value not in tool_table:
                 reasons.append("no_role_entry_fail_closed")
 
-        in_window = is_within_maintenance_window(inventory_entry, now_utc)
+        in_window = is_within_maintenance_window(ctx.maintenance_window, now_utc)
         if tool.availability_impact:
             reasons.append(
                 "inside_maintenance_window" if in_window else "outside_maintenance_window"

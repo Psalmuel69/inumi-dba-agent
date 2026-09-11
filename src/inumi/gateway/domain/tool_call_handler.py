@@ -30,8 +30,8 @@ from inumi.gateway.domain.approval import ApprovalContext, ApprovalEngine
 from inumi.gateway.domain.audit import AuditLog
 from inumi.gateway.domain.authorization import authorize
 from inumi.gateway.domain.data_policy import DataMinimizer
-from inumi.gateway.domain.inventory import DatabaseInventory
 from inumi.gateway.domain.policy_engine import PolicyDecision, PolicyEngine
+from inumi.gateway.domain.servers import ServerRegistry
 from inumi.gateway.domain.rate_limiter import RateLimiter
 from inumi.gateway.domain.risk_engine import RiskEngine
 from inumi.gateway.domain.sql_validator import validate_readonly_sql
@@ -65,7 +65,7 @@ class ToolCallHandler:
         self,
         *,
         tool_registry: ToolRegistry,
-        inventory: DatabaseInventory,
+        registry: ServerRegistry,
         target_validator: TargetValidator,
         policy_engine: PolicyEngine,
         risk_engine: RiskEngine,
@@ -78,7 +78,7 @@ class ToolCallHandler:
         identity_provider_name: str = "unknown",
     ):
         self._tools = tool_registry
-        self._inventory = inventory
+        self._registry = registry
         self._targets = target_validator
         self._policy = policy_engine
         self._risk = risk_engine
@@ -160,22 +160,21 @@ class ToolCallHandler:
         except ValidationError as exc:
             raise InumiError(FailureCode.INVALID_TARGET, f"Invalid target: {exc.errors()[:3]}") from exc
         target = _enrich_target(raw_target, args_dict)
-        resolved = self._targets.validate(target, tool.required_target_scope)
-        entry = resolved.inventory_entry
+        ctx = await self._targets.validate(target, tool.required_target_scope)
 
         # 3.5. Real-parser SQL validation for the (disabled-by-default) read-only
         # SQL tool — never reached for typed tools, and args_dict["sql"] is
         # replaced with the normalized, row-capped statement before it goes
         # anywhere near the Execution Service.
         if tool.tool_id == "database.execute_readonly_sql":
-            dialect = "tsql" if entry.platform.value == "sqlserver" else "postgres"
+            dialect = "tsql" if ctx.platform.value == "sqlserver" else "postgres"
             validated_sql = validate_readonly_sql(
                 args_dict["sql"], dialect=dialect, max_result_rows=tool.max_result_rows
             )
             args_dict = {**args_dict, "sql": validated_sql.normalized_sql}
 
         # 4. Authorization (independent of policy; hard identity/role gate)
-        authorize(identity, tool, entry)
+        authorize(identity, tool, ctx)
 
         # 5. Rate limiting
         await self._rate_limiter.check(
@@ -184,17 +183,17 @@ class ToolCallHandler:
             user_subject_id=identity.subject_id,
             conversation_id=request.conversation_id,
             tool_id=tool.tool_id,
-            database_id=entry.id,
-            environment=entry.environment.value,
+            database_id=ctx.server.id,
+            environment=ctx.environment.value,
         )
 
         # 6. Policy Engine
         role = identity.highest_role()
         evaluation = self._policy.evaluate(
-            environment=entry.environment,
+            environment=ctx.environment,
             tool=tool,
             role=role,
-            inventory_entry=entry,
+            ctx=ctx,
             change_id=request.change_id,
         )
         if evaluation.decision == PolicyDecision.DENY:
@@ -204,11 +203,11 @@ class ToolCallHandler:
         if evaluation.requires_change_ticket and not request.change_id:
             raise InumiError(
                 FailureCode.CHANGE_TICKET_REQUIRED,
-                f"'{tool.tool_id}' in {entry.environment.value} requires an approved change ticket.",
+                f"'{tool.tool_id}' in {ctx.environment.value} requires an approved change ticket.",
             )
 
         # 7. Risk Engine
-        risk = self._risk.assess(tool=tool, environment=entry.environment, inventory_entry=entry)
+        risk = self._risk.assess(tool=tool, environment=ctx.environment, ctx=ctx)
 
         # 8. Approval Engine
         needs_approval = evaluation.decision == PolicyDecision.REQUIRES_APPROVAL
@@ -218,8 +217,8 @@ class ToolCallHandler:
             tool=tool,
             target=target,
             normalized_arguments=args_dict,
-            environment=entry.environment.value,
-            database_id=entry.id,
+            environment=ctx.environment.value,
+            database_id=f"{ctx.server.id}/{ctx.database}" if ctx.database else ctx.server.id,
             risk=risk,
         )
         if needs_approval:
@@ -261,10 +260,9 @@ class ToolCallHandler:
             execution_id=execution_id,
             tool_id=tool.tool_id,
             tool_version=tool.version,
-            platform=entry.platform,
-            database_id=entry.id,
-            instance=entry.instance,
-            database=entry.database_name,
+            platform=ctx.platform,
+            server_id=ctx.server.id,
+            database=ctx.database,
             schema_name=target.schema_name,
             object_name=target.object_name,
             session_id=target.session_id,

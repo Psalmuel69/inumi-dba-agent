@@ -204,14 +204,14 @@ async def test_target_tampering_after_approval_denied():
             headers={"X-Service-Token": token},
             json={"channel": "slack", "channel_account_id": "U_MOCK_L2"},
         )
-        # Same session id, but a different (still-valid) target database.
+        # Same session id, same tool, but a different (still-registered) server.
         tampered = client.post(
             "/v1/tool-calls",
             headers={"X-Service-Token": token},
             json=_tool_call_body(
                 tool_id="database.kill_session",
                 arguments={"session_id": "9182", "reason": "blocking chain"},
-                target={"environment": "uat", "database": "SampleUAT"},
+                target={"environment": "uat", "instance": "sqlserver-uat-01", "database": "SampleUAT"},
                 approval_id=approval_id,
                 request_id="sec_req_3",
             ),

@@ -33,7 +33,7 @@ async def submit_tool_call(
     identity = await resolve_identity(state, body.channel, body.channel_account_id)
     handler = ToolCallHandler(
         tool_registry=state.tool_registry,
-        inventory=state.inventory,
+        registry=state.server_registry,
         target_validator=state.target_validator,
         policy_engine=state.policy_engine,
         risk_engine=state.risk_engine,

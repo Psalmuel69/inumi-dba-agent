@@ -17,7 +17,7 @@ def _settings() -> Settings:
     return Settings(_env_file=None)
 
 
-async def _make_handler(db, tool_registry, inventory, target_validator, policy_engine, rate_limiter):
+async def _make_handler(db, tool_registry, server_registry, target_validator, policy_engine, rate_limiter):
     settings = _settings()
     execution_service = ExecutionService(
         settings, credential_provider=None, adapter_factory=canned_adapter_factory  # type: ignore[arg-type]
@@ -27,7 +27,7 @@ async def _make_handler(db, tool_registry, inventory, target_validator, policy_e
     session = await session_cm.__aenter__()
     handler = ToolCallHandler(
         tool_registry=tool_registry,
-        inventory=inventory,
+        registry=server_registry,
         target_validator=target_validator,
         policy_engine=policy_engine,
         risk_engine=RiskEngine(),
@@ -44,10 +44,10 @@ async def _make_handler(db, tool_registry, inventory, target_validator, policy_e
 
 @pytest.mark.asyncio
 async def test_read_only_health_check_executes_end_to_end(
-    db, tool_registry, inventory, target_validator, policy_engine, rate_limiter, identity_provider
+    db, tool_registry, server_registry, target_validator, policy_engine, rate_limiter, identity_provider
 ):
     handler, session, cm = await _make_handler(
-        db, tool_registry, inventory, target_validator, policy_engine, rate_limiter
+        db, tool_registry, server_registry, target_validator, policy_engine, rate_limiter
     )
     try:
         identity = await identity_provider.resolve_by_external_account("slack", "U_MOCK_L2")
@@ -70,10 +70,10 @@ async def test_read_only_health_check_executes_end_to_end(
 
 @pytest.mark.asyncio
 async def test_dba_l1_denied_from_killing_session_in_production(
-    db, tool_registry, inventory, target_validator, policy_engine, rate_limiter, identity_provider
+    db, tool_registry, server_registry, target_validator, policy_engine, rate_limiter, identity_provider
 ):
     handler, session, cm = await _make_handler(
-        db, tool_registry, inventory, target_validator, policy_engine, rate_limiter
+        db, tool_registry, server_registry, target_validator, policy_engine, rate_limiter
     )
     try:
         identity = await identity_provider.resolve_by_external_account("slack", "U_MOCK_L1")
@@ -96,12 +96,12 @@ async def test_dba_l1_denied_from_killing_session_in_production(
 
 @pytest.mark.asyncio
 async def test_full_approval_workflow_kill_session(
-    db, tool_registry, inventory, target_validator, policy_engine, rate_limiter, identity_provider
+    db, tool_registry, server_registry, target_validator, policy_engine, rate_limiter, identity_provider
 ):
     """Mirrors the acceptance scenario in spec §54/§68: investigate, propose
     kill_session, require approval, approve, execute, verify."""
     handler, session, cm = await _make_handler(
-        db, tool_registry, inventory, target_validator, policy_engine, rate_limiter
+        db, tool_registry, server_registry, target_validator, policy_engine, rate_limiter
     )
     try:
         identity = await identity_provider.resolve_by_external_account("slack", "U_MOCK_L2")
@@ -140,11 +140,11 @@ async def test_full_approval_workflow_kill_session(
 
 @pytest.mark.asyncio
 async def test_execution_denied_if_agent_alters_action_after_approval(
-    db, tool_registry, inventory, target_validator, policy_engine, rate_limiter, identity_provider
+    db, tool_registry, server_registry, target_validator, policy_engine, rate_limiter, identity_provider
 ):
     """The exact scenario from spec §44 run through the full Gateway pipeline."""
     handler, session, cm = await _make_handler(
-        db, tool_registry, inventory, target_validator, policy_engine, rate_limiter
+        db, tool_registry, server_registry, target_validator, policy_engine, rate_limiter
     )
     try:
         identity = await identity_provider.resolve_by_external_account("slack", "U_MOCK_L2")

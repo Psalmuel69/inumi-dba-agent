@@ -1,12 +1,12 @@
 """Gateway <-> Execution Service internal contract.
 
 This is a *different, narrower* contract than the Agent-facing `ToolCallRequest`
-(spec §18): by the time a request reaches here, target ambiguity has been
-resolved to one concrete inventory entry, policy/risk/approval have already
-been cleared, and the only thing left to do is run one specific, typed
-operation and return raw (not-yet-masked) results for the Gateway's Data
-Policy Layer to minimize. The Execution Service never sees a raw user
-message, an LLM completion, or anything about approvals/policy — only this.
+(spec §18): by the time a request reaches here, the target has been resolved
+to one registered server + one discovered database, policy/risk/approval
+have already been cleared, and the only thing left to do is run one
+specific, typed operation and return raw (not-yet-masked) results for the
+Gateway's Data Policy Layer to minimize. The Execution Service never sees a
+raw user message, an LLM completion, or anything about approvals/policy.
 """
 
 from __future__ import annotations
@@ -25,8 +25,11 @@ class ExecutionRequest(BaseModel):
     tool_id: str
     tool_version: str
     platform: Platform
-    database_id: str  # inventory id — Execution Service looks up credentials by this, never a connection string
-    instance: str
+    # Registered server id — the Execution Service looks up credentials by
+    # this, never a connection string.
+    server_id: str
+    # The specific database to connect to / operate on ("" for server-level
+    # operations like restart_instance).
     database: str
     schema_name: str | None = None
     object_name: str | None = None

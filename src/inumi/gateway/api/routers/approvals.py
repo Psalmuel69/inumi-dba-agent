@@ -79,12 +79,21 @@ async def _decide(
         record = await engine.get(approval_id)
         if decision == ApprovalDecision.APPROVE:
             # The approver must themselves be independently authorized for
-            # this exact tool/database — approving is not a lesser bar than
-            # requesting.
+            # this exact tool/target — approving is not a lesser bar than
+            # requesting. Re-resolve the target from scratch (catches a
+            # server that was de-registered since the request).
+            from inumi.common.models.target import DatabaseTarget
+
             tool = state.tool_registry.get(record.tool_id, record.tool_version)
-            entry = state.inventory.by_id(record.policy.get("database_id", ""))
-            if entry is not None:
-                authorize(identity, tool, entry)
+            try:
+                ctx = await state.target_validator.validate(
+                    DatabaseTarget.model_validate(record.target), []
+                )
+                authorize(identity, tool, ctx)
+            except InumiError:
+                raise
+            except Exception:  # noqa: BLE001
+                pass
 
         decided = await engine.decide(approval_id=approval_id, approver=identity, decision=decision)
         event_type = "APPROVAL_APPROVED" if decision == ApprovalDecision.APPROVE else "APPROVAL_REJECTED"

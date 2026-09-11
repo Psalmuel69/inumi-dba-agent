@@ -55,7 +55,7 @@ def create_app(settings: Settings | None = None, *, adapter_factory=None) -> Fas
         logger.info(
             "execution_request_received",
             tool_id=request.tool_id,
-            database_id=request.database_id,
+            server_id=request.server_id,
             execution_id=request.execution_id,
         )
         result = await service.execute(request)

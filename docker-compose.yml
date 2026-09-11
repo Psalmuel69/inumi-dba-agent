@@ -75,7 +75,7 @@ services:
       SECRETS_PROVIDER: local_dev
       IDENTITY_PROVIDER: mock
       POLICY_CONFIG_PATH: /app/config/policy.yaml
-      INVENTORY_CONFIG_PATH: /app/config/inventory.yaml
+      SERVERS_CONFIG_PATH: /app/config/servers.yaml
       IDENTITY_CONFIG_PATH: /app/config/identity.yaml
       RATE_LIMIT_CONFIG_PATH: /app/config/rate_limits.yaml
       SERVICE_JWT_SECRET: dev-only-change-me-in-production
