@@ -15,6 +15,19 @@ import httpx
 from inumi.common.models.tool import ToolCallRequest, ToolCallResponse, ToolDefinition
 from inumi.common.service_auth import ServiceTokenIssuer
 
+# A bound on the Agent's own wait for one tool-call round trip (Gateway,
+# and whatever it takes to the Execution Service and the real database) —
+# was 60s. Verified live: a genuinely overloaded database (a session
+# holding a query-memory grant for minutes) made even a trivial read-only
+# diagnostic exceed that, and since nothing on the Agent side caught the
+# resulting httpcore.ReadTimeout, it surfaced as an unhandled 500 instead
+# of a clear message — the caller (`orchestrator._submit_and_relay`) is
+# what actually degrades that into an AgentReply now, but it can only do
+# that once this bound is short enough not to compound into minutes across
+# a playbook's several steps. Mirrors `GeminiLLMProvider
+# ._REQUEST_TIMEOUT_SECONDS` — same reasoning, other side of the pipeline.
+_SUBMIT_TIMEOUT_SECONDS = 15.0
+
 
 class ToolClient:
     def __init__(
@@ -76,7 +89,9 @@ class ToolClient:
             return response.json()
 
     async def submit(self, request: ToolCallRequest) -> ToolCallResponse:
-        async with httpx.AsyncClient(base_url=self._base_url, transport=self._transport, timeout=60) as client:
+        async with httpx.AsyncClient(
+            base_url=self._base_url, transport=self._transport, timeout=_SUBMIT_TIMEOUT_SECONDS
+        ) as client:
             response = await client.post(
                 "/v1/tool-calls", json=request.model_dump(mode="json"), headers=self._headers()
             )

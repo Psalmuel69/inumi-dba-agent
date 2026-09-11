@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from inumi.agent.context_manager import ConversationState, InvestigationState
+from inumi.agent.context_manager import ContextManager, ConversationState, InvestigationState, PendingApproval
 from inumi.agent.llm.registry import LLMRegistry
 from inumi.agent.orchestrator import AgentOrchestrator
 from inumi.agent.planner.actions import ProposeToolCall
@@ -127,3 +127,91 @@ async def test_a_failed_status_is_logged_as_a_failed_step_not_mislabeled_as_exec
     assert investigation.transcript[-1]["result"]["error"] == "adapter connection timeout"
     assert "failed" in investigation.evidence[-1].lower()
     assert "adapter connection timeout" in investigation.evidence[-1]
+
+
+class _TimingOutToolClient:
+    """Reproduces the live finding: the Agent's own HTTP call to the Gateway
+    can time out (httpcore.ReadTimeout) before any ToolCallResponse ever
+    comes back — a genuinely overloaded database made even a trivial
+    read-only diagnostic exceed ToolClient's own bound. Distinct from
+    ToolCallStatus.FAILED, which means a response DID come back."""
+
+    def __init__(self, exc: Exception):
+        self._exc = exc
+        self.submit_count = 0
+
+    async def submit(self, request):
+        self.submit_count += 1
+        raise self._exc
+
+
+@pytest.mark.asyncio
+async def test_a_submit_timeout_degrades_to_a_clear_message_not_an_unhandled_500():
+    """Previously nothing caught this — it propagated as an unhandled
+    exception all the way out of the FastAPI handler (a raw 500), exactly
+    like the pre-fix LLM call path used to. Must degrade the same way the
+    LLM path does: a clear message, the turn ends, the investigation stays
+    resumable."""
+    client = _TimingOutToolClient(TimeoutError("timed out"))
+    orchestrator = _orchestrator(client)
+    state, investigation = _state_and_investigation()
+
+    reply = await orchestrator._submit_and_relay(state, investigation, _action(), "dev", "dba_l2@example.com")
+
+    assert reply is not None
+    assert reply.status == "error"
+    assert "database.update_statistics" in reply.text
+    assert "did not respond in time" in investigation.evidence[-1]
+    assert investigation.transcript[-1]["result"]["error"] == "timed out"
+
+
+@pytest.mark.asyncio
+async def test_a_submit_timeout_does_not_burn_the_rest_of_the_turn_budget():
+    """A network-level failure ends the turn immediately (unlike a
+    self-correctable DENIED) — retrying more steps against a target that
+    just failed to respond at all is unlikely to do anything but compound
+    the latency, which is exactly what the production-speed work elsewhere
+    in this codebase exists to prevent."""
+    client = _TimingOutToolClient(TimeoutError("timed out"))
+    orchestrator = _orchestrator(client)
+    state, investigation = _state_and_investigation()
+
+    await orchestrator._submit_and_relay(state, investigation, _action(), "dev", "dba_l2@example.com")
+
+    assert client.submit_count == 1  # no retry loop hidden in here
+
+
+@pytest.mark.asyncio
+async def test_an_approved_actions_resubmit_timeout_tells_the_dba_what_to_check():
+    """The trickier half of the same gap: by the time the resubmit call
+    times out, the Gateway has *already* recorded the approval — silently
+    500ing here would leave the DBA not knowing whether their approved
+    action actually ran. Must point at the audit trail instead."""
+
+    class _ApprovesThenTimesOut:
+        async def approve(self, approval_id, channel, channel_account_id):
+            return {"status": "APPROVED"}
+
+        async def submit(self, request):
+            raise TimeoutError("timed out")
+
+    context = ContextManager()
+    state = context.get_or_create("conv1", "dev", "", "dba_l2@example.com")
+    state.pending_approval = PendingApproval(
+        approval_id="appr1", tool_id="database.kill_session", summary="Kill it.",
+        request={"tool_id": "database.kill_session", "arguments": {}, "target": {}, "reason": "x",
+                 "conversation_id": "conv1", "request_id": "req1", "channel": "dev",
+                 "channel_account_id": "dba_l2@example.com"},
+    )
+    orchestrator = AgentOrchestrator(
+        llm_registry=LLMRegistry.for_testing(None), tool_client=_ApprovesThenTimesOut(), context=context
+    )
+
+    reply = await orchestrator.handle_approval_decision(
+        conversation_id="conv1", decision="approve", channel="dev", channel_account_id="dba_l2@example.com"
+    )
+
+    assert reply.status == "error"
+    assert "appr1" in reply.text
+    assert "audit trail" in reply.text.lower()
+    assert state.pending_approval is None  # cleared — re-approving isn't meaningful either way

@@ -26,6 +26,9 @@ from inumi.agent.reply import AgentReply, ApprovalCard
 from inumi.agent.tool_client import ToolClient
 from inumi.common.ids import new_id
 from inumi.common.models.tool import ToolCallRequest, ToolCallStatus
+from inumi.common.observability import get_logger
+
+logger = get_logger(__name__)
 
 _MAX_INVESTIGATION_TURNS = 6
 
@@ -307,7 +310,34 @@ class AgentOrchestrator:
             channel=channel,
             channel_account_id=channel_account_id,
         )
-        response = await self._tool_client.submit(request)
+        try:
+            response = await self._tool_client.submit(request)
+        except Exception as exc:  # noqa: BLE001 — a network-level failure reaching the
+            # Gateway (verified live: httpcore.ReadTimeout when the database itself was
+            # overloaded) — distinct from ToolCallStatus.FAILED below, which means the
+            # Gateway/Execution pipeline DID respond with a structured "this call
+            # failed" decision. Here we never got a response to relay at all, and
+            # previously nothing caught that — it surfaced as an unhandled 500 instead
+            # of a message. Ends the turn immediately rather than burning the rest of
+            # the turn budget on further calls to the same likely-still-overloaded
+            # target (see _SUBMIT_TIMEOUT_SECONDS for why this is bounded quickly).
+            logger.warning(
+                "tool_call_submit_failed", tool_id=action.tool_id, reason=action.reason, error=str(exc)
+            )
+            investigation.transcript.append(
+                {"tool_id": action.tool_id, "reason": action.reason, "result": {"error": str(exc)}}
+            )
+            investigation.evidence.append(f"{action.tool_id} did not respond in time: {exc}")
+            return AgentReply(
+                text=(
+                    f"I couldn't get a response for {action.tool_id} in time — the "
+                    "database or Gateway may be under heavy load right now, which "
+                    "could itself be relevant to what you're investigating. Try "
+                    "again in a moment."
+                ),
+                status="error",
+                investigation_id=investigation.investigation_id,
+            )
 
         if response.status == ToolCallStatus.APPROVAL_REQUIRED:
             state.pending_approval = PendingApproval(
@@ -408,8 +438,26 @@ class AgentOrchestrator:
 
         # Fully approved — resubmit the exact original request with the approval_id.
         request = ToolCallRequest.model_validate({**pending.request, "approval_id": pending.approval_id})
-        response = await self._tool_client.submit(request)
-        state.pending_approval = None
+        state.pending_approval = None  # cleared regardless — the Gateway already
+        # recorded the approval; re-approving on a resubmit failure isn't meaningful.
+        try:
+            response = await self._tool_client.submit(request)
+        except Exception as exc:  # noqa: BLE001 — same network-level-failure case as
+            # _submit_and_relay above, but here the approval was already granted
+            # server-side before this call — tell the DBA plainly what to check
+            # rather than leaving them wondering whether the approved action ran.
+            logger.warning(
+                "approved_action_resubmit_failed", approval_id=pending.approval_id, error=str(exc)
+            )
+            return AgentReply(
+                text=(
+                    f"Your approval was recorded, but I couldn't confirm {pending.tool_id} "
+                    f"executed — the Gateway didn't respond in time. Check the audit trail "
+                    f"for approval_id {pending.approval_id} before retrying (see "
+                    'OPERATIONS.md\'s "a DBA reports \'I approved it but nothing happened\'" runbook).'
+                ),
+                status="error",
+            )
 
         investigation = state.investigation
         if response.status == ToolCallStatus.EXECUTED:
