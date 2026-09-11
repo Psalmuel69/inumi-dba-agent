@@ -96,7 +96,12 @@ class MockLLMProvider(LLMProvider):
         available_tool_ids: list[str],
         transcript: list[dict[str, Any]],
         turn_count: int,
+        tool_requirements: dict[str, list[str]] | None = None,
     ) -> AgentAction:
+        # tool_requirements isn't needed here — the deterministic scenarios
+        # this planner proposes (kill_session, get_health, ...) never need
+        # schema/table arguments, only real StructuredLLMProvider tool calls
+        # do.
         executed = {t["tool_id"] for t in transcript}
 
         match = _SESSION_ID_RE.search(problem_statement)

@@ -135,9 +135,19 @@ class AgentOrchestrator:
 
         available = await self._tool_client.available_tools(channel, channel_account_id)
         available_ids = [t.tool_id for t in available]
+        # Each tool's *actual* required arguments (its real Pydantic schema,
+        # already alias-correct — e.g. "schema"/"table", not "schema_name"/
+        # "table_name") — verified live: without this, the LLM has nothing
+        # but the tool_id string to go on and reliably guesses wrong for any
+        # schema/table-scoped write tool.
+        tool_requirements = {
+            t.tool_id: reqs
+            for t in available
+            if (reqs := t.argument_schema.get("required", []))
+        }
 
         return await self._run_investigation_loop(
-            state, investigation, available_ids, channel, channel_account_id, llm
+            state, investigation, available_ids, channel, channel_account_id, llm, tool_requirements
         )
 
     async def _run_investigation_loop(
@@ -148,6 +158,7 @@ class AgentOrchestrator:
         channel: str,
         channel_account_id: str,
         llm: LLMProvider,
+        tool_requirements: dict[str, list[str]] | None = None,
     ) -> AgentReply:
         while investigation.turn_count < _MAX_INVESTIGATION_TURNS:
             action = await llm.decide_next_action(
@@ -155,6 +166,7 @@ class AgentOrchestrator:
                 available_tool_ids=available_ids,
                 transcript=investigation.transcript,
                 turn_count=investigation.turn_count,
+                tool_requirements=tool_requirements,
             )
             investigation.turn_count += 1
 

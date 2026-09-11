@@ -72,11 +72,18 @@ _ACTION_SYSTEM = (
     "For a tool scoped to a specific table or index (update_statistics, "
     "create_index, rebuild_index, get_indexes, get_statistics), `target` "
     "MUST include `schema` and `object` — leaving them out fails the "
-    'request even though `target` itself is optional. Example: refreshing '
-    'statistics on Person.Person: {"action": "propose_tool_call", '
-    '"tool_id": "database.update_statistics", "reason": "Refreshing stale '
-    'statistics before the query planner relies on them.", "target": '
-    '{"schema": "Person", "object": "Person"}, "arguments": {}}.'
+    "request even though `target` itself is optional. Separately, if the "
+    "user message tells you which `arguments` keys a tool requires, that "
+    "list is that tool's actual, real schema — not a suggestion — and "
+    "every key on it must appear in `arguments`, even when the same value "
+    "also appears in `target`; the two are validated independently and "
+    "neither one fills in the other. Example: refreshing statistics on "
+    'Person.Person: {"action": "propose_tool_call", "tool_id": '
+    '"database.update_statistics", "reason": "Refreshing stale statistics '
+    'before the query planner relies on them.", "target": {"schema": '
+    '"Person", "object": "Person"}, "arguments": {"schema": "Person", '
+    '"table": "Person", "reason": "Refreshing stale statistics before the '
+    'query planner relies on them."}}.'
 )
 
 _SUMMARY_SYSTEM = (
@@ -150,6 +157,7 @@ class LLMProvider(ABC):
         available_tool_ids: list[str],
         transcript: list[dict[str, Any]],
         turn_count: int,
+        tool_requirements: dict[str, list[str]] | None = None,
     ) -> AgentAction: ...
 
     @abstractmethod
@@ -258,8 +266,16 @@ class StructuredLLMProvider(LLMProvider):
         available_tool_ids: list[str],
         transcript: list[dict[str, Any]],
         turn_count: int,
+        tool_requirements: dict[str, list[str]] | None = None,
     ) -> AgentAction:
         last_raw: dict[str, Any] | None = None
+        requirements_line = (
+            f"Required `arguments` keys per tool_id (omitting any of these "
+            f"for that tool invalidates the call — this is each tool's real "
+            f"schema, not a guess): {tool_requirements}\n"
+            if tool_requirements
+            else ""
+        )
 
         async def attempt() -> AgentAction:
             nonlocal last_raw
@@ -270,6 +286,7 @@ class StructuredLLMProvider(LLMProvider):
                 user=(
                     f"Problem: {problem_statement}\n"
                     f"Available tool ids (you may ONLY use these): {available_tool_ids}\n"
+                    f"{requirements_line}"
                     f"Transcript of tool calls so far: {transcript}\n"
                     f"Turn number: {turn_count}"
                 ),
