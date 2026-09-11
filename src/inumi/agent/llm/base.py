@@ -89,6 +89,29 @@ _ACTION_SYSTEM = (
     'query planner relies on them."}}.'
 )
 
+def _recover_misplaced_reason(data: dict[str, Any]) -> None:
+    """Mutates `data` in place: if the top-level `reason` is missing but
+    `arguments.reason` is present, copy it up.
+
+    Verified live: even with the schema and prose both saying these are two
+    distinct required fields, a real model that correctly filled
+    `arguments.reason` still sometimes leaves the top-level one out — having
+    "reason" as a key at two nesting levels seems to read to it as one field
+    said once. Prompting alone didn't close this reliably across retries;
+    this is a mechanical, always-safe normalization (never invents a value
+    — only ever copies one the model already provided) matching this
+    codebase's existing philosophy of reconciling target/arguments overlap
+    in code rather than leaning solely on the model to never drift
+    (mirrors `_enrich_target` on the Gateway side)."""
+    if data.get("action") != "propose_tool_call":
+        return
+    if data.get("reason"):
+        return
+    nested_reason = (data.get("arguments") or {}).get("reason")
+    if nested_reason:
+        data["reason"] = nested_reason
+
+
 _SUMMARY_SYSTEM = (
     "Summarize this DBA investigation for a human DBA in a few sentences: "
     "what was checked, what was found, and the recommended next step. Do not "
@@ -178,7 +201,17 @@ _FLAT_ACTION_SCHEMA: dict[str, Any] = {
                 "query_id": {"type": "string"},
             },
         },
-        "reason": {"type": "string", "description": "For action=propose_tool_call"},
+        "reason": {
+            "type": "string",
+            "description": (
+                "REQUIRED for action=propose_tool_call, EVERY time — this "
+                "top-level field, not the field also named `reason` inside "
+                "`arguments`. They are two separate fields with the same "
+                "name at different nesting levels; some tools' `arguments` "
+                "happen to need their own `reason` too, but that never "
+                "substitutes for this one. Fill in both when both apply."
+            ),
+        },
         "text": {"type": "string", "description": "For action=record_observation"},
         "summary": {"type": "string", "description": "For action=conclude"},
         "likely_root_cause": {"type": "string", "description": "For action=conclude"},
@@ -353,6 +386,7 @@ class StructuredLLMProvider(LLMProvider):
                 tool_name="submit_decision",
             )
             last_raw = data
+            _recover_misplaced_reason(data)
             # Validated here too, not just after — a malformed completion
             # (verified live: real models sometimes drop a required field
             # despite the prompt spelling it out) gets retried the same as a

@@ -160,6 +160,50 @@ async def test_decide_next_action_accepts_a_read_tool_call_with_reason():
 
 
 @pytest.mark.asyncio
+async def test_decide_next_action_recovers_a_reason_left_only_inside_arguments():
+    """Reproduces a live finding: after the target/arguments schema fix, a
+    real model correctly filled `arguments.reason` (and session_id) but
+    still left the *top-level* `reason` out — "reason" appearing at two
+    nesting levels seems to read as one field, said once. Copying it up
+    (never inventing a value) is what actually closes this, on top of the
+    prompt already saying they're separate fields."""
+    provider = _FakeStructuredProvider(
+        tool_result={
+            "action": "propose_tool_call",
+            "tool_id": "database.cancel_query",
+            "arguments": {"session_id": "72", "reason": "Cartesian join burning CPU."},
+            "target": {"session_id": "72"},
+        }
+    )
+    action = await provider.decide_next_action(
+        problem_statement="check activity", available_tool_ids=["database.cancel_query"],
+        transcript=[], turn_count=0,
+    )
+    assert isinstance(action, ProposeToolCall)
+    assert action.reason == "Cartesian join burning CPU."
+    assert action.arguments["reason"] == "Cartesian join burning CPU."
+
+
+@pytest.mark.asyncio
+async def test_decide_next_action_never_invents_a_top_level_reason():
+    """The recovery is copy-only — if arguments has no reason either, the
+    call must still fail validation and degrade normally, not fabricate
+    one."""
+    provider = _FakeStructuredProvider(
+        tool_result={
+            "action": "propose_tool_call",
+            "tool_id": "database.cancel_query",
+            "arguments": {"session_id": "72"},
+        }
+    )
+    action = await provider.decide_next_action(
+        problem_statement="check activity", available_tool_ids=["database.cancel_query"],
+        transcript=[], turn_count=0,
+    )
+    assert isinstance(action, AskClarification)
+
+
+@pytest.mark.asyncio
 async def test_extract_intent_degrades_on_a_transient_provider_outage():
     provider = _FakeStructuredProvider(tool_error=RuntimeError("connection reset"))
     intent = await provider.extract_intent("CoreBanking is slow", known_database_names=["CoreBanking"])
