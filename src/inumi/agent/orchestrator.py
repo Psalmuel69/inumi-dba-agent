@@ -389,14 +389,45 @@ class AgentOrchestrator:
         # "table_name") — verified live: without this, the LLM has nothing
         # but the tool_id string to go on and reliably guesses wrong for any
         # schema/table-scoped write tool.
-        tool_requirements = {
-            t.tool_id: reqs
-            for t in available
-            if (reqs := t.argument_schema.get("required", []))
+        #
+        # Deliberately includes a tool whose required list is EMPTY (e.g.
+        # every NoArgs read tool), rather than omitting it — this used to
+        # filter those out (`if (reqs := ...)`, false for an empty list),
+        # which was itself a live, repeated finding: get_blocking_sessions
+        # and get_sessions (both NoArgs) kept getting called with an extra
+        # `reason` or `session_id`/`database_name` folded into `arguments`,
+        # because the model was never actually told those specific tools
+        # need nothing there — it only ever saw entries for tools that DO
+        # need something, and reasonably (if wrongly) generalized from the
+        # `arguments` schema's superset of possible keys (`session_id`,
+        # `reason`, ... — real requirements for OTHER tools). An explicit
+        # `[]` entry is a positive "this tool needs nothing", not silence
+        # the model has to interpret on its own.
+        tool_requirements = {t.tool_id: t.argument_schema.get("required", []) for t in available}
+        # Defense-in-depth backstop for the same finding: every available
+        # tool's complete set of allowed `arguments` keys (not just the
+        # required ones — e.g. get_top_queries' optional order_by/limit
+        # still need to survive this), used by `_submit_and_relay` to
+        # silently drop any key the model adds anyway despite the prompt
+        # guidance above, before a request ever reaches the Gateway. Belt-
+        # and-suspenders: the prompt fix alone was verified live to still
+        # occasionally slip (a smaller/weaker model, or a fresh provider
+        # this prompt hasn't been tuned against), and stripping here is
+        # always safe — a key the tool's own schema wouldn't accept can
+        # never have been meant for it.
+        tool_allowed_arguments = {
+            t.tool_id: set(t.argument_schema.get("properties", {})) for t in available
         }
 
         return await self._run_investigation_loop(
-            state, investigation, available_ids, channel, channel_account_id, llm, tool_requirements
+            state,
+            investigation,
+            available_ids,
+            channel,
+            channel_account_id,
+            llm,
+            tool_requirements,
+            tool_allowed_arguments,
         )
 
     async def _run_investigation_loop(
@@ -408,6 +439,7 @@ class AgentOrchestrator:
         channel_account_id: str,
         llm: LLMProvider,
         tool_requirements: dict[str, list[str]] | None = None,
+        tool_allowed_arguments: dict[str, set[str]] | None = None,
     ) -> AgentReply:
         while investigation.turn_count < _MAX_INVESTIGATION_TURNS:
             step_action = self._next_playbook_action(investigation, available_ids)
@@ -425,7 +457,7 @@ class AgentOrchestrator:
                 # everything gathered and conclude.
                 investigation.turn_count += 1
                 reply = await self._submit_and_relay(
-                    state, investigation, step_action, channel, channel_account_id
+                    state, investigation, step_action, channel, channel_account_id, tool_allowed_arguments
                 )
                 if reply is not None:
                     return reply
@@ -489,7 +521,7 @@ class AgentOrchestrator:
             if isinstance(action, ProposeToolCall):
                 investigation.consecutive_record_observations = 0
                 reply = await self._submit_and_relay(
-                    state, investigation, action, channel, channel_account_id
+                    state, investigation, action, channel, channel_account_id, tool_allowed_arguments
                 )
                 if reply is not None:
                     return reply
@@ -664,12 +696,53 @@ class AgentOrchestrator:
             )
         return problem
 
+    @staticmethod
+    def _strip_unschematized_arguments(
+        action: ProposeToolCall, tool_allowed_arguments: dict[str, set[str]] | None
+    ) -> dict:
+        """Defense-in-depth backstop for a live, repeated finding: even with
+        the prompt telling the model each tool's real schema (see
+        `_continue_investigation`'s `tool_requirements`/`tool_allowed_arguments`
+        and `StructuredLLMProvider._ACTION_SYSTEM`), a real model sometimes
+        still folds an extra key into `arguments` that tool's schema
+        forbids — most often `reason` (confused with `ProposeToolCall`'s own
+        top-level `reason`) or a `session_id`/`database_name` it decided was
+        relevant. The Gateway's own argument model is `extra="forbid"`, so
+        an unstripped extra key is rejected outright as INVALID_ARGUMENTS —
+        self-correctable (see `_SELF_CORRECTABLE_DENIAL_CODES`), but always
+        at the cost of one wasted turn and Gateway round-trip.
+        Silently dropping a key the tool's own schema never declared is
+        always safe: it can never have been a value that tool would have
+        accepted anyway. `tool_allowed_arguments` being None (the tool
+        wasn't in the available list, or no schema info was supplied — see
+        the unit tests in test_orchestrator_self_correction.py that call
+        this without it) skips stripping entirely rather than guessing."""
+        allowed = (tool_allowed_arguments or {}).get(action.tool_id)
+        if allowed is None:
+            return action.arguments
+        extra = set(action.arguments) - allowed
+        if not extra:
+            return action.arguments
+        logger.info(
+            "stripped_unschematized_tool_arguments",
+            tool_id=action.tool_id,
+            dropped=sorted(extra),
+        )
+        return {k: v for k, v in action.arguments.items() if k in allowed}
+
     async def _submit_and_relay(
-        self, state: ConversationState, investigation, action: ProposeToolCall, channel: str, channel_account_id: str
+        self,
+        state: ConversationState,
+        investigation,
+        action: ProposeToolCall,
+        channel: str,
+        channel_account_id: str,
+        tool_allowed_arguments: dict[str, set[str]] | None = None,
     ) -> AgentReply | None:
+        arguments = self._strip_unschematized_arguments(action, tool_allowed_arguments)
         request = ToolCallRequest(
             tool_id=action.tool_id,
-            arguments=action.arguments,
+            arguments=arguments,
             target={**state.database_context, **action.target},
             reason=action.reason,
             conversation_id=state.conversation_id,

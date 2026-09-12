@@ -201,6 +201,55 @@ was independently checked before and after finally caught it.
 merges its columns into the result dict, alongside `rowcount`. A plain
 DML/DDL statement with no result columns is unaffected — `rowcount` alone.
 
+## A NoArgs tool's own required-arguments entry must say "[]", not nothing
+
+Observed repeatedly across live Slack testing: `database.get_blocking_sessions`
+and `database.get_sessions` — both `NoArgs` in `gateway/domain/tool_catalog.py`
+(`ARGUMENT_MODELS`, `extra="forbid"`) — kept getting proposed with an extra
+`reason` (sometimes `session_id` or `database_name`) folded into `arguments`.
+The Gateway correctly rejected each one as `INVALID_ARGUMENTS`, and the
+orchestrator's self-correction path (`_SELF_CORRECTABLE_DENIAL_CODES`) always
+recovered within the same turn — never broke an investigation — but it
+wasted an LLM call and a Gateway round-trip every single time it happened.
+
+The root cause was in `orchestrator._continue_investigation`, not the model:
+`tool_requirements` (the per-tool required-argument map injected into
+`decide_next_action`'s prompt, see `StructuredLLMProvider._ACTION_SYSTEM`)
+was built as `{tool_id: reqs for t in available if (reqs := ...required)}` —
+a tool with an empty required list (every `NoArgs` read) was walrus-filtered
+out of the dict entirely, not included with an empty list. The model was
+never actually told "this tool takes nothing"; it only ever saw entries for
+tools that DO need something, and reasonably (if wrongly) generalized from
+the `arguments` schema's superset of real properties (`session_id`, `reason`,
+... — genuine requirements for *other* tools) that the prompt has to declare
+up front for the reasons in `llm/base.py`'s own comment on `_FLAT_ACTION_SCHEMA`
+(a property-less object schema gives a weaker model nothing to fill in).
+`ProposeToolCall` already has its own top-level `reason` for the
+human-readable justification — the model was folding that same idea into
+`arguments` a second time, unprompted, for tools whose real schema has no
+room for it at all.
+
+The fix has two layers, deliberately not just one:
+
+1. **Prompt fix** (root cause): `tool_requirements` now includes every
+   available tool, NoArgs ones mapped to `[]` — an explicit "this tool needs
+   nothing" signal instead of silence the model has to interpret on its own.
+   `_ACTION_SYSTEM` and `_FLAT_ACTION_SCHEMA`'s `arguments` description both
+   spell out what an empty list means and explicitly forbid borrowing a
+   property that belongs to some *other* tool.
+2. **Defense-in-depth** (`orchestrator._strip_unschematized_arguments`,
+   called from `_submit_and_relay`): even if a prompt fix doesn't hold for
+   every provider/model forever, any `arguments` key outside a tool's own
+   real property set is silently dropped before a `ToolCallRequest` is ever
+   built — the Gateway never sees it, so there is nothing left to deny.
+   Dropping such a key is always safe: it could never have been one that
+   tool's own schema would have accepted.
+
+Verified live via the real orchestrator + real Gateway pipeline (in-process
+ASGI, `tests/integration/test_no_args_extra_arguments.py`): a scripted
+planner reproducing the exact bad completion above now completes on its
+first attempt, with zero `INVALID_ARGUMENTS` denials in the transcript.
+
 ## The identity re-resolution point (why "UX check" ≠ "security boundary")
 
 Channel Adapters and the Agent both *can* check whether a channel account is

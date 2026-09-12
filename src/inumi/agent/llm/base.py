@@ -121,7 +121,31 @@ _ACTION_SYSTEM = (
     'before the query planner relies on them.", "target": {"schema": '
     '"Person", "object": "Person"}, "arguments": {"schema": "Person", '
     '"table": "Person", "reason": "Refreshing stale statistics before the '
-    'query planner relies on them."}}.'
+    'query planner relies on them."}}.\n\n'
+    "The reverse mistake is just as invalid: a tool_id mapped to an EMPTY "
+    "list in that same required-arguments map (or absent from it entirely) "
+    "takes NO arguments at all — `arguments` MUST be exactly {} for it. "
+    "Never add `reason`, `session_id`, `database_name`, or any other key "
+    "there just because it's a real property for some OTHER tool in this "
+    "schema; a property listed here is only ever valid for the specific "
+    "tool(s) whose own required-arguments entry actually names it, and an "
+    "unlisted key is rejected outright, not ignored. This applies to every "
+    "read-only diagnostic that needs no target beyond the database/instance "
+    "itself — get_health, get_version, get_sessions, get_blocking_sessions, "
+    "get_deadlocks, get_running_queries, get_wait_statistics, get_tables, "
+    "get_storage, get_transaction_log, get_replication_status, "
+    "get_backup_status, get_configuration among them. Your own justification "
+    "for calling the tool belongs ONLY in the top-level `reason` field "
+    "above (which every propose_tool_call already requires) — never restate "
+    "or duplicate it inside `arguments` unless that specific tool's own "
+    "required-arguments list separately names `reason` too (a handful of "
+    "write tools — update_statistics, kill_session, cancel_query, ... — do; "
+    "most read tools don't). Example of a fully valid propose_tool_call for "
+    'a tool that needs nothing: {"action": "propose_tool_call", '
+    '"tool_id": "database.get_blocking_sessions", "reason": "Checking for '
+    'blocking chains given the reported slowness.", "arguments": {}, '
+    '"target": {}} — note `arguments` is empty even though the reason for '
+    "calling it is filled in above it."
 )
 
 def _recover_misplaced_reason(data: dict[str, Any]) -> None:
@@ -184,7 +208,17 @@ _FLAT_ACTION_SCHEMA: dict[str, Any] = {
                 "For action=propose_tool_call. Only include the keys the "
                 "chosen tool's required-arguments list actually names — "
                 "never invent a value, pull each one from what the DBA "
-                "said or a prior tool result in this investigation."
+                "said or a prior tool result in this investigation. The "
+                "properties below are a superset covering every tool this "
+                "system knows about; most of them are irrelevant to any "
+                "one call. A tool whose required-arguments list is empty "
+                "(most read-only diagnostics: get_health, get_sessions, "
+                "get_blocking_sessions, ...) takes none of them — leave "
+                "this {} for that tool, never add `reason`/`session_id`/"
+                "anything else just because it's a valid property for a "
+                "DIFFERENT tool. The top-level `reason` field (a sibling "
+                "of `arguments`, not a member of it) already covers your "
+                "justification for every call."
             ),
             "properties": {
                 "session_id": {"type": "string"},
@@ -430,9 +464,13 @@ class StructuredLLMProvider(LLMProvider):
     ) -> AgentAction:
         last_raw: dict[str, Any] | None = None
         requirements_line = (
-            f"Required `arguments` keys per tool_id (omitting any of these "
-            f"for that tool invalidates the call — this is each tool's real "
-            f"schema, not a guess): {tool_requirements}\n"
+            f"Required `arguments` keys per tool_id — this is each tool's "
+            f"real schema, not a guess. Omitting a key listed for that "
+            f"tool invalidates the call. A tool_id mapped to an empty list "
+            f"([]) takes NO arguments at all: `arguments` MUST be exactly "
+            f"{{}} for it — never add `reason`, `session_id`, or any other "
+            f"key there just because it's real for some OTHER tool in this "
+            f"map: {tool_requirements}\n"
             if tool_requirements
             else ""
         )
