@@ -314,6 +314,15 @@ class AgentOrchestrator:
         if intent.database_hint:
             state.database_context["database"] = intent.database_hint
         if intent.instance_hint:
+            if (
+                not intent.database_hint
+                and state.database_context.get("instance") != intent.instance_hint
+            ):
+                # A remembered database (see _submit_and_relay) belongs to
+                # whatever instance was previously in play — moving to a
+                # different one makes it stale, and it's never safe to
+                # assume the new server even has a database by that name.
+                state.database_context.pop("database", None)
             state.database_context["instance"] = intent.instance_hint
             if not intent.environment_hint:
                 # A specific, registered server was named but no
@@ -697,6 +706,26 @@ class AgentOrchestrator:
                 status="error",
                 investigation_id=investigation.investigation_id,
             )
+
+        # Remember a database once it's actually been resolved — by the
+        # DBA naming it, or (verified live, the recurring complaint this
+        # exists for) by the model self-correcting an INVALID_TARGET
+        # rejection within this same investigation — so a later message in
+        # this conversation never has to re-supply it. Mirrors how
+        # environment/instance already persist in state.database_context.
+        # Safe to persist on any status except a DENIED specifically
+        # *about* the target (INVALID_TARGET): the Gateway's own target
+        # resolution runs before authorization/policy/risk/rate-limiting
+        # in its pipeline, so EXECUTED, APPROVAL_REQUIRED, FAILED (an
+        # adapter-level problem, unrelated to target correctness), or a
+        # DENIED for any other reason (RBAC, rate limit, ...) all still
+        # mean this exact database name was independently accepted as
+        # valid for this server — never a guess of our own.
+        database = request.target.get("database")
+        if database and not (
+            response.status == ToolCallStatus.DENIED and response.failure_code == "INVALID_TARGET"
+        ):
+            state.database_context["database"] = database
 
         if response.status == ToolCallStatus.APPROVAL_REQUIRED:
             state.pending_approval = PendingApproval(
