@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from inumi.agent.context_manager import ContextManager
+from inumi.agent.context_manager import ContextManager, PendingApproval
 from inumi.agent.llm.mock import MockLLMProvider
 from inumi.agent.llm.registry import LLMRegistry
 from inumi.agent.orchestrator import AgentOrchestrator
@@ -134,16 +134,79 @@ async def test_a_freeform_status_request_with_no_investigation_says_so():
 
 
 @pytest.mark.asyncio
-async def test_a_freeform_approve_with_no_pending_approval_says_so():
+async def test_a_freeform_approve_with_a_pending_approval_actually_approves_it():
+    from inumi.common.models.tool import ToolCallResponse, ToolCallStatus
+
+    class _ApprovingToolClient(_FakeToolClient):
+        async def approve(self, approval_id, channel, channel_account_id):
+            return {"status": "APPROVED"}
+
+        async def submit(self, request):
+            return ToolCallResponse(status=ToolCallStatus.EXECUTED, message="ok", result={"ok": True})
+
     llm = _FakeLLM(IntentExtraction(is_dba_task=False, meta_command="approve"))
-    orchestrator = _orchestrator(llm)
+    context = ContextManager()
+    orchestrator = AgentOrchestrator(
+        llm_registry=LLMRegistry.for_testing(llm), tool_client=_ApprovingToolClient(), context=context
+    )
+    state = context.get_or_create("conv6b", "slack", "", "U123")
+    state.pending_approval = PendingApproval(
+        approval_id="appr1",
+        tool_id="database.kill_session",
+        summary="Kill the blocker.",
+        request={
+            "tool_id": "database.kill_session",
+            "arguments": {},
+            "target": {},
+            "reason": "x",
+            "conversation_id": "conv6b",
+            "request_id": "req1",
+            "channel": "slack",
+            "channel_account_id": "U123",
+        },
+    )
 
     reply = await orchestrator.handle_message(
-        channel="slack", channel_account_id="U123", conversation_id="conv6", channel_thread_id="",
+        channel="slack",
+        channel_account_id="U123",
+        conversation_id="conv6b",
+        channel_thread_id="",
         message="go ahead",
     )
 
-    assert "no pending approval" in reply.text.lower()
+    assert "no pending approval" not in reply.text.lower()
+    assert state.pending_approval is None  # consumed
+
+
+@pytest.mark.asyncio
+async def test_a_freeform_approve_with_no_pending_approval_falls_through_to_a_real_instruction():
+    """The fix for a real live finding: "go ahead and terminate session
+    19860" matched the same "go ahead" phrasing as reacting to a shown
+    approval card, but nothing was pending — it must never just dead-end
+    with "there is no pending approval"; a message naming a specific
+    action is far more likely a fresh instruction than a non-sequitur."""
+    llm = _FakeLLM(
+        IntentExtraction(
+            is_dba_task=False,
+            meta_command="approve",
+            problem_summary="go ahead and terminate session 19860 on postgres-local",
+        )
+    )
+    orchestrator = _orchestrator(llm)
+
+    reply = await orchestrator.handle_message(
+        channel="slack",
+        channel_account_id="U123",
+        conversation_id="conv6",
+        channel_thread_id="",
+        message="go ahead and terminate session 19860 on postgres-local",
+    )
+
+    assert "no pending approval" not in reply.text.lower()
+    # No environment was named either, so the fresh investigation this
+    # falls through to correctly asks for it next — proof it's actually
+    # running as a real DBA task now, not dead-ending.
+    assert reply.status == "clarification"
 
 
 @pytest.mark.asyncio

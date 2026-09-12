@@ -250,15 +250,36 @@ class AgentOrchestrator:
             known_database_names=await self._known_database_names(),
             known_server_hints=await self._known_server_hints(),
         )
-        if intent.meta_command:
+        if intent.meta_command and not (
+            intent.meta_command in ("approve", "reject") and state.pending_approval is None
+        ):
             # A free-text equivalent of one of the exact slash commands
             # below (spec: the DBA should never be bound to a fixed
             # message structure) — "list my servers" works exactly like
             # "/servers", "what playbooks do you have" like "/playbooks",
             # etc. Checked before the greeting/chitchat gate since these
             # are a distinct, actionable third category, never either of
-            # those.
+            # those. The approve/reject exclusion above is deliberate —
+            # verified live: "go ahead and terminate session 19860"
+            # matched the same phrasing as reacting to a shown approval
+            # card ("go ahead" -> approve), but there was no pending
+            # approval to react to, and it dead-ended with "there is no
+            # pending approval" instead of acting. extract_intent has no
+            # visibility into whether one actually exists (it classifies
+            # from the raw message alone), so that specific combination
+            # falls through to the normal DBA-task path below instead —
+            # a message naming a specific session/server/action is far
+            # more likely a fresh instruction than a reaction to nothing.
             return await self._handle_meta_command(intent, state, channel, channel_account_id)
+        if (
+            intent.meta_command in ("approve", "reject")
+            and state.pending_approval is None
+            and not intent.is_dba_task
+        ):
+            # See above — falling through, so this must still be treated
+            # as the actionable DBA task it obviously is, not dismissed by
+            # the classifier's own (now-irrelevant) is_dba_task verdict.
+            intent.is_dba_task = True
         if intent.is_greeting_or_chitchat:
             return AgentReply(text=_HELP_TEXT)
         if not intent.is_dba_task:
@@ -273,8 +294,13 @@ class AgentOrchestrator:
 
         # Reachable only for a brand-new investigation (None) or a
         # previously-concluded one starting fresh — an active one already
-        # returned above, before ever reaching extract_intent.
-        investigation = self._context.start_investigation(state, intent.problem_summary)
+        # returned above, before ever reaching extract_intent. Falls back
+        # to the raw message if problem_summary is blank — verified live:
+        # reachable via the approve/reject-with-no-pending-approval
+        # fallback above, where a real model classifying the message as
+        # meta_command left problem_summary empty since nothing told it to
+        # fill that in for that path too.
+        investigation = self._context.start_investigation(state, intent.problem_summary or message)
         # Deterministic, zero-LLM-call keyword match against a small
         # library of known scenarios (slow queries, high CPU, blocking,
         # ...) — see agent.playbooks.library for the rationale. None
