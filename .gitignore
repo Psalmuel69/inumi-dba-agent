@@ -23,3 +23,9 @@ node_modules/
 
 # Local-only real dev DB credentials — use config/dev_credentials.example.yaml as the template
 config/dev_credentials.yaml
+
+# Local-only real identity entries (e.g. your own real Slack account, for
+# testing against a real workspace) — use config/local_identity.example.yaml
+# as the template. Never commit real personal data into config/identity.yaml
+# itself, which ships containing only fictitious mock users.
+config/local_identity.yaml

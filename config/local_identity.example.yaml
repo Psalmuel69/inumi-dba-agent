@@ -1,0 +1,24 @@
+# =============================================================================
+# Template for config/local_identity.yaml (gitignored, never committed).
+#
+# Copy this file to config/local_identity.yaml and fill in your own real
+# details to test against a real channel (e.g. your own Slack workspace)
+# with your own real account, without ever putting real personal data into
+# config/identity.yaml (which IS committed and must stay fictitious-only).
+#
+# channel_accounts.slack: your real Slack member id — in Slack, click your
+# profile picture -> View profile -> "..." (More) -> Copy member id.
+#
+# groups: pick from config/identity.yaml's `identity.roles` — e.g.
+# ["Enterprise-DBA", "Enterprise-DBA-L2"] for a DBA_L2, or add
+# "Enterprise-DBA-Managers" too for DBA_MANAGER-level approval authority.
+# =============================================================================
+
+mock_directory:
+  - subject_id: "local-user-001"
+    email: "you@example.com"
+    display_name: "Your Name"
+    channel_accounts:
+      slack: "U0XXXXXXX"
+    groups: ["Enterprise-DBA", "Enterprise-DBA-L2"]
+    mfa_satisfied: true

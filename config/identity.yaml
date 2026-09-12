@@ -5,6 +5,13 @@
 # provider groups* to application roles. In production this is backed by a
 # real OIDC/AAD/Okta provider; the `directory` section below only exists to
 # drive the local mock IdentityProvider for development and tests.
+#
+# Testing against a real channel (e.g. your own real Slack workspace) with
+# your own real account: do NOT add yourself here. Instead create
+# config/local_identity.yaml (gitignored, see
+# config/local_identity.example.yaml for the template) — MockIdentityProvider
+# automatically merges its mock_directory entries into this file's, so your
+# real email/Slack id/etc. never reaches version control.
 # =============================================================================
 
 identity:

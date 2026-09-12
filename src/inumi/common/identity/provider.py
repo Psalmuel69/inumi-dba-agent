@@ -68,15 +68,32 @@ class MockIdentityProvider(IdentityProvider):
     """
 
     def __init__(self, config_path: str | Path):
-        raw = yaml.safe_load(Path(config_path).read_text(encoding="utf-8"))
+        config_path = Path(config_path)
+        raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         identity_cfg = raw["identity"]
         self._dba_team_groups: set[str] = set(identity_cfg["groups"]["dba_team"])
         self._role_group_map: dict[DBARole, set[str]] = {
             DBARole(role_name): set(role_cfg["groups"])
             for role_name, role_cfg in identity_cfg["roles"].items()
         }
+        directory_entries = list(raw.get("mock_directory", []))
+
+        # Optional local-only overlay (gitignored — see config/
+        # local_identity.example.yaml) for real personal entries when
+        # testing against a real channel (e.g. your own Slack workspace)
+        # with your own real account. Kept out of config/identity.yaml
+        # itself, which is committed to version control and documents
+        # itself as fictitious-users-only; this file is a sibling of
+        # whatever `config_path` is, so it works the same way for every
+        # service that constructs a MockIdentityProvider without any
+        # extra configuration.
+        local_path = config_path.parent / "local_identity.yaml"
+        if local_path.exists():
+            local_raw = yaml.safe_load(local_path.read_text(encoding="utf-8")) or {}
+            directory_entries.extend(local_raw.get("mock_directory", []))
+
         self._directory: list[_DirectoryEntry] = [
-            _DirectoryEntry(entry) for entry in raw.get("mock_directory", [])
+            _DirectoryEntry(entry) for entry in directory_entries
         ]
 
     def _derive_roles(self, groups: list[str]) -> list[DBARole]:
