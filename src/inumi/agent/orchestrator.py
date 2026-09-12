@@ -699,10 +699,8 @@ class AgentOrchestrator:
             )
 
         if response.status == ToolCallStatus.DENIED:
-            correctable = (
-                response.failure_code in _SELF_CORRECTABLE_DENIAL_CODES
-                and investigation.turn_count < _MAX_INVESTIGATION_TURNS
-            )
+            self_correctable_code = response.failure_code in _SELF_CORRECTABLE_DENIAL_CODES
+            correctable = self_correctable_code and investigation.turn_count < _MAX_INVESTIGATION_TURNS
             if correctable:
                 # Feed the exact rejection back as an observation and let
                 # the loop continue — the LLM gets a concrete next chance to
@@ -719,6 +717,34 @@ class AgentOrchestrator:
                     f"{action.tool_id} was rejected ({response.failure_code}): {response.message}"
                 )
                 return None
+            if self_correctable_code:
+                # Ran out of turns to self-correct — not a genuine policy/
+                # permission fact. `response.message` here is deliberately
+                # the raw, technical validation detail (see
+                # tool_call_handler.py's INVALID_ARGUMENTS construction:
+                # str(a Pydantic ValidationError)[:3]) — useful as feedback
+                # for the LLM's own self-correction above, never meant for
+                # a human. Verified live: a real DBA got that raw dump
+                # (field names, "extra_forbidden", a pydantic.dev docs URL)
+                # as the agent's entire reply, once the turn budget ran out
+                # right on a self-correctable failure. Record the real
+                # detail for audit, but show something a DBA can act on.
+                logger.warning(
+                    "self_correctable_denial_exhausted_turn_budget",
+                    tool_id=action.tool_id,
+                    failure_code=response.failure_code,
+                    detail=response.message,
+                )
+                return AgentReply(
+                    text=(
+                        f"I ran out of attempts trying to get the request format "
+                        f"right for {action.tool_id} — the last attempt failed "
+                        f"validation ({response.failure_code}). Try rephrasing your "
+                        "request, or ask again more specifically."
+                    ),
+                    status="denied",
+                    investigation_id=investigation.investigation_id,
+                )
             return AgentReply(
                 text=f"I can't do that: {response.message}",
                 status="denied",

@@ -109,6 +109,40 @@ async def test_a_self_correctable_denial_does_not_loop_past_the_turn_budget():
 
 
 @pytest.mark.asyncio
+async def test_a_self_correctable_denial_past_the_turn_budget_never_shows_the_raw_detail():
+    """Reproduces a live finding: a real DBA's entire reply was a raw
+    Pydantic ValidationError dump (field names, "extra_forbidden", a
+    pydantic.dev docs URL) — tool_call_handler.py's INVALID_ARGUMENTS
+    message is deliberately that raw/technical, meant as self-correction
+    feedback for the LLM, not for a human. It only ever reached the DBA
+    because the turn budget ran out right on a self-correctable failure,
+    skipping the self-correction retry that would normally consume it."""
+    raw_pydantic_dump = (
+        "[{'type': 'extra_forbidden', 'loc': ('database_name',), "
+        "'msg': 'Extra inputs are not permitted', 'input': 'postgres', "
+        "'url': 'https://errors.pydantic.dev/2.13/v/extra_forbidden'}]"
+    )
+    response = ToolCallResponse(
+        status=ToolCallStatus.DENIED,
+        failure_code="INVALID_ARGUMENTS",
+        message=f"Invalid arguments for 'database.get_blocking_sessions': {raw_pydantic_dump}",
+    )
+    client = _FakeToolClient(response)
+    orchestrator = _orchestrator(client)
+    state, investigation = _state_and_investigation()
+    investigation.turn_count = 6  # at the cap
+
+    reply = await orchestrator._submit_and_relay(state, investigation, _action(), "dev", "dba_l2@example.com")
+
+    assert reply is not None
+    assert reply.status == "denied"
+    assert "extra_forbidden" not in reply.text
+    assert "pydantic.dev" not in reply.text
+    assert "ran out of attempts" in reply.text
+    assert "database.update_statistics" in reply.text  # still names which tool, just not the raw detail
+
+
+@pytest.mark.asyncio
 async def test_a_failed_status_is_logged_as_a_failed_step_not_mislabeled_as_executed():
     """FAILED (an adapter-level failure — spec §8's execution layer, not a
     Gateway policy decision) was previously unhandled here and fell through
