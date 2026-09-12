@@ -117,6 +117,45 @@ def test_slack_message_from_verified_dba_is_processed():
         assert response.json() == {"ok": True}
 
 
+def test_a_retried_slack_event_is_deduplicated_not_reprocessed(capsys):
+    """Reproduces a live finding: Slack retries a webhook delivery it
+    hasn't gotten a fast ack for (its own ~3s timeout), reusing the same
+    event_id — and this handler awaits the full Agent round-trip before
+    ever returning, which a real multi-turn investigation can easily
+    exceed. A real DBA's single Slack message produced two different,
+    garbled replies as a result. The fix must make a retried delivery
+    (same event_id) a no-op instead of a second, independent run against
+    the same shared conversation."""
+    settings = _settings()
+    _gw, channels_app = _build_full_stack(settings)
+    import json
+
+    body = json.dumps(
+        {
+            "type": "event_callback",
+            "event_id": "Ev_DEDUP_TEST_1",
+            "event": {
+                "type": "message",
+                "user": "U_MOCK_L2",
+                "text": "hello",
+                "channel": "C123",
+                "ts": "111.222",
+            },
+        }
+    ).encode()
+    ts = str(int(time.time()))
+    sig = _sign_slack(settings.slack_signing_secret, body, ts)
+    headers = {"X-Slack-Request-Timestamp": ts, "X-Slack-Signature": sig}
+    with TestClient(channels_app) as client:
+        first = client.post("/webhooks/slack", content=body, headers=headers)
+        assert first.status_code == 200
+        # Slack's own retry: identical payload, identical event_id.
+        second = client.post("/webhooks/slack", content=body, headers=headers)
+        assert second.status_code == 200
+
+    assert "slack_event_retry_deduplicated" in capsys.readouterr().out
+
+
 def test_teams_webhook_requires_valid_dev_token():
     settings = _settings()
     _gw, channels_app = _build_full_stack(settings)

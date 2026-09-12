@@ -18,6 +18,7 @@ Gateway or Execution Service directly (spec §4).
 from __future__ import annotations
 
 import json
+import time
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -52,6 +53,36 @@ def create_app(settings: Settings | None = None, *, agent_transport=None) -> Fas
     identity_provider = MockIdentityProvider(settings.identity_config_path)
     issuer = ServiceTokenIssuer(settings.service_jwt_secret, settings.service_jwt_issuer)
     slack_sender = SlackMessageSender(settings.slack_bot_token)
+
+    # Slack's Events API retries a delivery it hasn't gotten a fast ack for
+    # (its own ~3s timeout) — reusing the SAME event_id on each retry, up to
+    # a few times. This whole handler awaits the full Agent round-trip
+    # (potentially many seconds under LLM load) before ever returning, so a
+    # slow investigation reliably triggers at least one retry — verified
+    # live: a real DBA's single message produced two different, garbled
+    # replies, and a later reply was processed once as a real answer and
+    # again, independently, as if it were a brand-new message entirely. An
+    # in-memory, TTL'd set of recently-seen event ids makes a retried
+    # delivery a no-op instead of a second, independent run of the whole
+    # handler against a shared, mutable conversation. Per-process only
+    # (matches this dev deployment's other in-memory state, e.g. rate
+    # limiting) — a multi-instance deployment would share this via Redis
+    # instead, same as that.
+    _seen_slack_event_ids: dict[str, float] = {}
+    _SEEN_EVENT_TTL_SECONDS = 300.0  # comfortably longer than Slack's own retry window
+
+    def _slack_event_already_seen(event_id: str | None) -> bool:
+        if not event_id:
+            return False
+        now = time.monotonic()
+        for expired_id in [
+            eid for eid, seen_at in _seen_slack_event_ids.items() if now - seen_at > _SEEN_EVENT_TTL_SECONDS
+        ]:
+            del _seen_slack_event_ids[expired_id]
+        if event_id in _seen_slack_event_ids:
+            return True
+        _seen_slack_event_ids[event_id] = now
+        return False
 
     async def _no_connector_token() -> str | None:
         return None
@@ -146,6 +177,14 @@ def create_app(settings: Settings | None = None, *, agent_transport=None) -> Fas
             return {"challenge": payload.get("challenge", "")}
 
         if payload.get("type") == "event_callback":
+            if _slack_event_already_seen(payload.get("event_id")):
+                logger.info(
+                    "slack_event_retry_deduplicated",
+                    event_id=payload.get("event_id"),
+                    retry_num=request.headers.get("X-Slack-Retry-Num"),
+                )
+                return {"ok": True}
+
             event = payload.get("event", {})
             if event.get("type") != "message" or event.get("bot_id"):
                 return {"ok": True}
