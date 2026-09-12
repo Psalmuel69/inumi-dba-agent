@@ -13,7 +13,7 @@ from inumi.gateway.domain.catalog import (
     InMemoryCatalogStore,
     ServerCatalog,
 )
-from inumi.gateway.domain.servers import ServerRegistry
+from inumi.gateway.domain.servers import AmbiguousServerError, ServerRegistry
 from inumi.gateway.domain.target_validation import TargetValidator
 
 
@@ -117,3 +117,36 @@ def test_llm_cannot_supply_arbitrary_connection_target():
             instance="core-banking",
             connection_string="Server=evil;Trusted_Connection=True;",
         )
+
+
+# --- Fuzzy server-reference resolution (real DBAs rarely use a server's ---
+# --- exact registered id/alias — an abbreviation, nickname, or an IP     ---
+# --- address (or a fragment of one) is at least as common in practice.  ---
+
+
+async def test_resolves_server_by_its_exact_registered_host_ip(target_validator):
+    # corebanking-sqlserver-prod's host in config/servers.yaml is 192.168.0.100.
+    target = DatabaseTarget(environment=Environment.PRODUCTION, instance="192.168.0.100")
+    ctx = await target_validator.validate(target, ["environment", "instance"])
+    assert ctx.server.id == "corebanking-sqlserver-prod"
+
+
+async def test_resolves_server_by_a_fragment_of_its_host_ip(target_validator):
+    # A DBA saying just "0.100" (the distinctive tail of 192.168.0.100) must
+    # resolve exactly like the full IP would — unambiguous within production,
+    # since analytics-postgres-prod's host (localhost) doesn't contain it.
+    target = DatabaseTarget(environment=Environment.PRODUCTION, instance="0.100")
+    ctx = await target_validator.validate(target, ["environment", "instance"])
+    assert ctx.server.id == "corebanking-sqlserver-prod"
+
+
+async def test_a_host_fragment_shared_by_several_servers_stays_ambiguous(server_registry):
+    """Never a silent guess: every development-tier server in
+    config/servers.yaml shares the host "localhost" — asking for it by
+    host alone must surface every match, not pick one, exactly like an
+    ambiguous id/alias already does."""
+    target = DatabaseTarget(environment=Environment.DEVELOPMENT, instance="localhost")
+    candidates = server_registry.find_candidates(target)
+    assert len(candidates) > 1
+    with pytest.raises(AmbiguousServerError):
+        server_registry.resolve(target)

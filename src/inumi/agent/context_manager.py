@@ -55,6 +55,19 @@ class InvestigationState:
     # conclude, burning the whole turn budget on a case that was already
     # answerable after the first one.
     consecutive_record_observations: int = 0
+    # Consecutive AskClarification turns — reset by any other action. Kept
+    # separate from turn_count: a clarification is the DBA narrowing down a
+    # target, not the model looping on diagnostics, so it doesn't spend the
+    # shared diagnostic turn budget, but still needs its own bound (see
+    # orchestrator._MAX_CLARIFICATION_TURNS) so an unresolved back-and-forth
+    # can't run forever across many separate requests.
+    clarification_count: int = 0
+    # The DBA's raw reply when resuming an in-progress investigation — see
+    # orchestrator.handle_message's resume path and _problem_statement_for_
+    # llm. Set right before the next decide_next_action call, consumed
+    # (cleared) by that same call so it doesn't linger and get repeated on
+    # a later turn within the same request that has nothing to do with it.
+    last_message: str = ""
 
 
 @dataclasses.dataclass

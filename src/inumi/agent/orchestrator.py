@@ -49,6 +49,13 @@ _MAX_INVESTIGATION_TURNS = 6
 # progress (any other action resets the count to 0).
 _MAX_CONSECUTIVE_RECORD_OBSERVATIONS = 2
 
+# Bounds a run of *consecutive* AskClarification turns independently of
+# _MAX_INVESTIGATION_TURNS (see the loop's own comment for why they're
+# counted separately) — an unresolved back-and-forth (environment, then
+# server, then database, ...) still can't run forever across many separate
+# requests, since turn_count alone never catches that.
+_MAX_CLARIFICATION_TURNS = 4
+
 # A DENIED response whose failure_code means "the proposed call was shaped
 # wrong" (not "this is not allowed") — the LLM can plausibly fix it given
 # the specific reason, verified live: a real model that omitted a target
@@ -72,6 +79,13 @@ _SELF_CORRECTABLE_DENIAL_CODES = {"INVALID_ARGUMENTS", "INVALID_TARGET", "TOOL_N
 # returned — likely primed by "CoreBanking"-style example names used
 # throughout this file's own system prompts/help text.
 _CAMEL_CASE_NAME_RE = re.compile(r"\b[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)+\b")
+
+# A bare answer to "which environment should I investigate" — matched
+# word-boundary, case-insensitive, so it still finds "development" inside
+# something like "development <@U0BOTID>" (a Slack mention appended after
+# the actual answer) without needing an LLM call at all. See its one call
+# site in handle_message for why this exists as a fast-path.
+_ENVIRONMENT_ANSWER_RE = re.compile(r"\b(development|uat|production)\b", re.IGNORECASE)
 
 
 def _ungrounded_identifiers(conclusion: Conclude, investigation) -> list[str]:
@@ -196,6 +210,39 @@ class AgentOrchestrator:
         if command_reply is not None:
             return command_reply
 
+        # Resuming an in-progress investigation — the DBA's reply is part of
+        # THIS conversation, not a fresh, standalone utterance to classify
+        # from scratch. Verified live (twice, two different clarification
+        # kinds): a short reply like "development" (answering the hardcoded
+        # environment gate) or a bare server name (answering a freeform
+        # AskClarification the LLM itself asked) both got reclassified by
+        # extract_intent as chitchat/non-DBA and silently dropped the whole
+        # investigation. decide_next_action already has the full transcript
+        # and knows exactly what it just asked, so hand it the raw reply
+        # directly — via investigation.last_message, see
+        # _problem_statement_for_llm — instead of ever risking that
+        # misclassification again. The one thing still enforced here, not
+        # left to the LLM: never guessing an environment (spec: "for
+        # production targets I won't guess") — a bare answer to that
+        # specific question is recognized deterministically; anything else
+        # while it's still missing re-asks rather than guessing.
+        if state.investigation is not None and state.investigation.status != "CONCLUDED":
+            investigation = state.investigation
+            if "environment" not in state.database_context:
+                match = _ENVIRONMENT_ANSWER_RE.search(message)
+                if match:
+                    state.database_context["environment"] = match.group(1).lower()
+                else:
+                    return AgentReply(
+                        text=(
+                            "Which environment should I investigate — development, uat, "
+                            "or production? For production targets I won't guess."
+                        ),
+                        status="clarification",
+                    )
+            investigation.last_message = message
+            return await self._continue_investigation(state, investigation, channel, channel_account_id)
+
         llm = self._llm_for(state)
         intent = await llm.extract_intent(
             message,
@@ -214,24 +261,36 @@ class AgentOrchestrator:
                 status="clarification",
             )
 
-        if state.investigation is None or state.investigation.status == "CONCLUDED":
-            investigation = self._context.start_investigation(state, intent.problem_summary)
-            # Deterministic, zero-LLM-call keyword match against a small
-            # library of known scenarios (slow queries, high CPU, blocking,
-            # ...) — see agent.playbooks.library for the rationale. None
-            # means no known scenario matched; the loop below falls back to
-            # the original fully-freeform behavior, unchanged.
-            playbook = match_playbook(intent.problem_summary or message)
-            if playbook is not None:
-                investigation.playbook_id = playbook.playbook_id
-            if intent.environment_hint:
-                state.database_context["environment"] = intent.environment_hint
-            if intent.database_hint:
-                state.database_context["database"] = intent.database_hint
-            if intent.instance_hint:
-                state.database_context["instance"] = intent.instance_hint
-        else:
-            investigation = state.investigation
+        # Reachable only for a brand-new investigation (None) or a
+        # previously-concluded one starting fresh — an active one already
+        # returned above, before ever reaching extract_intent.
+        investigation = self._context.start_investigation(state, intent.problem_summary)
+        # Deterministic, zero-LLM-call keyword match against a small
+        # library of known scenarios (slow queries, high CPU, blocking,
+        # ...) — see agent.playbooks.library for the rationale. None
+        # means no known scenario matched; the loop below falls back to
+        # the original fully-freeform behavior, unchanged.
+        playbook = match_playbook(intent.problem_summary or message)
+        if playbook is not None:
+            investigation.playbook_id = playbook.playbook_id
+        if intent.environment_hint:
+            state.database_context["environment"] = intent.environment_hint
+        if intent.database_hint:
+            state.database_context["database"] = intent.database_hint
+        if intent.instance_hint:
+            state.database_context["instance"] = intent.instance_hint
+            if not intent.environment_hint:
+                # A specific, registered server was named but no
+                # environment was — verified live: naming "postgres-local"
+                # explicitly still triggered "which environment should I
+                # investigate?" even though a registered server has
+                # exactly one environment in config/servers.yaml. Asking
+                # again for something already implied by the instance is
+                # never necessary; only ever fills a gap, never overrides
+                # an environment the DBA actually stated.
+                auto_environment = await self._environment_for_instance(intent.instance_hint)
+                if auto_environment:
+                    state.database_context["environment"] = auto_environment
 
         if "environment" not in state.database_context:
             return AgentReply(
@@ -242,6 +301,20 @@ class AgentOrchestrator:
                 status="clarification",
             )
 
+        return await self._continue_investigation(state, investigation, channel, channel_account_id)
+
+    async def _environment_for_instance(self, instance_hint: str) -> str | None:
+        hint = instance_hint.lower()
+        for s in await self._list_servers_cached():
+            names = {s["id"].lower(), *(a.lower() for a in (s.get("aliases") or []))}
+            if hint in names:
+                return s.get("environment")
+        return None
+
+    async def _continue_investigation(
+        self, state: ConversationState, investigation, channel: str, channel_account_id: str
+    ) -> AgentReply:
+        llm = self._llm_for(state)
         available = await self._tool_client.available_tools(channel, channel_account_id)
         available_ids = [t.tool_id for t in available]
         # Each tool's *actual* required arguments (its real Pydantic schema,
@@ -308,13 +381,38 @@ class AgentOrchestrator:
                 turn_count=investigation.turn_count,
                 tool_requirements=tool_requirements,
             )
-            investigation.turn_count += 1
+            investigation.last_message = ""  # consumed — see the field's own docstring
 
             if isinstance(action, AskClarification):
+                # Does NOT consume _MAX_INVESTIGATION_TURNS — a clarification
+                # is the DBA narrowing down a target, not the model looping
+                # on diagnostics, which is what that budget exists to bound.
+                # Verified live: a multi-step targeting dialogue (environment
+                # -> server -> database) burned most of the shared budget
+                # before real diagnostics even started, then hit the cap
+                # right as they began succeeding. Bounded independently
+                # instead, so an unresolved back-and-forth still can't run
+                # forever across many separate requests (turn_count alone
+                # wouldn't catch that, since it's never incremented here).
                 investigation.consecutive_record_observations = 0
+                investigation.clarification_count += 1
+                if investigation.clarification_count > _MAX_CLARIFICATION_TURNS:
+                    investigation.status = "CONCLUDED"
+                    return AgentReply(
+                        text=(
+                            "I still don't have enough information to proceed — "
+                            "please restate what you'd like me to check, including "
+                            "the environment, server, and database if relevant, in "
+                            "one message."
+                        ),
+                        investigation_id=investigation.investigation_id,
+                    )
                 return AgentReply(
                     text=action.question, status="clarification", investigation_id=investigation.investigation_id
                 )
+
+            investigation.turn_count += 1
+            investigation.clarification_count = 0
 
             if isinstance(action, RecordObservation):
                 investigation.consecutive_record_observations += 1
@@ -433,9 +531,18 @@ class AgentOrchestrator:
         — verified live: a real model can restate the same finding as one
         observation after another instead of ever calling conclude, even
         when a plain, complete answer (including "nothing wrong was found"
-        or "X isn't configured") was already available."""
+        or "X isn't configured") was already available. And separately,
+        when resuming after the DBA sent a new reply (rather than this
+        being the investigation's first turn), that raw reply is included
+        verbatim — see investigation.last_message's own docstring for why:
+        decide_next_action needs to actually see what was just said to
+        interpret a short answer to whatever it last asked, instead of that
+        answer only ever being visible to (and often misclassified by) a
+        fresh, context-free intent-extraction call."""
         playbook = get_playbook(investigation.playbook_id)
         problem = investigation.problem
+        if investigation.last_message:
+            problem += f"\n\nThe DBA just replied: {investigation.last_message!r}"
         if playbook is not None and investigation.playbook_step >= len(playbook.steps):
             problem = (
                 f"{problem}\n\nYou just followed the '{playbook.name}' "

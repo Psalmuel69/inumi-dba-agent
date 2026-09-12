@@ -107,9 +107,22 @@ class ServerRegistry:
             if not hint:
                 continue
             needle = hint.strip().lower()
+            # Also matches the registered host (IP or hostname) — a real
+            # DBA will as often say "10.1.3.7" or a fragment of it ("3.7")
+            # as a registered id/alias, and neither was ever checked here
+            # before. Still exact-first, substring-fallback, and still
+            # ambiguous-or-no-match -> LookupError/AmbiguousServerError
+            # below rather than a guess — this only widens what counts as
+            # a candidate match, never weakens that safety net. An operator
+            # should still add generous aliases for anything this can't
+            # derive on its own (a nickname with no relation to the id/host,
+            # e.g. "MI01" for a managed instance not named anything like
+            # that) — no substring/IP scheme can infer those.
             exact = [
                 e for e in candidates
-                if e.id.lower() == needle or needle in {a.lower() for a in e.aliases}
+                if e.id.lower() == needle
+                or needle in {a.lower() for a in e.aliases}
+                or e.host.lower() == needle
             ]
             if exact:
                 candidates = exact
@@ -118,6 +131,7 @@ class ServerRegistry:
                     e for e in candidates
                     if needle in e.id.lower()
                     or any(needle in a.lower() for a in e.aliases)
+                    or needle in e.host.lower()
                 ]
 
         # A database-name hint narrows *only* when it uniquely points at one
