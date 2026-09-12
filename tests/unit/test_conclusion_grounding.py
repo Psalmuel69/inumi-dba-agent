@@ -114,11 +114,14 @@ async def test_repeated_ungrounded_conclusions_fall_through_to_the_safe_fallback
     """The rejection is bounded by the same turn cap as everything else —
     a model that keeps insisting on an unverified claim never gets it
     shown to the DBA; it just falls through to the generic "no confirmed
-    root cause" message instead."""
+    root cause" message instead. Includes the one bounded last-chance
+    call the turn cap now gets (see _finalize_conclude) — it must reject
+    an ungrounded conclusion there too, not accept it just because it's
+    the final attempt."""
     state, investigation = _state_and_investigation(playbook_id=None)
     tool_client = _FakeToolClient()
     bad = Conclude(summary="Driven by AccountBalanceOutstandings.")
-    llm = _FakeLLM(actions=[bad] * 6)  # _MAX_INVESTIGATION_TURNS
+    llm = _FakeLLM(actions=[bad] * 7)  # _MAX_INVESTIGATION_TURNS + the last-chance call
     orchestrator = _orchestrator(tool_client)
 
     reply = await orchestrator._run_investigation_loop(

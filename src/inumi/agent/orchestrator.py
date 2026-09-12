@@ -462,54 +462,91 @@ class AgentOrchestrator:
 
             if isinstance(action, Conclude):
                 investigation.consecutive_record_observations = 0
-                ungrounded = _ungrounded_identifiers(action, investigation)
-                if ungrounded:
-                    # Don't accept an unverified claim at face value — the
-                    # same self-correction pattern used for a fixable
-                    # DENIED response above: feed back exactly what's
-                    # wrong and let the model try again, bounded by the
-                    # same turn cap as everything else (the outer while
-                    # loop's own check is what actually stops this if the
-                    # model keeps insisting — it then falls through to the
-                    # safe "no confirmed root cause" message below rather
-                    # than ever surfacing an unverified claim).
-                    note = (
-                        f"Your conclusion named {', '.join(ungrounded)}, which does not "
-                        "appear anywhere in this investigation's evidence or the "
-                        "DBA's own message — never state something as a finding "
-                        "unless it actually came from a tool result or what the "
-                        "DBA said. Revise your conclusion using only that."
-                    )
-                    investigation.transcript.append(
-                        {
-                            "tool_id": "internal.grounding_check",
-                            "reason": "Verifying the conclusion before reporting it.",
-                            "result": {"rejected": ungrounded, "message": note},
-                        }
-                    )
-                    investigation.evidence.append(
-                        f"(a draft conclusion naming {', '.join(ungrounded)} was rejected — "
-                        "not found in any evidence gathered)"
-                    )
-                    logger.warning(
-                        "conclusion_rejected_ungrounded_identifiers",
-                        investigation_id=investigation.investigation_id,
-                        names=ungrounded,
-                    )
-                    continue
-                investigation.status = "CONCLUDED"
-                if action.likely_root_cause:
-                    investigation.findings.append(action.likely_root_cause)
-                if action.recommendation:
-                    investigation.recommendations.append(action.recommendation)
-                return AgentReply(
-                    text=self._format_report(investigation, action),
-                    status="ok",
-                    investigation_id=investigation.investigation_id,
-                )
+                reply = self._finalize_conclude(investigation, action)
+                if reply is not None:
+                    return reply
+                continue  # rejected as ungrounded — logged inside, try again
+
+        # Turn budget exhausted without ever reaching action=conclude.
+        # Verified live: a real investigation used its final 2 turns on
+        # legitimate remediation attempts (kill_session, then cancel_query
+        # as a fallback) that both turned up nothing to act on — genuinely
+        # useful information — but hit the cap with zero turns left to
+        # report it, and the DBA got the generic fallback below instead of
+        # that. One last, bounded call gives the model a real chance to
+        # explain the outcome first. No further tool calls are offered
+        # (available_tool_ids=[]) — decide_next_action's own post-
+        # validation turns any attempted one into an AskClarification,
+        # which (like any non-Conclude response here) just falls through
+        # to the same safe fallback as before; this can only ever add one
+        # bounded call, never another loop.
+        final_action = await llm.decide_next_action(
+            problem_statement=self._problem_statement_for_llm(investigation)
+            + "\n\nYou are out of further diagnostic or action turns. You MUST respond "
+            "with action=conclude now, summarizing what was found and done so far — "
+            "even if the root cause isn't fully confirmed, an honest \"here's what I "
+            "found and tried\" is far more useful than nothing.",
+            available_tool_ids=[],
+            transcript=investigation.transcript,
+            turn_count=investigation.turn_count,
+            tool_requirements=None,
+        )
+        if isinstance(final_action, Conclude):
+            reply = self._finalize_conclude(investigation, final_action)
+            if reply is not None:
+                return reply
 
         investigation.status = "CONCLUDED"
         return self._no_root_cause_reply(investigation)
+
+    def _finalize_conclude(self, investigation, action: Conclude) -> AgentReply | None:
+        """Builds the final reply for a Conclude action, or returns None
+        if it's rejected as ungrounded — the caller decides what happens
+        next (loop back for a retry mid-investigation, or fall through to
+        the safe generic fallback if this was the one bounded last-chance
+        call after the turn budget ran out)."""
+        ungrounded = _ungrounded_identifiers(action, investigation)
+        if ungrounded:
+            # Don't accept an unverified claim at face value — the same
+            # self-correction pattern used for a fixable DENIED response
+            # above: feed back exactly what's wrong. Mid-investigation the
+            # outer while loop's own check is what stops this if the model
+            # keeps insisting; after the turn budget, the caller simply
+            # doesn't retry and falls through to the safe fallback instead.
+            note = (
+                f"Your conclusion named {', '.join(ungrounded)}, which does not "
+                "appear anywhere in this investigation's evidence or the "
+                "DBA's own message — never state something as a finding "
+                "unless it actually came from a tool result or what the "
+                "DBA said. Revise your conclusion using only that."
+            )
+            investigation.transcript.append(
+                {
+                    "tool_id": "internal.grounding_check",
+                    "reason": "Verifying the conclusion before reporting it.",
+                    "result": {"rejected": ungrounded, "message": note},
+                }
+            )
+            investigation.evidence.append(
+                f"(a draft conclusion naming {', '.join(ungrounded)} was rejected — "
+                "not found in any evidence gathered)"
+            )
+            logger.warning(
+                "conclusion_rejected_ungrounded_identifiers",
+                investigation_id=investigation.investigation_id,
+                names=ungrounded,
+            )
+            return None
+        investigation.status = "CONCLUDED"
+        if action.likely_root_cause:
+            investigation.findings.append(action.likely_root_cause)
+        if action.recommendation:
+            investigation.recommendations.append(action.recommendation)
+        return AgentReply(
+            text=self._format_report(investigation, action),
+            status="ok",
+            investigation_id=investigation.investigation_id,
+        )
 
     @staticmethod
     def _no_root_cause_reply(investigation) -> AgentReply:
