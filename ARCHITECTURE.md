@@ -180,6 +180,27 @@ This is what lets the agent *investigate* which database is affected (e.g.
 only remembering one once a DBA happens to name it — a DBA asking about an
 incident often doesn't know the database yet; that's the point of asking.
 
+## execute() must surface the query's own result, not just rowcount
+
+Found while live-testing the blocking playbook against a real, currently
+blocking session: `database.kill_session` reported `terminated=False` for
+*every* session it ever killed across this whole project's live testing —
+even ones independently confirmed dead a moment later. The bug was one
+layer down from the adapter: `kill_session`'s SQL is `select
+pg_terminate_backend(%(pid)s) as terminated` — a SELECT, not a plain
+DML/DDL statement — but every engine's `QueryExecutor.execute()`
+(`execution/adapters/connections.py`) discarded the cursor's own result row
+and returned only `{"rowcount": ...}`. The adapter's `result.get
+("terminated", False)` then always fell back to the default. Nothing ever
+raised — it was a silently wrong answer, not a visible error, so it survived
+this many rounds of live testing before a live kill against a session that
+was independently checked before and after finally caught it.
+
+`execute()` on all three engines now also fetches the first returned row
+(when the cursor's `description` says the statement produced one) and
+merges its columns into the result dict, alongside `rowcount`. A plain
+DML/DDL statement with no result columns is unaffected — `rowcount` alone.
+
 ## The identity re-resolution point (why "UX check" ≠ "security boundary")
 
 Channel Adapters and the Agent both *can* check whether a channel account is

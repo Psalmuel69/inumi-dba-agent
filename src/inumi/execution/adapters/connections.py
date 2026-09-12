@@ -83,7 +83,20 @@ class PostgreSQLQueryExecutor:
         await self._set_timeouts(timeout)
         async with self._conn.cursor() as cur:
             await cur.execute(sql, params or {})
-            return {"rowcount": cur.rowcount}
+            result: dict[str, Any] = {"rowcount": cur.rowcount}
+            # A statement like `select pg_terminate_backend(%(pid)s) as
+            # terminated` is a SELECT, not a plain DML/DDL command — it
+            # returns a row, and adapter callers (kill_session, cancel_query)
+            # read that value back out of this dict. Discarding it here (as
+            # this used to) silently handed every such caller `False`/absent,
+            # regardless of what the server actually did — never surfaced as
+            # an error, just a wrong answer.
+            if cur.description is not None:
+                columns = [desc.name for desc in cur.description]
+                row = await cur.fetchone()
+                if row is not None:
+                    result.update(dict(zip(columns, row, strict=False)))
+            return result
 
 
 class MySQLQueryExecutor:
@@ -155,7 +168,13 @@ class MySQLQueryExecutor:
         await self._set_timeout(timeout)
         async with self._conn.cursor() as cur:
             await cur.execute(sql, params or None)
-            return {"rowcount": cur.rowcount}
+            result: dict[str, Any] = {"rowcount": cur.rowcount}
+            if cur.description is not None:
+                columns = [desc[0] for desc in cur.description]
+                row = await cur.fetchone()
+                if row is not None:
+                    result.update(dict(zip(columns, row, strict=False)))
+            return result
 
 
 class SQLServerQueryExecutor:
@@ -254,6 +273,12 @@ class SQLServerQueryExecutor:
             self._conn.timeout = timeout  # pyodbc query timeout is per-connection
             cursor = self._conn.cursor()
             cursor.execute(converted, ordered) if ordered else cursor.execute(converted)
-            return {"rowcount": cursor.rowcount}
+            result: dict[str, Any] = {"rowcount": cursor.rowcount}
+            if cursor.description is not None:
+                columns = [c[0] for c in cursor.description]
+                row = cursor.fetchone()
+                if row is not None:
+                    result.update(dict(zip(columns, row, strict=False)))
+            return result
 
         return await self._run_on_worker(_run)
