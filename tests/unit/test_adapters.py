@@ -18,6 +18,74 @@ async def test_postgres_blocking_uses_pg_locks_and_pg_stat_activity():
     assert rows == [{"blocked_session_id": 100, "blocking_session_id": 200}]
     assert "pg_locks" in executor.executed_sql[0]
     assert "pg_stat_activity" in executor.executed_sql[0]
+    assert "current_database()" not in executor.executed_sql[0]
+    assert "datname" in executor.executed_sql[0]
+
+
+@pytest.mark.asyncio
+async def test_postgres_sessions_is_cluster_wide_and_surfaces_database_name():
+    """pg_stat_activity natively covers every database on the instance — an
+    artificial `where datname = current_database()` filter used to hide that,
+    which is exactly what forced the agent to already know the affected
+    database before it could even look for it."""
+    executor = FakeQueryExecutor(canned_rows=[])
+    adapter = PostgreSQLAdapter(executor, "postgres")
+    await adapter.sessions()
+    sql = executor.executed_sql[0]
+    assert "current_database()" not in sql
+    assert "datname" in sql
+
+
+@pytest.mark.asyncio
+async def test_postgres_running_queries_is_cluster_wide():
+    executor = FakeQueryExecutor(canned_rows=[])
+    adapter = PostgreSQLAdapter(executor, "postgres")
+    await adapter.running_queries()
+    sql = executor.executed_sql[0]
+    assert "current_database()" not in sql
+    assert "datname" in sql
+
+
+@pytest.mark.asyncio
+async def test_postgres_waits_is_cluster_wide():
+    executor = FakeQueryExecutor(canned_rows=[])
+    adapter = PostgreSQLAdapter(executor, "postgres")
+    await adapter.waits()
+    assert "current_database()" not in executor.executed_sql[0]
+
+
+@pytest.mark.asyncio
+async def test_postgres_deadlocks_reports_every_database_not_just_the_current_one():
+    executor = FakeQueryExecutor(
+        canned_rows=[
+            {"datname": "AdventureWorks2019", "deadlocks": 3},
+            {"datname": "postgres", "deadlocks": 0},
+        ]
+    )
+    adapter = PostgreSQLAdapter(executor, "postgres")
+    rows = await adapter.deadlocks()
+    assert "current_database()" not in executor.executed_sql[0]
+    assert rows[0]["datname"] == "AdventureWorks2019"
+
+
+@pytest.mark.asyncio
+async def test_postgres_error_logs_is_cluster_wide():
+    executor = FakeQueryExecutor(canned_rows=[])
+    adapter = PostgreSQLAdapter(executor, "postgres")
+    await adapter.error_logs(60, 100)
+    assert "current_database()" not in executor.executed_sql[0]
+
+
+@pytest.mark.asyncio
+async def test_postgres_health_counts_connections_across_the_whole_cluster():
+    executor = FakeQueryExecutor(canned_rows=[])
+    adapter = PostgreSQLAdapter(executor, "postgres")
+    await adapter.health()
+    sql = executor.executed_sql[0]
+    # database_size_bytes legitimately still needs *a* connected database —
+    # only the connection/query counts must not be filtered to it.
+    assert "where datname = current_database()" not in sql
+    assert "pg_database_size(current_database())" in sql
 
 
 @pytest.mark.asyncio

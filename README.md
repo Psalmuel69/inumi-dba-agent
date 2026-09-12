@@ -117,7 +117,7 @@ make docker-up       # full stack via docker compose
 Phases 1–9 of the build (foundation → gateway → execution → read tools →
 agent → channels → approvals → controlled writes → restricted-tool
 framework), server registration + discovery, and MySQL/MariaDB adapters are
-implemented and covered by an automated test suite (277 passing + 24
+implemented and covered by an automated test suite (286 passing + 24
 opt-in: unit, integration, and a dedicated security suite). The Execution
 Service uses real database connections against SQL Server, PostgreSQL,
 MySQL, and MariaDB; the Agent supports Anthropic, OpenAI, Gemini, and

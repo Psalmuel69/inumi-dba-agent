@@ -184,15 +184,49 @@ def _restricted_tool(
 
 
 def build_tool_catalog(settings: Settings) -> list[ToolDefinition]:
+    # These diagnostics reflect the whole instance/cluster on every engine we
+    # support (SQL Server DMVs, MySQL information_schema/performance_schema,
+    # Postgres pg_stat_activity/pg_locks/pg_stat_database — none of them are
+    # scoped to one database), so they never need a specific database named.
+    # A DBA can ask "what's running / blocking on X" without knowing which
+    # database is affected — that's the whole point of running them: to find
+    # out. `execution/service.py` already falls back to the credential's own
+    # default database when none is given.
+    _INSTANCE_WIDE_SCOPE = ["environment", "instance"]
+
     tools: list[ToolDefinition] = [
         # --- Read-only diagnostics (spec §8) ---
-        _read_tool("database.get_health", "Overall instance/database health snapshot."),
-        _read_tool("database.get_version", "Engine version and edition/build info."),
-        _read_tool("database.get_sessions", "Active session list."),
-        _read_tool("database.get_blocking_sessions", "Current blocking chains."),
-        _read_tool("database.get_deadlocks", "Recent deadlock graphs."),
-        _read_tool("database.get_running_queries", "Currently executing queries."),
-        _read_tool("database.get_wait_statistics", "Aggregated wait statistics."),
+        _read_tool(
+            "database.get_health",
+            "Overall instance/database health snapshot.",
+            required_scope=_INSTANCE_WIDE_SCOPE,
+        ),
+        _read_tool(
+            "database.get_version",
+            "Engine version and edition/build info.",
+            required_scope=_INSTANCE_WIDE_SCOPE,
+        ),
+        _read_tool(
+            "database.get_sessions", "Active session list.", required_scope=_INSTANCE_WIDE_SCOPE
+        ),
+        _read_tool(
+            "database.get_blocking_sessions",
+            "Current blocking chains.",
+            required_scope=_INSTANCE_WIDE_SCOPE,
+        ),
+        _read_tool(
+            "database.get_deadlocks", "Recent deadlock graphs.", required_scope=_INSTANCE_WIDE_SCOPE
+        ),
+        _read_tool(
+            "database.get_running_queries",
+            "Currently executing queries.",
+            required_scope=_INSTANCE_WIDE_SCOPE,
+        ),
+        _read_tool(
+            "database.get_wait_statistics",
+            "Aggregated wait statistics.",
+            required_scope=_INSTANCE_WIDE_SCOPE,
+        ),
         _read_tool(
             "database.get_query_plan",
             "Execution plan for a specific query id.",
@@ -217,13 +251,26 @@ def build_tool_catalog(settings: Settings) -> list[ToolDefinition]:
         _read_tool("database.get_tables", "Table inventory for a database."),
         _read_tool("database.get_storage", "Storage/space utilization."),
         _read_tool("database.get_transaction_log", "Transaction log / WAL usage."),
-        _read_tool("database.get_replication_status", "Replication / Always On / streaming status."),
-        _read_tool("database.get_backup_status", "Recent backup history and status."),
-        _read_tool("database.get_configuration", "Server/database configuration parameters."),
+        _read_tool(
+            "database.get_replication_status",
+            "Replication / Always On / streaming status.",
+            required_scope=_INSTANCE_WIDE_SCOPE,
+        ),
+        _read_tool(
+            "database.get_backup_status",
+            "Recent backup history and status.",
+            required_scope=_INSTANCE_WIDE_SCOPE,
+        ),
+        _read_tool(
+            "database.get_configuration",
+            "Server/database configuration parameters.",
+            required_scope=_INSTANCE_WIDE_SCOPE,
+        ),
         _read_tool(
             "database.get_error_logs",
             "Recent error log entries.",
             args_model=ErrorLogArgs,
+            required_scope=_INSTANCE_WIDE_SCOPE,
             max_result_rows=200,
         ),
         # --- Controlled write tools (spec §8) ---

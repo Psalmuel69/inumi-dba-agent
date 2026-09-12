@@ -24,14 +24,17 @@ def _quote_ident(identifier: str) -> str:
 
 class PostgreSQLAdapter(DatabaseAdapter):
     async def health(self) -> list[dict[str, Any]]:
+        # Connection/query counts are cluster-wide (pg_stat_activity is never
+        # scoped to one database) — only database_size_bytes is necessarily
+        # about the database this connection happens to be on.
         sql = """
             select
-                (select count(*) from pg_stat_activity where datname = current_database()) as active_connections,
+                (select count(*) from pg_stat_activity) as active_connections,
                 (select setting from pg_settings where name = 'max_connections') as max_connections,
+                current_database() as connected_database,
                 pg_database_size(current_database()) as database_size_bytes,
                 (select extract(epoch from now() - pg_postmaster_start_time())) as uptime_seconds,
-                (select count(*) from pg_stat_activity
-                    where datname = current_database() and state = 'active') as active_queries
+                (select count(*) from pg_stat_activity where state = 'active') as active_queries
         """
         return await self._executor.fetch_all(sql)
 
@@ -39,19 +42,24 @@ class PostgreSQLAdapter(DatabaseAdapter):
         return await self._executor.fetch_all("select version() as version")
 
     async def sessions(self) -> list[dict[str, Any]]:
+        # Cluster-wide by design: pg_stat_activity natively covers every
+        # database on the instance. `datname` is surfaced on each row so the
+        # caller can tell which database(s) a session belongs to without
+        # having to already know — the whole point of running this when the
+        # affected database isn't known yet.
         sql = """
-            select pid as session_id, usename as user_name, application_name, client_addr,
-                   backend_start, state, wait_event_type, wait_event, query_start,
-                   left(query, 200) as query_text
+            select datname as database_name, pid as session_id, usename as user_name,
+                   application_name, client_addr, backend_start, state, wait_event_type,
+                   wait_event, query_start, left(query, 200) as query_text
             from pg_stat_activity
-            where datname = current_database()
             order by backend_start
         """
         return await self._executor.fetch_all(sql)
 
     async def blocking(self) -> list[dict[str, Any]]:
         sql = """
-            select blocked.pid as blocked_session_id, blocked.query as blocked_query,
+            select blocked.datname as database_name,
+                   blocked.pid as blocked_session_id, blocked.query as blocked_query,
                    blocking.pid as blocking_session_id, blocking.query as blocking_query,
                    blocked.wait_event_type, blocked.wait_event
             from pg_stat_activity blocked
@@ -66,29 +74,28 @@ class PostgreSQLAdapter(DatabaseAdapter):
         return await self._executor.fetch_all(sql)
 
     async def deadlocks(self) -> list[dict[str, Any]]:
-        sql = """
-            select datname, deadlocks
-            from pg_stat_database
-            where datname = current_database()
-        """
+        # No `where datname = ...` — deadlock counters for every database on
+        # the instance, so a spike shows up regardless of which one it's on.
+        sql = "select datname, deadlocks from pg_stat_database"
         return await self._executor.fetch_all(sql)
 
     async def running_queries(self) -> list[dict[str, Any]]:
         sql = """
-            select pid as session_id, now() - query_start as duration, state,
-                   left(query, 500) as query_text
+            select datname as database_name, pid as session_id,
+                   now() - query_start as duration, state, left(query, 500) as query_text
             from pg_stat_activity
-            where datname = current_database() and state != 'idle'
+            where state != 'idle'
             order by query_start
         """
         return await self._executor.fetch_all(sql)
 
     async def waits(self) -> list[dict[str, Any]]:
         sql = """
-            select wait_event_type, wait_event, count(*) as waiting_sessions
+            select datname as database_name, wait_event_type, wait_event,
+                   count(*) as waiting_sessions
             from pg_stat_activity
-            where datname = current_database() and wait_event is not null
-            group by wait_event_type, wait_event
+            where wait_event is not null
+            group by datname, wait_event_type, wait_event
             order by waiting_sessions desc
         """
         return await self._executor.fetch_all(sql)
@@ -210,11 +217,7 @@ class PostgreSQLAdapter(DatabaseAdapter):
         # counters — and document that full-text log tailing is an
         # infrastructure integration (e.g. via pgAudit + a log shipper), not
         # something this adapter fabricates.
-        sql = """
-            select datname, xact_rollback, deadlocks, stats_reset
-            from pg_stat_database
-            where datname = current_database()
-        """
+        sql = "select datname, xact_rollback, deadlocks, stats_reset from pg_stat_database"
         return await self._executor.fetch_all(sql)
 
     # --- controlled write operations ------------------------------------------

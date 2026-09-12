@@ -146,6 +146,40 @@ underneath, a single `decide_next_action`/`extract_intent` call degrades to
 a clear "try again" message within ~20s, never longer. This is the actual
 production guarantee — not any individual timeout's own value.
 
+## Instance-wide diagnostics don't demand a database
+
+Every read tool used to default to `required_target_scope = ["environment",
+"instance", "database"]` (`gateway/domain/tool_catalog.py`), so a DBA saying
+"what's running on postgres-local" with no database named got rejected —
+`INVALID_TARGET`: "Which database on postgres-local?" — even though the
+underlying diagnostic never needed one. Checked against all three adapters
+(`execution/adapters/{postgresql,sqlserver,mysql}.py`): SQL Server's DMVs and
+MySQL's `information_schema`/`performance_schema` views were already
+genuinely instance-wide for sessions, blocking, deadlocks, running queries,
+wait stats, replication, backups, configuration, and error logs — no
+per-database filter in the SQL. PostgreSQL's adapter was the one with a real
+bug: it added an artificial `where datname = current_database()` to most of
+these, even though `pg_stat_activity`/`pg_locks`/`pg_stat_database` are
+natively cluster-wide in Postgres. That filter is now removed, and a
+`datname`/`database_name` column is surfaced on the affected rows so the
+result itself says which database(s) are involved.
+
+`database.get_health`, `get_version`, `get_sessions`, `get_blocking_sessions`,
+`get_deadlocks`, `get_running_queries`, `get_wait_statistics`,
+`get_replication_status`, `get_backup_status`, `get_configuration`, and
+`get_error_logs` now declare `required_target_scope = ["environment",
+"instance"]` — no database required. Tools that are genuinely
+database-scoped on at least one engine (`get_storage`,
+`get_transaction_log`, `get_tables`, `get_indexes`/`get_statistics`,
+`get_query_plan`/`get_top_queries`) are unchanged. `execution/service.py`
+already fell back to the credential's own default database when none is
+given (`if request.database: ...`) — no change needed there.
+
+This is what lets the agent *investigate* which database is affected (e.g.
+"check what's running/blocking on X") instead of only ever being told, or
+only remembering one once a DBA happens to name it — a DBA asking about an
+incident often doesn't know the database yet; that's the point of asking.
+
 ## The identity re-resolution point (why "UX check" ≠ "security boundary")
 
 Channel Adapters and the Agent both *can* check whether a channel account is
