@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from inumi.common.models.identity import DBARole
 from inumi.common.models.target import DatabaseTarget, Environment, Platform
+from inumi.common.server_reference import normalize_server_reference
 
 
 class DatabaseOverride(BaseModel):
@@ -110,19 +111,28 @@ class ServerRegistry:
             # Also matches the registered host (IP or hostname) — a real
             # DBA will as often say "10.1.3.7" or a fragment of it ("3.7")
             # as a registered id/alias, and neither was ever checked here
-            # before. Still exact-first, substring-fallback, and still
-            # ambiguous-or-no-match -> LookupError/AmbiguousServerError
-            # below rather than a guess — this only widens what counts as
-            # a candidate match, never weakens that safety net. An operator
-            # should still add generous aliases for anything this can't
-            # derive on its own (a nickname with no relation to the id/host,
-            # e.g. "MI01" for a managed instance not named anything like
-            # that) — no substring/IP scheme can infer those.
+            # before. And also matches on a normalized form (see
+            # normalize_server_reference) so "sql server dev 1" resolves
+            # the same "sqlserver-dev-01" would — spacing, punctuation, and
+            # zero-padding differences a human plainly doesn't mean
+            # anything by. Still exact-first, substring-fallback, and
+            # still ambiguous-or-no-match -> LookupError/AmbiguousServerError
+            # below rather than a guess — every widening here only ever
+            # adds *candidates* for that same "ask, don't guess" fallback
+            # to consider, never weakens it (a false merge just becomes an
+            # ambiguous match instead of a clean single one, never a wrong
+            # confident one). An operator should still add generous aliases
+            # for anything none of this can derive on its own (a nickname
+            # with no textual relation to the id/host, e.g. "MI01" for a
+            # managed instance not named anything like that).
+            needle_normalized = normalize_server_reference(needle)
             exact = [
                 e for e in candidates
                 if e.id.lower() == needle
                 or needle in {a.lower() for a in e.aliases}
                 or e.host.lower() == needle
+                or normalize_server_reference(e.id) == needle_normalized
+                or any(normalize_server_reference(a) == needle_normalized for a in e.aliases)
             ]
             if exact:
                 candidates = exact
@@ -132,6 +142,10 @@ class ServerRegistry:
                     if needle in e.id.lower()
                     or any(needle in a.lower() for a in e.aliases)
                     or needle in e.host.lower()
+                    or needle_normalized in normalize_server_reference(e.id)
+                    or any(
+                        needle_normalized in normalize_server_reference(a) for a in e.aliases
+                    )
                 ]
 
         # A database-name hint narrows *only* when it uniquely points at one

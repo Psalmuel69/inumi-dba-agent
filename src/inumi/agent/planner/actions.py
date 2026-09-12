@@ -69,11 +69,21 @@ class IntentExtraction(BaseModel):
     # invalid enum member, not as a missing/empty field, so it read to the
     # DBA as an unexplained repeated INVALID_TARGET rather than a typo.
     environment_hint: Literal["development", "uat", "production"] | None = None
-    # A registered server id/alias explicitly named in the message (e.g. "on
-    # postgres-local"). Only ever a value from the known-servers list handed
-    # to the extractor — never invented — and only narrows a server the
-    # Gateway would otherwise consider ambiguous; it carries no authority of
-    # its own (the Gateway independently re-resolves and validates it).
+    # Whatever the DBA actually called the server — a registered id/alias,
+    # or (just as often, verified live) an informal abbreviation, nickname,
+    # or IP address/fragment not in the known-servers list at all. Never
+    # invented out of thin air; only ever pulled from what the DBA
+    # actually wrote. Carries no authority of its own — the Gateway
+    # independently re-resolves and validates it (now with the same
+    # fuzzy/host matching described in ServerRegistry.find_candidates), and
+    # asks the DBA to disambiguate rather than guessing if that's unclear.
     instance_hint: str | None = None
+    # A request for one of the agent's own utility actions, in the DBA's
+    # own words — never a slash command required. `instance_hint` doubles
+    # as the target server id for "catalog"/"discover" when one is named.
+    # None for a genuine DBA investigation request or unrelated chitchat.
+    meta_command: (
+        Literal["help", "status", "servers", "playbooks", "catalog", "discover", "approve", "reject"] | None
+    ) = None
     problem_summary: str = ""
 

@@ -37,6 +37,37 @@ _GREETING_RE = re.compile(
 )
 _SESSION_ID_RE = re.compile(r"\bsession\s+(\d+)\b|\bkill\s+(\d+)\b", re.IGNORECASE)
 
+# Free-text equivalents of the exact slash commands _handle_command_if_any
+# already recognizes — never require the literal syntax. Deliberately
+# tighter than the real-provider prompt's own guidance (which relies on an
+# actual model's contextual judgment): a bare keyword like "catalog" or
+# "playbook" can plausibly appear inside a genuine investigation sentence
+# too, so each pattern here requires an explicit listing/query framing
+# around it to keep this deterministic offline planner's false-positive
+# rate low. approve/reject are deliberately NOT pattern-matched here (an
+# offline "go ahead"/"do it" heuristic risks misfiring far more than a
+# real model's contextual judgment would) — the orchestrator still
+# supports them from a real provider, this planner just never emits them.
+_META_COMMAND_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\b(list|show|what)\b.*\b(servers?|instances?)\b", re.IGNORECASE), "servers"),
+    (re.compile(r"\bregistered servers\b", re.IGNORECASE), "servers"),
+    (re.compile(r"\b(list|show|what)\b.*\bplaybooks?\b", re.IGNORECASE), "playbooks"),
+    (
+        re.compile(r"\b(run|start)\b.*\bdiscover|^\s*discover\b|\brefresh\b.*\bcatalog\b", re.IGNORECASE),
+        "discover",
+    ),
+    (re.compile(r"\b(show|what.?s)\b.*\bcatalog\b", re.IGNORECASE), "catalog"),
+    (re.compile(r"\bwhat.?s the status\b|\bwhere are we\b|\bany update\b", re.IGNORECASE), "status"),
+    (re.compile(r"\bwhat can you do\b", re.IGNORECASE), "help"),
+)
+
+
+def _detect_meta_command(message: str) -> str | None:
+    for pattern, name in _META_COMMAND_PATTERNS:
+        if pattern.search(message):
+            return name
+    return None
+
 
 class MockLLMProvider(LLMProvider):
     provider_name = "mock"
@@ -52,6 +83,10 @@ class MockLLMProvider(LLMProvider):
     ) -> IntentExtraction:
         if _GREETING_RE.search(message):
             return IntentExtraction(is_dba_task=False, is_greeting_or_chitchat=True)
+
+        meta_command = _detect_meta_command(message)
+        if meta_command:
+            return IntentExtraction(is_dba_task=False, meta_command=meta_command)
 
         database_hint = None
         lowered = message.lower()

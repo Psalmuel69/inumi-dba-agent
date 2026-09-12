@@ -30,6 +30,7 @@ from inumi.agent.tool_client import ToolClient
 from inumi.common.ids import new_id
 from inumi.common.models.tool import ToolCallRequest, ToolCallStatus
 from inumi.common.observability import get_logger
+from inumi.common.server_reference import normalize_server_reference
 
 logger = get_logger(__name__)
 
@@ -249,6 +250,15 @@ class AgentOrchestrator:
             known_database_names=await self._known_database_names(),
             known_server_hints=await self._known_server_hints(),
         )
+        if intent.meta_command:
+            # A free-text equivalent of one of the exact slash commands
+            # below (spec: the DBA should never be bound to a fixed
+            # message structure) — "list my servers" works exactly like
+            # "/servers", "what playbooks do you have" like "/playbooks",
+            # etc. Checked before the greeting/chitchat gate since these
+            # are a distinct, actionable third category, never either of
+            # those.
+            return await self._handle_meta_command(intent, state, channel, channel_account_id)
         if intent.is_greeting_or_chitchat:
             return AgentReply(text=_HELP_TEXT)
         if not intent.is_dba_task:
@@ -304,12 +314,34 @@ class AgentOrchestrator:
         return await self._continue_investigation(state, investigation, channel, channel_account_id)
 
     async def _environment_for_instance(self, instance_hint: str) -> str | None:
-        hint = instance_hint.lower()
+        """Mirrors ServerRegistry.find_candidates' own matching (exact,
+        substring, host, and normalized-for-spacing/punctuation/padding)
+        so this convenience never asks "which environment" for a server
+        the Gateway would actually have resolved unambiguously anyway —
+        but only ever when it's unambiguous (more than one match here just
+        means no auto-fill, never a guess; the Gateway still separately,
+        independently re-resolves and validates whatever ends up in the
+        actual tool call target regardless)."""
+        hint = instance_hint.strip().lower()
+        hint_normalized = normalize_server_reference(hint)
+        matches: list[str] = []
         for s in await self._list_servers_cached():
             names = {s["id"].lower(), *(a.lower() for a in (s.get("aliases") or []))}
-            if hint in names:
-                return s.get("environment")
-        return None
+            host = (s.get("host") or "").lower()
+            normalized_names = {normalize_server_reference(n) for n in names}
+            if (
+                hint in names
+                or hint == host
+                or hint_normalized in normalized_names
+                or any(hint in n for n in names)
+                or (host and hint in host)
+                or any(hint_normalized in n for n in normalized_names)
+            ):
+                environment = s.get("environment")
+                if environment:
+                    matches.append(environment)
+        unique = set(matches)
+        return matches[0] if len(unique) == 1 else None
 
     async def _continue_investigation(
         self, state: ConversationState, investigation, channel: str, channel_account_id: str
@@ -747,21 +779,7 @@ class AgentOrchestrator:
         if stripped in ("/help",):
             return AgentReply(text=_HELP_TEXT)
         if stripped == "/status":
-            inv = state.investigation
-            if inv is None:
-                return AgentReply(text="No active investigation on this conversation.")
-            playbook = get_playbook(inv.playbook_id)
-            playbook_note = (
-                f" Following the '{playbook.name}' playbook (step "
-                f"{min(inv.playbook_step, len(playbook.steps))}/{len(playbook.steps)})."
-                if playbook is not None
-                else ""
-            )
-            return AgentReply(
-                text=f"Investigation {inv.investigation_id}: {inv.status}."
-                f"{playbook_note} {len(inv.evidence)} observations so far.",
-                investigation_id=inv.investigation_id,
-            )
+            return self._status_reply(state)
         if stripped == "/playbooks":
             return self._handle_playbooks_command()
         if stripped.startswith("/approve "):
@@ -785,10 +803,65 @@ class AgentOrchestrator:
         if stripped == "/servers":
             return await self._handle_servers_command()
         if stripped == "/catalog" or stripped.startswith("/catalog "):
-            return await self._handle_catalog_command(stripped)
+            parts = stripped.split(maxsplit=1)
+            return await self._handle_catalog_command(parts[1].strip() if len(parts) > 1 else None)
         if stripped == "/discover" or stripped.startswith("/discover "):
-            return await self._handle_discover_command(stripped, channel, channel_account_id)
+            parts = stripped.split(maxsplit=1)
+            server_id = parts[1].strip() if len(parts) > 1 else None
+            return await self._handle_discover_command(server_id, channel, channel_account_id)
         return None
+
+    @staticmethod
+    def _status_reply(state: ConversationState) -> AgentReply:
+        inv = state.investigation
+        if inv is None:
+            return AgentReply(text="No active investigation on this conversation.")
+        playbook = get_playbook(inv.playbook_id)
+        playbook_note = (
+            f" Following the '{playbook.name}' playbook (step "
+            f"{min(inv.playbook_step, len(playbook.steps))}/{len(playbook.steps)})."
+            if playbook is not None
+            else ""
+        )
+        return AgentReply(
+            text=f"Investigation {inv.investigation_id}: {inv.status}."
+            f"{playbook_note} {len(inv.evidence)} observations so far.",
+            investigation_id=inv.investigation_id,
+        )
+
+    async def _handle_meta_command(
+        self, intent, state: ConversationState, channel: str, channel_account_id: str
+    ) -> AgentReply:
+        """Free-text equivalent of the exact slash commands above — never
+        require the literal syntax (spec: the DBA should never be bound to
+        a fixed message structure). `intent.instance_hint` doubles as the
+        target server id for catalog/discover when one was named."""
+        command = intent.meta_command
+        if command == "help":
+            return AgentReply(text=_HELP_TEXT)
+        if command == "status":
+            return self._status_reply(state)
+        if command == "playbooks":
+            return self._handle_playbooks_command()
+        if command == "servers":
+            return await self._handle_servers_command()
+        if command == "catalog":
+            return await self._handle_catalog_command(intent.instance_hint)
+        if command == "discover":
+            return await self._handle_discover_command(intent.instance_hint, channel, channel_account_id)
+        if command in ("approve", "reject"):
+            # Only ever acts on the one pending approval this conversation
+            # already has (handle_approval_decision itself replies clearly
+            # if there isn't one) — never a guess at *which* action, since
+            # there is only ever the single one already shown to the DBA
+            # via its approval card.
+            return await self.handle_approval_decision(
+                conversation_id=state.conversation_id,
+                decision=command,
+                channel=channel,
+                channel_account_id=channel_account_id,
+            )
+        return AgentReply(text=_HELP_TEXT)  # unreachable given IntentExtraction's own enum
 
     def _handle_playbooks_command(self) -> AgentReply:
         lines = [f"- {p.name}: {p.description}" for p in PLAYBOOKS]
@@ -816,16 +889,13 @@ class AgentOrchestrator:
             )
         return AgentReply(text="Registered servers:\n" + "\n".join(lines))
 
-    async def _handle_catalog_command(self, stripped: str) -> AgentReply:
-        parts = stripped.split(maxsplit=1)
-        if len(parts) < 2:
-            return AgentReply(text="Usage: /catalog <server-id>  (see /servers)")
-        data = await self._tool_client.get_server_catalog(parts[1].strip())
+    async def _handle_catalog_command(self, server_id: str | None) -> AgentReply:
+        if not server_id:
+            return AgentReply(text="Which server's catalog would you like to see? (see /servers)")
+        data = await self._tool_client.get_server_catalog(server_id)
         cat = (data or {}).get("catalog")
         if not cat:
-            return AgentReply(
-                text=f"No catalog for '{parts[1].strip()}' yet — run /discover {parts[1].strip()}"
-            )
+            return AgentReply(text=f"No catalog for '{server_id}' yet — run /discover {server_id}")
         lines = [f"{data['server']['id']} — {cat['engine_edition']} {cat['engine_version']}"]
         for db in cat["databases"][:40]:
             kinds: dict[str, int] = {}
@@ -839,10 +909,8 @@ class AgentOrchestrator:
         return AgentReply(text="\n".join(lines))
 
     async def _handle_discover_command(
-        self, stripped: str, channel: str, channel_account_id: str
+        self, server_id: str | None, channel: str, channel_account_id: str
     ) -> AgentReply:
-        parts = stripped.split(maxsplit=1)
-        server_id = parts[1].strip() if len(parts) > 1 else None
         result = await self._tool_client.refresh_catalog(channel, channel_account_id, server_id)
         if result.get("status") == "ERROR":
             return AgentReply(text=f"Discovery failed: {result.get('detail')}", status="error")
