@@ -684,8 +684,22 @@ class AgentOrchestrator:
         playbook's steps are all used up, append its conclusion guidance so
         the one LLM call that follows (interpreting everything the playbook
         gathered) knows what "done" looks like for this specific scenario,
-        and is nudged to conclude now rather than keep investigating
-        freeform on top of it. Separately, once the model has already
+        and is nudged to conclude now if the evidence already supports it.
+        That nudge deliberately states both directions, not just the
+        "conclude now" one: `_next_playbook_action` returning None here
+        does NOT mean the model is limited to conclude-only from this point
+        — `available_tool_ids` handed to this same decide_next_action call
+        is still the full, unrestricted tool menu (see
+        `_continue_investigation`/`_run_investigation_loop`), so an
+        inconclusive playbook is explicitly told it may propose one or more
+        further freeform diagnostic tool calls, exactly like the original
+        fully-freeform path, before ever concluding — a playbook only ever
+        pre-decides a *known* scenario's fixed opening sequence, never a
+        ceiling on what can be investigated afterward. Any such extra call
+        still spends from the same shared `_MAX_INVESTIGATION_TURNS` budget
+        as everything else (see the loop itself), so this can never let an
+        investigation run longer than a fully freeform one could. Separately,
+        once the model has already
         recorded an observation without concluding, add an escalating nudge
         before `_MAX_CONSECUTIVE_RECORD_OBSERVATIONS` cuts it off entirely
         — verified live: a real model can restate the same finding as one
@@ -708,7 +722,11 @@ class AgentOrchestrator:
                 f"{problem}\n\nYou just followed the '{playbook.name}' "
                 f"playbook — see the transcript for what was checked and found. "
                 f"{playbook.conclusion_guidance} If the evidence gathered is enough "
-                "to conclude, conclude now rather than proposing further tool calls."
+                "to conclude, conclude now rather than proposing further tool calls. "
+                "If it is NOT enough, propose one or more additional read-only "
+                "diagnostic tool calls that would specifically fill the gap, before "
+                "concluding — you are not limited to this playbook's fixed steps; "
+                "any tool in the available list is yours to use."
             )
         if investigation.consecutive_record_observations:
             problem += (

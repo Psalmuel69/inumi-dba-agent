@@ -99,10 +99,36 @@ Within the turn/observation bounds, a step is decided one of two ways:
   backup health, storage/transaction log, error logs, general health), this
   picks a fixed, named sequence of read-only diagnostic calls. Each step of
   a matched playbook is submitted directly — **no LLM call in between** —
-  and the LLM is asked only once, after the sequence completes, to
-  interpret everything gathered and conclude (nudged by the playbook's own
-  conclusion guidance). Unmatched problem text runs fully freeform,
-  unchanged.
+  and once the sequence completes, the LLM is called again to interpret
+  everything gathered (nudged by the playbook's own conclusion guidance).
+  Unmatched problem text runs fully freeform, unchanged.
+
+**A playbook's fixed steps are a floor, not a ceiling.** That first
+post-playbook call is *not* restricted to `conclude` — `_next_playbook_
+action` returning `None` (steps exhausted) simply makes the loop fall
+through to the exact same `decide_next_action` call the freeform path
+uses, with the same full, unrestricted `available_tool_ids` and the same
+`tool_requirements`/`tool_allowed_arguments` plumbing. `_problem_statement_
+for_llm` tells the model both directions explicitly: conclude now if the
+evidence already suffices, but if it doesn't, propose one or more further
+read-only diagnostic tool calls — not limited to this playbook's own
+steps — before concluding. Each such extra call goes through
+`_submit_and_relay` exactly like any other freeform proposal (including
+argument-stripping and Gateway-DENIED self-correction) and is folded into
+the same transcript/evidence the eventual conclusion is built from. So "the
+LLM is asked only once" is only true for a playbook whose evidence was
+already sufficient — verified by a scripted-LLM test
+(`tests/unit/test_playbook_freeform_extension.py`) that drives the
+blocking playbook's 4 fixed steps to completion, then has the model
+propose one further diagnostic outside those 4 steps before concluding,
+confirming the extra call is actually submitted and its result reflected
+in the final report. Crucially, this never grants extra turns: every
+playbook step and every freeform extension increments the exact same
+`investigation.turn_count` against the exact same `_MAX_INVESTIGATION_
+TURNS`, so a long playbook simply leaves fewer freeform turns available
+afterward, and a model that never converges still terminates via the
+existing turn-cap/final-chance-to-conclude fallback above — pinned by
+`tests/unit/test_turn_budget_playbook_plus_freeform.py`.
 
 Why this exists: freeform investigation was already *capable* of running
 any read-only tool in any order and reaching a correct answer — a playbook
