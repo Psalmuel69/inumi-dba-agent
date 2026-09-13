@@ -240,6 +240,100 @@ was independently checked before and after finally caught it.
 merges its columns into the result dict, alongside `rowcount`. A plain
 DML/DDL statement with no result columns is unaffected — `rowcount` alone.
 
+## A write executing is not license to conclude it worked
+
+The README's own lifecycle diagram states the property this section
+enforces: `... → DATABASE → VERIFICATION → AUDIT → AI DBA → USER` — the
+system verifies, then the AI DBA reports the actual outcome. A shared
+external playbook spec this project follows says the same thing more
+bluntly: "Never mark an incident as resolved merely because an action was
+submitted. Resolution requires independent verification." Before this,
+that property held only as far as the model chose to make it hold.
+
+`ToolCallStatus.EXECUTED` on a write (e.g. `database.kill_session`) means
+the Gateway/Execution pipeline ran the statement — it says nothing about
+whether the condition the DBA actually cared about (a session still
+blocking something) is now gone. Whether the investigation ever re-checked
+that afterward (calling `database.get_blocking_sessions` again, say) was
+previously left entirely to the model's own discretion within its turn
+budget. Verified live, a real model has voluntarily done exactly the right
+thing — "Subsequent session and blocking checks confirmed that session X
+has been successfully terminated" — but nothing ever forced it to. Nothing
+stopped the same model, on a different run, from proposing `kill_session`
+and immediately concluding "Completed" from the bare EXECUTED status alone,
+with no independent check that the session was actually gone. A DBA
+reading that report has no way to tell the two cases apart.
+
+The fix mirrors an already-established pattern in this same file:
+`_ungrounded_identifiers`/`_finalize_conclude`'s existing grounding check
+(see `test_conclusion_grounding.py`) already rejects a Conclude that names
+something never actually seen in the investigation, and gives the model
+one more bounded try. Post-remediation
+verification is the same shape, applied to a different failure: a Conclude
+that would report a write as done without an independent re-check.
+
+- `orchestrator._VERIFICATION_TOOLS_BY_WRITE_TOOL` is a lookup table from a
+  write tool_id to the read-only tool(s) that can cheaply, obviously
+  confirm its real-world effect — currently `kill_session`/`cancel_query`
+  against `get_blocking_sessions`/`get_sessions`/`get_running_queries`.
+  Deliberately scoped to session-termination-shaped writes first: that's
+  the case this project has repeatedly hit live and gotten wrong, and it's
+  the one with an unambiguous, single-call check (does this session_id
+  still show up?). A write like `update_statistics`/`create_index` has no
+  equally cheap re-check (confirming it actually *helped* needs a
+  follow-up performance observation, not one more tool call), so those
+  intentionally stay out of the table for now — extending this to a future
+  write tool with its own obvious check is one more table entry, not a new
+  mechanism.
+- `InvestigationState.pending_verification` is set the moment a mapped
+  write executes, and cleared the moment one of its correlated read-only
+  tools is itself proposed and executes — regardless of what that check
+  finds. `_verification_still_shows_condition` inspects that read tool's
+  own result rows for the exact session_id the write targeted (the same
+  `session_id`/`blocked_session_id`/`blocking_session_id` fields the real
+  adapters already return — see `execution/adapters/*.py`) and records the
+  verdict on `InvestigationState.last_verification`: `"RESOLVED"` or
+  `"UNRESOLVED"`.
+- `_finalize_conclude` rejects a Conclude while `pending_verification` is
+  still set — same self-correction shape as the grounding check: feed back
+  exactly what's missing (which tool to call), append an
+  `internal.verification_check` transcript entry, and let the loop's own
+  turn budget bound how many times this can happen. The one exception is
+  the single bounded last-chance Conclude call after the turn budget runs
+  out (`final_chance=True`): it offers no tool calls at all
+  (`available_tool_ids=[]`), so there is no way left for the model to
+  actually go check — rejecting there would only discard everything the
+  investigation found in favor of the generic no-root-cause fallback, so
+  it's accepted instead, with the report saying plainly that it was never
+  independently verified.
+- `_format_report`/`_verification_note` state the real, structurally-
+  derived outcome directly in the DBA-facing reply — never inferred from
+  the model's own free-text Conclude wording, and never collapsed into one
+  generic "Completed": *independently re-checked and confirmed resolved*,
+  *independently re-checked and did NOT resolve*, or *executed but never
+  independently checked* are three distinct, separately-worded outcomes.
+
+Whether a tool_id is even eligible for this treatment is double-checked
+against the tool catalog's own `operation_type` (already returned in full
+by `/v1/tools` — nothing new had to be threaded through the Gateway for
+this), the same belt-and-suspenders reasoning
+`_strip_unschematized_arguments` already uses: `_VERIFICATION_TOOLS_BY_
+WRITE_TOOL`'s own tool_id membership is the primary signal, but if the
+catalog no longer classifies that tool_id as `OperationType.WRITE`, this
+mechanism stands down rather than trusting a static mapping that might now
+be stale.
+
+Verified via `tests/unit/test_post_remediation_verification.py`, including
+a scripted reproduction of the exact live pattern: a mock LLM proposes
+`kill_session`, gets `EXECUTED` (`terminated=True`), then immediately
+proposes `Conclude` claiming success with no re-check at all — rejected,
+not accepted at face value — alongside the same scenario with a proper
+re-check afterward (accepted, reply states it was independently verified),
+one where the re-check shows the session is still there (accepted, reply
+states it was NOT resolved), and one where the model never re-checks at
+all before the turn budget runs out (accepted only via the bounded
+last-chance path, reply states it was never independently verified).
+
 ## A NoArgs tool's own required-arguments entry must say "[]", not nothing
 
 Observed repeatedly across live Slack testing: `database.get_blocking_sessions`

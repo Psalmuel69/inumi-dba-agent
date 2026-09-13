@@ -68,6 +68,32 @@ class InvestigationState:
     # (cleared) by that same call so it doesn't linger and get repeated on
     # a later turn within the same request that has nothing to do with it.
     last_message: str = ""
+    # Set the moment a write tool with a known, cheap, correlated read-only
+    # re-check (see orchestrator._VERIFICATION_TOOLS_BY_WRITE_TOOL —
+    # currently kill_session/cancel_query against get_blocking_sessions/
+    # get_sessions/get_running_queries) executes, and cleared the moment one
+    # of those re-check tools is itself proposed and executes — regardless
+    # of what it finds; see `last_verification` for the actual verdict.
+    # None means either no such write has happened yet this investigation,
+    # or the one that did has already been followed by a re-check. Exists
+    # because whether a remediation actually gets independently re-checked
+    # was previously left entirely to the model's own discretion within its
+    # turn budget — verified live, it sometimes does this unprompted, but
+    # nothing forced it, so a DBA could get a clean "Completed" summary when
+    # the underlying condition never actually cleared. See
+    # `_finalize_conclude` (the check that acts on this) and
+    # `_submit_and_relay` (where this is set/cleared).
+    pending_verification: dict[str, Any] | None = None
+    # The outcome of the most recently completed write-then-recheck
+    # sequence this investigation has seen: "RESOLVED" (the recheck no
+    # longer shows the condition the write targeted), "UNRESOLVED" (it
+    # still does — the write executed but did not actually take effect), or
+    # None (no such sequence has completed yet). Never set directly by the
+    # model — derived structurally from a read tool's own result rows in
+    # `_submit_and_relay`. Read by `_format_report` to state the real,
+    # independently-checked outcome in the DBA-facing reply rather than
+    # trusting the model's own free-text claim of success.
+    last_verification: str | None = None
 
 
 @dataclasses.dataclass

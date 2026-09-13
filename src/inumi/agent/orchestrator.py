@@ -28,7 +28,7 @@ from inumi.agent.playbooks.library import PLAYBOOKS, get_playbook, match_playboo
 from inumi.agent.reply import AgentReply, ApprovalCard
 from inumi.agent.tool_client import ToolClient
 from inumi.common.ids import new_id
-from inumi.common.models.tool import ToolCallRequest, ToolCallStatus
+from inumi.common.models.tool import OperationType, ToolCallRequest, ToolCallResponse, ToolCallStatus
 from inumi.common.observability import get_logger
 from inumi.common.server_reference import normalize_server_reference
 
@@ -122,6 +122,55 @@ def _ungrounded_identifiers(conclusion: Conclude, investigation) -> list[str]:
         if name.lower() not in haystack:
             ungrounded.append(name)
     return ungrounded
+
+
+# Write tools with an obvious, cheap, correlated read-only re-check —
+# scoped deliberately to session-termination-shaped writes first (the case
+# this project has repeatedly hit live and gotten wrong: a real model has
+# voluntarily said things like "Subsequent session and blocking checks
+# confirmed that session X has been successfully terminated", but nothing
+# ever forced that check, so a DBA could just as easily get a clean-
+# sounding "Completed" when the session was never actually gone). A write
+# like update_statistics/create_index/modify_configuration has no such
+# cheap, obvious re-check (confirming it actually helped needs a follow-up
+# performance observation, not one more tool call), so those deliberately
+# stay out of this mapping for now — this is written as a lookup table,
+# not a single hardcoded tool_id check, specifically so extending it to a
+# future write tool is just one more entry, not a new mechanism.
+_VERIFICATION_TOOLS_BY_WRITE_TOOL: dict[str, tuple[str, ...]] = {
+    "database.kill_session": ("database.get_blocking_sessions", "database.get_sessions"),
+    "database.cancel_query": (
+        "database.get_blocking_sessions",
+        "database.get_running_queries",
+        "database.get_sessions",
+    ),
+}
+
+
+def _verification_still_shows_condition(tool_id: str, session_id: str | None, result: dict | None) -> bool:
+    """True if a post-write re-check's OWN result rows still show the
+    exact session_id the write targeted — i.e. the write did not actually
+    take effect. Deliberately narrow: only ever inspects the specific
+    field(s) each of these read tools is known to populate (verified
+    against `execution/adapters/*.py` — `session_id` for
+    get_sessions/get_running_queries, `blocked_session_id`/
+    `blocking_session_id` for get_blocking_sessions), and never guesses
+    when session_id is unknown (e.g. a write whose arguments were stripped
+    before this ever ran) or the result is missing/oddly shaped — those
+    cases fall through to "not shown as still present", which is the safe
+    direction: this function's only job is to catch a confirmed-not-
+    resolved case, never to manufacture one from ambiguous data."""
+    if not session_id:
+        return False
+    rows = (result or {}).get("rows") or []
+    if not rows:
+        return False
+    keys = (
+        ("blocked_session_id", "blocking_session_id")
+        if tool_id == "database.get_blocking_sessions"
+        else ("session_id",)
+    )
+    return any(str(row.get(key)) == str(session_id) for row in rows for key in keys)
 
 
 def _affected_summary(result: dict | None) -> str:
@@ -442,6 +491,15 @@ class AgentOrchestrator:
         tool_allowed_arguments = {
             t.tool_id: set(t.argument_schema.get("properties", {})) for t in available
         }
+        # Each tool's operation_type, straight from the same `/v1/tools`
+        # response already fetched above — nothing new to thread from the
+        # Gateway, this info was already here. Used by `_submit_and_relay`
+        # as a defense-in-depth confirmation (alongside
+        # `_VERIFICATION_TOOLS_BY_WRITE_TOOL`'s own tool_id membership) that
+        # a tool this is about to treat as "a write needing a post-hoc
+        # check" is actually still classified as OperationType.WRITE by the
+        # tool catalog right now, not stale knowledge baked into this file.
+        tool_operation_types = {t.tool_id: t.operation_type for t in available}
 
         return await self._run_investigation_loop(
             state,
@@ -452,6 +510,7 @@ class AgentOrchestrator:
             llm,
             tool_requirements,
             tool_allowed_arguments,
+            tool_operation_types,
         )
 
     async def _run_investigation_loop(
@@ -464,6 +523,7 @@ class AgentOrchestrator:
         llm: LLMProvider,
         tool_requirements: dict[str, list[str]] | None = None,
         tool_allowed_arguments: dict[str, set[str]] | None = None,
+        tool_operation_types: dict[str, OperationType] | None = None,
     ) -> AgentReply:
         while investigation.turn_count < _MAX_INVESTIGATION_TURNS:
             step_action = self._next_playbook_action(investigation, available_ids)
@@ -481,7 +541,13 @@ class AgentOrchestrator:
                 # everything gathered and conclude.
                 investigation.turn_count += 1
                 reply = await self._submit_and_relay(
-                    state, investigation, step_action, channel, channel_account_id, tool_allowed_arguments
+                    state,
+                    investigation,
+                    step_action,
+                    channel,
+                    channel_account_id,
+                    tool_allowed_arguments,
+                    tool_operation_types,
                 )
                 if reply is not None:
                     return reply
@@ -545,7 +611,13 @@ class AgentOrchestrator:
             if isinstance(action, ProposeToolCall):
                 investigation.consecutive_record_observations = 0
                 reply = await self._submit_and_relay(
-                    state, investigation, action, channel, channel_account_id, tool_allowed_arguments
+                    state,
+                    investigation,
+                    action,
+                    channel,
+                    channel_account_id,
+                    tool_allowed_arguments,
+                    tool_operation_types,
                 )
                 if reply is not None:
                     return reply
@@ -583,19 +655,40 @@ class AgentOrchestrator:
             tool_requirements=None,
         )
         if isinstance(final_action, Conclude):
-            reply = self._finalize_conclude(investigation, final_action)
+            # final_chance=True: no tool calls were even offered for this
+            # last attempt (available_tool_ids=[] above), so a still-
+            # pending post-write verification can no longer be fixed by
+            # asking again — accept the conclusion but let `_format_report`
+            # state plainly that it was never independently re-checked,
+            # rather than rejecting into the generic no-root-cause
+            # fallback and losing everything the investigation actually did.
+            reply = self._finalize_conclude(investigation, final_action, final_chance=True)
             if reply is not None:
                 return reply
 
         investigation.status = "CONCLUDED"
         return self._no_root_cause_reply(investigation)
 
-    def _finalize_conclude(self, investigation, action: Conclude) -> AgentReply | None:
+    def _finalize_conclude(
+        self, investigation, action: Conclude, *, final_chance: bool = False
+    ) -> AgentReply | None:
         """Builds the final reply for a Conclude action, or returns None
-        if it's rejected as ungrounded — the caller decides what happens
-        next (loop back for a retry mid-investigation, or fall through to
-        the safe generic fallback if this was the one bounded last-chance
-        call after the turn budget ran out)."""
+        if it's rejected — the caller decides what happens next (loop back
+        for a retry mid-investigation, or fall through to the safe generic
+        fallback if this was the one bounded last-chance call after the
+        turn budget ran out). Two independent things can reject a
+        conclusion: it names something ungrounded (see
+        `_ungrounded_identifiers`), or it's trying to conclude with a
+        write's real-world effect still unverified (see
+        `investigation.pending_verification`'s own docstring for why this
+        exists) — the latter only applies mid-investigation
+        (`final_chance=False`): the one bounded last-chance call offers no
+        tool calls at all (`available_tool_ids=[]`), so there is no way
+        left for the model to actually go check, and rejecting it there
+        would only throw away everything the investigation found in favor
+        of the generic no-root-cause fallback. `_format_report` is what
+        states the true, structurally-derived verification outcome in
+        that case instead of trusting the model's own wording."""
         ungrounded = _ungrounded_identifiers(action, investigation)
         if ungrounded:
             # Don't accept an unverified claim at face value — the same
@@ -628,6 +721,45 @@ class AgentOrchestrator:
                 names=ungrounded,
             )
             return None
+
+        if not final_chance and investigation.pending_verification is not None:
+            # Structural enforcement of the project's own "SYSTEM VERIFIES
+            # -> INUMI REPORTS THE ACTUAL OUTCOME" principle (README.md's
+            # lifecycle diagram): a write that just executed must not be
+            # treated as license to conclude "Completed" without an
+            # independent re-check — never mark an incident resolved
+            # merely because an action was submitted. Same self-correction
+            # shape as the grounding check just above: reject, feed back
+            # exactly what's missing, and let the loop's own turn budget
+            # bound how many times this can happen — never an unbounded
+            # wait for the model to eventually decide to check.
+            pending = investigation.pending_verification
+            verification_tools = " or ".join(pending["verification_tools"])
+            note = (
+                f"{pending['tool_id']} executed, but nothing has independently "
+                f"re-checked yet whether it actually took effect — never mark an "
+                f"action as resolved merely because it was submitted. Call "
+                f"{verification_tools} to confirm the real-world outcome before "
+                "concluding."
+            )
+            investigation.transcript.append(
+                {
+                    "tool_id": "internal.verification_check",
+                    "reason": "Verifying the remediation's real-world effect before reporting it.",
+                    "result": {"pending_tool_id": pending["tool_id"], "message": note},
+                }
+            )
+            investigation.evidence.append(
+                f"(a draft conclusion after {pending['tool_id']} was rejected — "
+                "not yet independently verified)"
+            )
+            logger.warning(
+                "conclusion_rejected_pending_verification",
+                investigation_id=investigation.investigation_id,
+                tool_id=pending["tool_id"],
+            )
+            return None
+
         investigation.status = "CONCLUDED"
         if action.likely_root_cause:
             investigation.findings.append(action.likely_root_cause)
@@ -780,6 +912,7 @@ class AgentOrchestrator:
         channel: str,
         channel_account_id: str,
         tool_allowed_arguments: dict[str, set[str]] | None = None,
+        tool_operation_types: dict[str, OperationType] | None = None,
     ) -> AgentReply | None:
         arguments = self._strip_unschematized_arguments(action, tool_allowed_arguments)
         request = ToolCallRequest(
@@ -945,7 +1078,61 @@ class AgentOrchestrator:
         evidence_line = f"{action.tool_id}: {response.message}{_affected_summary(response.result)}"
         investigation.evidence.append(evidence_line)
         investigation.actions.append({"tool_id": action.tool_id, "result": response.result})
+        self._update_pending_verification(investigation, action, arguments, response, tool_operation_types)
         return None
+
+    @staticmethod
+    def _update_pending_verification(
+        investigation,
+        action: ProposeToolCall,
+        arguments: dict,
+        response: ToolCallResponse,
+        tool_operation_types: dict[str, OperationType] | None,
+    ) -> None:
+        """Sets or clears `investigation.pending_verification`/
+        `last_verification` (see their own docstrings on
+        `InvestigationState`) — the structural half of the post-remediation
+        verification mechanism; `_finalize_conclude`/`_format_report` are
+        what act on what this records. Called for every EXECUTED tool call,
+        not just writes — most calls match neither branch below and this
+        is a no-op for them.
+
+        `tool_operation_types.get(action.tool_id) == OperationType.WRITE`
+        is checked as a defense-in-depth confirmation (mirroring
+        `_strip_unschematized_arguments`'s own belt-and-suspenders
+        reasoning) that the tool catalog *currently* still classifies this
+        tool_id as a write, not stale assumption baked into this file. When
+        `tool_operation_types` is None (older/direct test call sites, or a
+        code path that never fetched the catalog), this falls back to
+        trusting `_VERIFICATION_TOOLS_BY_WRITE_TOOL`'s own tool_id
+        membership alone rather than skipping the check outright — that
+        mapping only ever lists tools declared WRITE in
+        `gateway/domain/tool_catalog.py` to begin with."""
+        if investigation.pending_verification is not None and action.tool_id in (
+            investigation.pending_verification["verification_tools"]
+        ):
+            still_present = _verification_still_shows_condition(
+                action.tool_id, investigation.pending_verification.get("session_id"), response.result
+            )
+            investigation.last_verification = "UNRESOLVED" if still_present else "RESOLVED"
+            investigation.pending_verification = None
+            return
+
+        verification_tools = _VERIFICATION_TOOLS_BY_WRITE_TOOL.get(action.tool_id)
+        if verification_tools is None:
+            return
+        is_write = tool_operation_types is None or (
+            tool_operation_types.get(action.tool_id) == OperationType.WRITE
+        )
+        if not is_write:
+            return
+        investigation.pending_verification = {
+            "tool_id": action.tool_id,
+            "verification_tools": verification_tools,
+            "session_id": arguments.get("session_id"),
+            "reason": action.reason,
+        }
+        investigation.last_verification = None
 
     async def handle_approval_decision(
         self, *, conversation_id: str, decision: str, channel: str, channel_account_id: str
@@ -1207,4 +1394,36 @@ class AgentOrchestrator:
             lines.append(f"Root Cause ({prefix}): {conclusion.likely_root_cause}")
         if conclusion.recommendation:
             lines.append(f"Recommended Action: {conclusion.recommendation}")
+        verification_note = AgentOrchestrator._verification_note(investigation)
+        if verification_note:
+            lines.append(verification_note)
         return "\n".join(lines)
+
+    @staticmethod
+    def _verification_note(investigation) -> str | None:
+        """States the real, independently-checked outcome of a write this
+        investigation performed — structurally derived from
+        `investigation.last_verification`/`pending_verification` (see
+        their own docstrings), never from the model's own free-text
+        Conclude, so a DBA is never left trusting a bare "Completed" for a
+        write whose real-world effect was never actually checked. Three
+        distinct, deliberately-worded outcomes (never collapsed into one
+        generic "done"): independently confirmed resolved, independently
+        confirmed NOT resolved, or executed but never independently
+        checked at all (reachable only via the last-chance Conclude call —
+        see `_finalize_conclude`'s `final_chance`)."""
+        if investigation.last_verification == "RESOLVED":
+            return "Verification: independently re-checked afterward and confirmed resolved."
+        if investigation.last_verification == "UNRESOLVED":
+            return (
+                "Verification: independently re-checked afterward — this did NOT "
+                "actually resolve the condition; further action is likely still needed."
+            )
+        if investigation.pending_verification is not None:
+            pending = investigation.pending_verification
+            return (
+                f"Verification: {pending['tool_id']} executed, but I ran out of turns "
+                "before independently re-checking whether it actually took effect — "
+                "treat this as executed but NOT independently verified."
+            )
+        return None
