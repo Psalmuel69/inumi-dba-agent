@@ -218,3 +218,28 @@ async def test_playbooks_command_lists_every_playbook():
     assert reply is not None
     assert "Slow Query Investigation" in reply.text
     assert "Deadlock Investigation" in reply.text
+    assert "Configuration Tuning Review" in reply.text
+
+
+@pytest.mark.asyncio
+async def test_configuration_review_playbook_runs_its_two_steps_with_zero_intermediate_llm_calls():
+    state, investigation = _state_and_investigation(playbook_id="configuration_review")
+    tool_client = _FakeToolClient()
+    llm = _FakeLLM(actions=[Conclude(summary="Reviewed configuration.")])
+    orchestrator = _orchestrator(tool_client)
+
+    reply = await orchestrator._run_investigation_loop(
+        state, investigation, _ALL_READ_TOOL_IDS, "dev", "dba_l2@example.com", llm, None
+    )
+
+    assert [r.tool_id for r in tool_client.requests] == [
+        "database.get_configuration",
+        "database.get_health",
+    ]
+    assert len(llm.calls) == 1
+    problem = llm.calls[0]["problem_statement"]
+    assert "Configuration Tuning Review" in problem
+    # from the playbook's own conclusion_guidance — the scoping limitation
+    # must reach the LLM call, not just live in the source file.
+    assert "hardware" in problem or "instance-class" in problem
+    assert reply.status == "ok"

@@ -94,14 +94,27 @@ Within the turn/observation bounds, a step is decided one of two ways:
   next tool from the ones it was offered, or concludes.
 - **Playbook-driven**: on a new investigation, `agent.playbooks.library
   .match_playbook` runs a deterministic, zero-LLM-call keyword match
-  against the problem text. For 11 known scenarios (slow queries, high CPU,
+  against the problem text. For 12 known scenarios (slow queries, high CPU,
   high memory, blocking, deadlocks, connection saturation, replication lag,
-  backup health, storage/transaction log, error logs, general health), this
-  picks a fixed, named sequence of read-only diagnostic calls. Each step of
-  a matched playbook is submitted directly — **no LLM call in between** —
-  and once the sequence completes, the LLM is called again to interpret
-  everything gathered (nudged by the playbook's own conclusion guidance).
-  Unmatched problem text runs fully freeform, unchanged.
+  backup health, storage/transaction log, error logs, general health,
+  configuration tuning review), this picks a fixed, named sequence of
+  read-only diagnostic calls. Each step of a matched playbook is submitted
+  directly — **no LLM call in between** — and once the sequence completes,
+  the LLM is called again to interpret everything gathered (nudged by the
+  playbook's own conclusion guidance). Unmatched problem text runs fully
+  freeform, unchanged.
+
+  Reviewed against Xata's (a competing, now-archived, Postgres-only DBA
+  agent) shipped playbook prompts: two gaps were worth adopting. First, its
+  slow-query/high-CPU prompts explicitly exclude the engine's own
+  introspection/system-catalog queries from being blamed as "the" hot
+  query — `slow_queries` and `high_cpu`'s `conclusion_guidance` now carry
+  the equivalent, engine-general framing. Second, its `tuneSettings`
+  playbook has no analog here — `configuration_review` (get_configuration +
+  get_health only) fills that gap, scoped honestly to rule-of-thumb
+  misconfiguration flags rather than true capacity-based sizing, since
+  Inumi's server registry has no instance-class/hardware-sizing data to
+  size against.
 
 **A playbook's fixed steps are a floor, not a ceiling.** That first
 post-playbook call is *not* restricted to `conclude` — `_next_playbook_

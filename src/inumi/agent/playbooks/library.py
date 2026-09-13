@@ -137,7 +137,14 @@ PLAYBOOKS: tuple[Playbook, ...] = (
             "Name the specific query/queries responsible if the evidence points "
             "to one, and whether the cause looks like a missing index, stale "
             "statistics, blocking, or resource pressure (CPU/waits) rather than "
-            "the query itself."
+            "the query itself. Avoid introspection/system-catalog queries when "
+            "picking 'the' slow query — THIS IS VERY IMPORTANT: a top-ranked row "
+            "against the engine's own catalog/metadata views (Postgres: "
+            "pg_catalog, information_schema; SQL Server: sys.*, "
+            "INFORMATION_SCHEMA; MySQL/MariaDB: information_schema, "
+            "performance_schema, mysql) is noise from monitoring/introspection, "
+            "almost never the reported slowness, and must not be named as the "
+            "root cause."
         ),
     ),
     Playbook(
@@ -154,7 +161,14 @@ PLAYBOOKS: tuple[Playbook, ...] = (
         conclusion_guidance=(
             "Name the query/queries driving CPU if the evidence points to one "
             "or a small number, and whether this looks like a single runaway "
-            "query, a plan regression, or broad concurrent load."
+            "query, a plan regression, or broad concurrent load. Avoid "
+            "introspection/system-catalog queries when picking 'the' hot query "
+            "— THIS IS VERY IMPORTANT: a top-ranked row against the engine's "
+            "own catalog/metadata views (Postgres: pg_catalog, "
+            "information_schema; SQL Server: sys.*, INFORMATION_SCHEMA; "
+            "MySQL/MariaDB: information_schema, performance_schema, mysql) is "
+            "noise from monitoring/introspection, almost never the reported "
+            "CPU driver, and must not be named as the root cause."
         ),
     ),
     Playbook(
@@ -198,7 +212,13 @@ PLAYBOOKS: tuple[Playbook, ...] = (
         conclusion_guidance=(
             "State the current session count against the configured limit, and "
             "whether one application/account is holding a disproportionate "
-            "number of connections."
+            "number of connections. Lead with that comparison: if current usage "
+            "is well under the configured max (comfortable headroom), say so "
+            "plainly and stop there — do not manufacture a false alarm or "
+            "invent tuning advice from otherwise-healthy numbers just because "
+            "an investigation was run. Reserve genuine concern for when usage "
+            "is meaningfully close to the limit, or one application/account "
+            "holds a disproportionate share regardless of the overall total."
         ),
     ),
     Playbook(
@@ -292,6 +312,53 @@ PLAYBOOKS: tuple[Playbook, ...] = (
         conclusion_guidance=(
             "Give a concise overall status (healthy / attention needed) and "
             "call out anything that stood out, even if nothing looks urgent."
+        ),
+    ),
+    Playbook(
+        playbook_id="configuration_review",
+        name="Configuration Tuning Review",
+        description=(
+            "A proactive review of server/database configuration for common, "
+            "rule-of-thumb misconfigurations — not a request tied to a specific "
+            "symptom. Scoped honestly: this flags settings that look clearly "
+            "unreasonable by common rule-of-thumb ranges and obvious "
+            "misconfigurations, not true capacity-based sizing (Inumi's server "
+            "registry has no instance-class/hardware-sizing data to size "
+            "against)."
+        ),
+        triggers=(
+            "tune", "tuning", "configuration review", "review settings",
+            "optimize configuration", "recommend settings", "config recommendations",
+            "are our settings okay",
+        ),
+        steps=(
+            _step("database.get_configuration", "Pulling current server/database configuration parameters."),
+            _step(
+                "database.get_health",
+                "Establishing a baseline (connection count, size, uptime) to contextualize the settings.",
+            ),
+        ),
+        conclusion_guidance=(
+            "This is a rule-of-thumb review, not a capacity-sized recommendation "
+            "— be explicit that no instance-class/hardware (CPU/RAM) data was "
+            "available to size against, so never claim a setting is 'correctly "
+            "sized for this hardware'; only flag values that look clearly "
+            "unreasonable or left at an obvious default. Weigh the parameters "
+            "relevant to whichever engine actually responded: Postgres — "
+            "shared_buffers, effective_cache_size, work_mem, "
+            "maintenance_work_mem, wal_buffers, checkpoint_completion_target, "
+            "max_connections, default_statistics_target, random_page_cost, "
+            "effective_io_concurrency, min_wal_size/max_wal_size, "
+            "max_worker_processes, max_parallel_workers(_per_gather). SQL "
+            "Server — 'max server memory (MB)'/'min server memory (MB)', 'max "
+            "degree of parallelism', 'cost threshold for parallelism', and the "
+            "max-connections-equivalent ('user connections'). MySQL/MariaDB — "
+            "innodb_buffer_pool_size, innodb_log_file_size, max_connections, "
+            "tmp_table_size/max_heap_table_size, innodb_flush_log_at_trx_commit, "
+            "thread_cache_size. Cross-check against get_health's own numbers "
+            "(e.g. active_connections vs. max_connections) where relevant, and "
+            "say plainly when nothing looks obviously misconfigured rather than "
+            "manufacturing tuning advice from reasonable-looking defaults."
         ),
     ),
 )
