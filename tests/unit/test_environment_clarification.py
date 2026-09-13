@@ -219,6 +219,121 @@ def test_the_dbas_last_message_is_threaded_into_the_llm_prompt():
     assert "postgres-local" in problem
 
 
+class _SequencedFakeLLM:
+    """`extract_intent` returns one `IntentExtraction` per call, in order —
+    lets a test drive several distinct fresh investigations (each starting
+    from `extract_intent`) through one conversation, the way a real
+    multi-turn Slack thread does. `decide_next_action` always concludes
+    immediately (turn 1), since these tests are about environment
+    bookkeeping across investigations, not the investigation loop itself."""
+
+    def __init__(self, intents: list[IntentExtraction]):
+        self._intents = list(intents)
+        self.extract_intent_calls = 0
+
+    async def extract_intent(self, *args, **kwargs):
+        self.extract_intent_calls += 1
+        return self._intents.pop(0)
+
+    async def decide_next_action(self, **kwargs):
+        return Conclude(summary="Investigated.")
+
+
+@pytest.mark.asyncio
+async def test_a_later_fresh_investigation_never_reasks_for_an_already_known_environment():
+    """Live-reproduced regression: environment and instance are established
+    early in a conversation (turns 1-2), two more investigations each name
+    the instance again and conclude (turns 3-4), and then a plain follow-up
+    that names neither ("So what database is the copy activity happening
+    on?") must NOT re-trigger the environment gate just because it, alone,
+    doesn't repeat what was already established earlier in this same
+    conversation."""
+    servers = [{"id": "postgres-local", "aliases": [], "environment": "development"}]
+    llm = _SequencedFakeLLM(
+        [
+            IntentExtraction(is_dba_task=True, problem_summary="any blocking sessions?"),
+            IntentExtraction(
+                is_dba_task=True, instance_hint="postgres-local", problem_summary="general check"
+            ),
+            IntentExtraction(
+                is_dba_task=True, instance_hint="postgres-local", problem_summary="general check"
+            ),
+            IntentExtraction(is_dba_task=True, problem_summary="a plain follow-up question"),
+        ]
+    )
+    orchestrator, context = _orchestrator(llm, servers=servers)
+    state = context.get_or_create("conv7", "slack", "", "U123")
+
+    turn1 = await orchestrator.handle_message(
+        channel="slack", channel_account_id="U123", conversation_id="conv7",
+        channel_thread_id="", message="any blocking sessions right now across our databases?",
+    )
+    assert turn1.status == "clarification"
+
+    turn2 = await orchestrator.handle_message(
+        channel="slack", channel_account_id="U123", conversation_id="conv7",
+        channel_thread_id="", message="development, on postgres-local",
+    )
+    assert turn2.status == "ok"
+    assert state.investigation.status == "CONCLUDED"
+
+    turn3 = await orchestrator.handle_message(
+        channel="slack", channel_account_id="U123", conversation_id="conv7",
+        channel_thread_id="", message="check what's happening on postgres local. it seems to be slow",
+    )
+    assert turn3.status == "ok"
+
+    turn4 = await orchestrator.handle_message(
+        channel="slack", channel_account_id="U123", conversation_id="conv7",
+        channel_thread_id="", message="what daabase in postgres local is this issue happening on?",
+    )
+    assert turn4.status == "ok"
+
+    # The exact reproduced symptom: no environment/instance wording of its
+    # own, in the same ongoing conversation where both were already
+    # established.
+    turn5 = await orchestrator.handle_message(
+        channel="slack", channel_account_id="U123", conversation_id="conv7",
+        channel_thread_id="", message="So what database is the copy activity happening on? "
+        "and for how long and what's the ipact?",
+    )
+    assert turn5.status != "clarification"
+    assert "Which environment" not in turn5.text
+    assert llm.extract_intent_calls == 4
+
+
+@pytest.mark.asyncio
+async def test_switching_to_an_unresolvable_instance_forgets_the_stale_environment():
+    """The mirror image of test_instance_switch_clears_database.py's
+    database case: a remembered environment belongs to whatever instance
+    was previously in play too. Moving to a different, unregistered/
+    ambiguous server whose environment can't be auto-resolved must not
+    silently keep asserting the OLD instance's environment for this new
+    one — that would be exactly the guess the spec forbids for an unnamed
+    environment, it must ask instead."""
+    intent = IntentExtraction(
+        is_dba_task=True,
+        instance_hint="some-new-unregistered-box",
+        problem_summary="check health on some-new-unregistered-box",
+    )
+    llm = _FakeLLM(intent=intent)
+    orchestrator, context = _orchestrator(llm, servers=[])
+    state = context.get_or_create("conv8", "slack", "", "U123")
+    state.database_context["instance"] = "postgres-local"
+    state.database_context["environment"] = "development"
+
+    reply = await orchestrator.handle_message(
+        channel="slack",
+        channel_account_id="U123",
+        conversation_id="conv8",
+        channel_thread_id="",
+        message="check health on some-new-unregistered-box",
+    )
+
+    assert reply.status == "clarification"
+    assert "environment" not in state.database_context
+
+
 def test_environment_for_instance_matches_id_or_alias_case_insensitively():
     servers = [{"id": "postgres-local", "aliases": ["local", "mylocal"], "environment": "development"}]
     orchestrator = AgentOrchestrator(

@@ -314,10 +314,8 @@ class AgentOrchestrator:
         if intent.database_hint:
             state.database_context["database"] = intent.database_hint
         if intent.instance_hint:
-            if (
-                not intent.database_hint
-                and state.database_context.get("instance") != intent.instance_hint
-            ):
+            switched_instance = state.database_context.get("instance") != intent.instance_hint
+            if not intent.database_hint and switched_instance:
                 # A remembered database (see _submit_and_relay) belongs to
                 # whatever instance was previously in play — moving to a
                 # different one makes it stale, and it's never safe to
@@ -336,7 +334,33 @@ class AgentOrchestrator:
                 auto_environment = await self._environment_for_instance(intent.instance_hint)
                 if auto_environment:
                     state.database_context["environment"] = auto_environment
+                elif switched_instance:
+                    # Mirrors the database-goes-stale-on-switch logic just
+                    # above, for the same reason: a remembered environment
+                    # belongs to whatever instance was previously in play
+                    # too. Moving to a different, unregistered/ambiguous
+                    # server whose environment can't be auto-resolved must
+                    # not silently keep asserting the OLD instance's
+                    # environment for this new, unnamed-environment one —
+                    # that's exactly the guess the spec forbids ("for
+                    # production targets I won't guess"). Drop it so the
+                    # check below asks instead of carrying over a value
+                    # that may now simply be wrong.
+                    state.database_context.pop("environment", None)
 
+        # A fresh investigation only ever needs to ask for the environment
+        # when it is genuinely unknown anywhere in this conversation — never
+        # just because *this* message alone didn't repeat it. Verified live:
+        # once the DBA had already established development/postgres-local a
+        # few messages earlier, a later plain follow-up ("so what database
+        # is the copy activity happening on?") with no environment/instance
+        # wording of its own still asked "which environment should I
+        # investigate?" again. state.database_context is the real source of
+        # truth for "environment" — carried across investigations in this
+        # same conversation exactly like instance/database already are
+        # above — so this checks it directly rather than re-deriving the
+        # answer from intent.environment_hint alone, which only ever
+        # reflects this one message.
         if "environment" not in state.database_context:
             return AgentReply(
                 text=(

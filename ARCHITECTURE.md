@@ -250,6 +250,44 @@ ASGI, `tests/integration/test_no_args_extra_arguments.py`): a scripted
 planner reproducing the exact bad completion above now completes on its
 first attempt, with zero `INVALID_ARGUMENTS` denials in the transcript.
 
+## A known environment must survive across investigations, not just within one
+
+Live-reproduced in a real Slack thread: the DBA established development/
+postgres-local early in a conversation, ran two more successful
+investigations that each named postgres-local again, and then sent a plain
+follow-up ("So what database is the copy activity happening on?") that
+named neither an environment nor a server. `handle_message` (`agent/
+orchestrator.py`) wrongly re-asked "which environment should I
+investigate?" even though the environment had already been established
+earlier in this exact conversation.
+
+`state.database_context` (`agent/context_manager.py::ConversationState`) is
+the actual source of truth here — it's a `ConversationState` field, so it
+outlives any one `InvestigationState` and is never reset when an
+investigation concludes and a new one starts. A brand-new investigation's
+environment gate (`if "environment" not in state.database_context: ask`)
+already reads this persisted value, not just the current message's
+`intent.environment_hint` — so once established, it was never actually at
+risk of being forgotten by that check alone. The real gap was the missing
+other half of the *instance* symmetry already in place for `database`: a
+switch to a different, named instance correctly pops a stale `database`
+(it might not exist on the new server) via `state.database_context.pop
+("database", None)`, but nothing equivalent protected `environment` — if
+that new instance was unregistered or ambiguous (`_environment_for_instance`
+returns `None`), the OLD instance's environment silently kept asserting
+itself for the new one instead of being dropped, which is exactly the kind
+of guess the spec forbids ("for production targets I won't guess"). Fixed
+by popping `state.database_context["environment"]` too whenever a genuine
+instance switch's environment can't be auto-resolved — mirroring the
+existing database-goes-stale-on-switch logic exactly — and by making the
+final "not in state.database_context" check's rationale explicit in code
+comments, so it can't be quietly narrowed to `intent.environment_hint`
+alone by a future change. See the two new cases in
+`tests/unit/test_environment_clarification.py` for the exact scenario
+pinned: a later fresh investigation never re-asking for an
+already-known environment, and switching to an unresolvable instance
+correctly forgetting the stale one instead of guessing.
+
 ## The identity re-resolution point (why "UX check" ≠ "security boundary")
 
 Channel Adapters and the Agent both *can* check whether a channel account is
