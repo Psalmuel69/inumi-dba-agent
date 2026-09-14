@@ -41,7 +41,7 @@ python -m venv .venv
 ./.venv/Scripts/python.exe -m pip install -e ".[dev]"
 cp .env.example .env
 cp config/dev_credentials.example.yaml config/dev_credentials.yaml
-./.venv/Scripts/python.exe -m pytest        # 385 pass, 24 opt-in skipped
+./.venv/Scripts/python.exe -m pytest        # 394 pass, 24 opt-in skipped
 ```
 
 Run the full stack (bundled sample PostgreSQL target included):
@@ -79,7 +79,12 @@ retries or model fallbacks happen underneath — see
 deadlocks, replication lag, connection saturation, ...) the agent follows a
 fixed, named diagnostic sequence instead of deciding each step freeform —
 faster and more consistent for the handful of situations that come up over
-and over. Ask `/playbooks` in chat to see the current list, or read
+and over. One playbook, `comprehensive_summary`, isn't tied to a specific
+symptom at all — it's a broad, single-server sweep ("comprehensive health
+check", "daily summary", "full report", ...) a DBA can ask for on demand, or
+a future scheduled job could call once per server (that scheduling and
+multi-server orchestration is itself deferred, out of scope for now). Ask
+`/playbooks` in chat to see the current list, or read
 [ARCHITECTURE.md](ARCHITECTURE.md#investigation-loop-freeform-vs-playbook-driven)
 for how and why.
 
@@ -117,7 +122,7 @@ make docker-up       # full stack via docker compose
 Phases 1–9 of the build (foundation → gateway → execution → read tools →
 agent → channels → approvals → controlled writes → restricted-tool
 framework), server registration + discovery, and MySQL/MariaDB adapters are
-implemented and covered by an automated test suite (385 passing + 24
+implemented and covered by an automated test suite (394 passing + 24
 opt-in: unit, integration, and a dedicated security suite). The Execution
 Service uses real database connections against SQL Server, PostgreSQL,
 MySQL, and MariaDB; the Agent supports Anthropic, OpenAI, Gemini, and

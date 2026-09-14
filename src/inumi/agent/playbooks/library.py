@@ -451,6 +451,97 @@ PLAYBOOKS: tuple[Playbook, ...] = (
         ),
     ),
     Playbook(
+        playbook_id="comprehensive_summary",
+        name="Comprehensive Health Summary",
+        description=(
+            "A DBA-requested comprehensive sweep across this project's "
+            "read-only diagnostics for ONE server in one shot — not tied to a "
+            "specific symptom, and deliberately broader/heavier than "
+            "general_health's quick 4-step pulse check. Scoped honestly, two "
+            "ways: (1) this reports the server's CURRENT state only — there "
+            "is no historical data store anywhere in this system, so it "
+            "cannot do trend/delta comparison against yesterday or any prior "
+            "run — and it covers exactly one server per invocation, never a "
+            "fleet; scheduling this daily and sweeping multiple servers is "
+            "separate, deferred orchestration work that would call this "
+            "playbook once per server, not something this playbook does "
+            "itself. (2) Every investigation in this project — playbook or "
+            "freeform — shares one turn budget, `orchestrator._MAX_"
+            "INVESTIGATION_TURNS` (6 as of this writing), and every playbook "
+            "in this library is required to leave at least one turn free for "
+            "the model's own unrestricted concluding call (see "
+            "`test_deepened_playbooks_stay_within_the_shared_turn_budget`), "
+            "so a single invocation can run at most 5 deterministic "
+            "diagnostic calls before that final call. Rather than declare 12 "
+            "steps — one per instance-wide read tool — and have most of them "
+            "silently never run (verified live — the turn budget simply "
+            "stops submitting further steps once spent, with no warning), "
+            "this playbook's 5 steps were chosen to span the widest "
+            "practical breadth — availability, resource pressure, workload/"
+            "blocking, protection/backups, storage capacity, and logs — "
+            "within that shared budget. Configuration is deliberately left "
+            "out of this particular sweep: it already has its own dedicated "
+            "`configuration_review` playbook, and cutting it here (rather "
+            "than blocking, backups, storage, or logs) keeps the daily-pulse "
+            "categories that change moment to moment. Raising the shared cap "
+            "(or giving this one playbook a larger budget of its own) is an "
+            "orchestrator.py change and explicitly out of scope here."
+        ),
+        triggers=(
+            "daily summary", "comprehensive health check", "full health report",
+            "complete status", "everything about this server", "full report",
+            "daily report", "comprehensive check", "complete health check",
+            "full diagnostic",
+        ),
+        # Exactly 5 steps, one short of the shared 6-turn budget — see the
+        # description above for why this playbook does not simply list every
+        # instance-wide read tool, and
+        # test_deepened_playbooks_stay_within_the_shared_turn_budget for the
+        # invariant every playbook in this library must satisfy: a 6th fixed
+        # step here would consume the model's own final unrestricted
+        # conclude/extend turn. Ordered availability/workload before
+        # protection/config, most-urgent-first — matching how a DBA would
+        # actually triage.
+        steps=(
+            _step("database.get_health", "Establishing the overall instance/database health baseline."),
+            _step("database.get_blocking_sessions", "Checking for any active blocking chains."),
+            _step("database.get_backup_status", "Checking recent backup history and status."),
+            _step("database.get_storage", "Checking storage/space utilization."),
+            _step("database.get_error_logs", "Pulling recent error log entries."),
+        ),
+        conclusion_guidance=(
+            "This is the broadest playbook in the library — the concluding "
+            "report must synthesize, not restate. Organize findings into the "
+            "categories a DBA actually triages by, mirroring the General "
+            "Health Check structure used elsewhere in this project: "
+            "availability (is it up, overall health snapshot), resource "
+            "pressure (from get_health's own numbers), workload/blocking "
+            "(active blocking chains), protection/backups (backup status, "
+            "storage headroom), and logs (recent error log entries). Only "
+            "speak to a category you actually have evidence for — this "
+            "playbook's fixed steps do not include a replication/HA or "
+            "configuration check, so never state or imply replication is "
+            "'fine' or that configuration looks reasonable; simply omit "
+            "those categories rather than guessing (point the DBA at the "
+            "dedicated `replication` or `configuration_review` playbook if "
+            "either looks worth a closer look). THIS IS THE IMPORTANT PART: "
+            "for each category you do have evidence for, report ONLY what "
+            "deviates from normal or needs attention — do not restate a "
+            "clean result at all, for any "
+            "category. Close with an explicit sentence to the effect of 'all "
+            "other checks came back clean' (naming which categories, if it "
+            "reads better) covering everything unremarkable, instead of "
+            "walking through every check one by one. A DBA asking for a "
+            "comprehensive summary wants a short, scannable list of what "
+            "matters, not a wall of 'X is fine, Y is fine, Z is fine' for a "
+            "half-dozen checks. Also state plainly, once, that this reflects "
+            "only the current moment on this one server — no trend/delta "
+            "comparison against a prior day is available (no historical data "
+            "store exists in this system), and this is not a multi-server "
+            "sweep."
+        ),
+    ),
+    Playbook(
         playbook_id="general_health",
         name="General Health Check",
         description="A general request to check overall health/status, not a specific symptom.",

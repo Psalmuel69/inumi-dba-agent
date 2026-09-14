@@ -112,11 +112,11 @@ Within the turn/observation bounds, a step is decided one of two ways:
   next tool from the ones it was offered, or concludes.
 - **Playbook-driven**: on a new investigation, `agent.playbooks.library
   .match_playbook` runs a deterministic, zero-LLM-call keyword match
-  against the problem text. For 13 known scenarios (slow queries, high CPU,
+  against the problem text. For 14 known scenarios (slow queries, high CPU,
   high memory, blocking, deadlocks, connection saturation, replication lag,
   backup health, storage capacity, transaction log reuse, error logs,
-  general health, configuration tuning review), this picks a fixed, named
-  sequence of
+  a comprehensive single-server summary, general health, configuration
+  tuning review), this picks a fixed, named sequence of
   read-only diagnostic calls. Each step of a matched playbook is submitted
   directly — **no LLM call in between** — and once the sequence completes,
   the LLM is called again to interpret everything gathered (nudged by the
@@ -185,6 +185,53 @@ Within the turn/observation bounds, a step is decided one of two ways:
   historical/time-series data store, so every playbook's conclusion is
   still built only from what its own diagnostic calls returned in this one
   investigation.
+
+  **`comprehensive_summary`: a broad, single-server sweep, not a scheduled
+  cross-server report.** The other 13 playbooks are each triggered by one
+  specific symptom (deadlock, high CPU, ...); `comprehensive_summary` is
+  the odd one out — a DBA asks for it directly ("comprehensive health
+  check", "daily summary", "full report", ...) to sweep this one server's
+  state across every dimension the other playbooks check individually, in
+  one shot. It's the building block a future scheduled, multi-server
+  morning report would call once per server — scheduling and multi-server
+  orchestration are both explicitly deferred, out of scope for this
+  playbook itself. Two honesty notes, both stated in the playbook's own
+  `description` and `conclusion_guidance` (`agent.playbooks.library`, not
+  just here): (1) it reports only the server's *current* state — there is
+  no historical data store anywhere in this system, so it cannot show a
+  trend or delta against yesterday; and (2) it has exactly 5 steps, not one
+  per instance-wide read tool. Every investigation — playbook or freeform —
+  shares one turn budget, `orchestrator._MAX_INVESTIGATION_TURNS` (6), and
+  (per the same invariant the paragraph above pins for the other 7 deepened
+  playbooks, `test_deepened_playbooks_stay_within_the_shared_turn_budget`)
+  every playbook in this library must leave at least one turn free for the
+  model's own unrestricted concluding call: verified live, a 12-step draft
+  of this playbook (one call per instance-wide read tool) silently stopped
+  submitting steps once the shared budget was spent, with most never
+  running and no warning to the DBA, and even a 6-step draft — exactly
+  consuming the budget — would have violated that shared invariant. Rather
+  than ship either, its step list was cut to the 5 that span the widest
+  practical breadth within the existing budget — availability, resource
+  pressure, workload/blocking, protection/backups, storage capacity, and
+  logs. Configuration was the category dropped (not blocking, backups,
+  storage, or logs) because it already has its own dedicated
+  `configuration_review` playbook; its `conclusion_guidance` explicitly
+  forbids speaking to a category (replication/HA or configuration) it has
+  no evidence for, rather than guessing, and instead points the DBA at the
+  dedicated `replication`/`configuration_review` playbooks. Raising the
+  shared cap, or giving this one playbook a larger budget of its own, is an
+  `orchestrator.py` change and out of scope for this addition.
+  Distinct from `general_health` (an existing, lighter 4-step pulse check
+  for "how's it doing" phrasing) by design: different, non-overlapping
+  trigger phrases, and ordered *before* `general_health` in the `PLAYBOOKS`
+  tuple specifically because some of its own triggers (e.g. "comprehensive
+  health check") contain `general_health`'s "health check" trigger as a
+  substring — placed after it, `general_health`'s broader trigger would
+  have shadowed every `comprehensive_summary` phrasing that happens to
+  contain "health check" (`match_playbook` is first-match-wins); placed
+  before it, `general_health`'s own narrower triggers ("how is", "how's",
+  "overall status", ...) still route correctly to `general_health`, since
+  none of them appear inside any `comprehensive_summary` trigger.
 
 **A playbook's fixed steps are a floor, not a ceiling.** That first
 post-playbook call is *not* restricted to `conclude` — `_next_playbook_

@@ -76,6 +76,14 @@ _ALL_READ_TOOL_IDS = [
     "database.get_backup_status", "database.get_configuration", "database.get_error_logs",
 ]
 
+_COMPREHENSIVE_SUMMARY_TOOL_IDS = [
+    "database.get_health",
+    "database.get_blocking_sessions",
+    "database.get_backup_status",
+    "database.get_storage",
+    "database.get_error_logs",
+]
+
 
 @pytest.mark.asyncio
 async def test_a_matched_playbooks_steps_run_with_zero_intermediate_llm_calls():
@@ -354,4 +362,38 @@ async def test_errors_playbook_runs_its_five_steps_with_zero_intermediate_llm_ca
     problem = llm.calls[0]["problem_statement"]
     assert "Error Log Investigation" in problem
     assert "Correlate against the other signals gathered" in problem
+    assert reply.status == "ok"
+
+
+# --- comprehensive_summary (new playbook — a broad, single-server sweep, ---
+# --- not tied to a specific symptom — see agent.playbooks.library) ---
+
+
+@pytest.mark.asyncio
+async def test_comprehensive_summary_playbook_runs_all_five_steps_with_zero_intermediate_llm_calls():
+    """comprehensive_summary is the broadest playbook in the library — every
+    one of its 5 steps must run as a deterministic tool call before the LLM
+    is ever asked anything, and the LLM must be asked exactly once (to
+    conclude), matching the pattern every other playbook follows. Its step
+    count is exactly 5 — one short of the shared _MAX_INVESTIGATION_TURNS
+    budget (6), not one per instance-wide read tool (see the playbook's own
+    description in library.py) — so, like every other playbook in this
+    library, it leaves the model its own unrestricted final turn via the
+    normal in-loop path rather than the turn-budget-exhausted ("final
+    chance") fallback."""
+    state, investigation = _state_and_investigation(playbook_id="comprehensive_summary")
+    tool_client = _FakeToolClient()
+    llm = _FakeLLM(actions=[Conclude(summary="Comprehensive summary complete.")])
+    orchestrator = _orchestrator(tool_client)
+
+    reply = await orchestrator._run_investigation_loop(
+        state, investigation, _ALL_READ_TOOL_IDS, "dev", "dba_l2@example.com", llm, None
+    )
+
+    assert [r.tool_id for r in tool_client.requests] == _COMPREHENSIVE_SUMMARY_TOOL_IDS
+    assert len(llm.calls) == 1
+    problem = llm.calls[0]["problem_statement"]
+    assert "Comprehensive Health Summary" in problem
+    # from the playbook's own conclusion_guidance
+    assert "all other checks came back clean" in problem
     assert reply.status == "ok"

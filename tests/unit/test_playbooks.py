@@ -305,8 +305,10 @@ def test_total_playbook_count_after_the_storage_transaction_log_split():
     # 12 playbooks existed going into this change (11 original scenarios
     # plus a concurrently-landed 12th, configuration_review). Splitting the
     # combined storage playbook into storage + transaction_log adds one
-    # more, for 13 total.
-    assert len(PLAYBOOKS) == 13
+    # more, for 13. A later addition (comprehensive_summary, see below)
+    # brings the total to 14 — see
+    # test_total_playbook_count_after_comprehensive_summary_is_added.
+    assert len(PLAYBOOKS) == 14
 
 
 # --- deepening the remaining 7 playbooks (deadlocks, blocking, high_memory, ---
@@ -461,3 +463,160 @@ def test_deepened_playbooks_stay_within_the_shared_turn_budget():
             f"{playbook.playbook_id} has {len(playbook.steps)} steps, leaving no "
             "turn free for the model's own unrestricted conclude/extend call"
         )
+
+
+# --- comprehensive_summary (new playbook — a broad, single-server sweep a ---
+# --- DBA can explicitly invoke, or a future scheduled job could call once ---
+# --- per server; see library.py's PLAYBOOKS tuple for the full scoping ---
+# --- note. Distinct from general_health, which stays the existing, ---
+# --- lighter 4-step "quick pulse check" — untouched by this addition) ---
+
+
+def test_total_playbook_count_after_comprehensive_summary_is_added():
+    # 13 playbooks existed going into this change; comprehensive_summary
+    # adds a 14th.
+    assert len(PLAYBOOKS) == 14
+
+
+def test_comprehensive_summary_runs_its_five_steps_availability_first():
+    # Capped at exactly 5 steps — not all instance-wide read tools, and one
+    # short of the shared 6-turn budget — because every investigation
+    # (playbook or freeform) shares one turn budget,
+    # orchestrator._MAX_INVESTIGATION_TURNS (6), and every playbook in this
+    # library must leave at least one turn free for the model's own
+    # unrestricted concluding call (see
+    # test_deepened_playbooks_stay_within_the_shared_turn_budget, which
+    # covers every playbook including this one). See this playbook's own
+    # description/comments in library.py for why 12 steps (one per
+    # instance-wide read tool) was rejected — verified live in
+    # test_orchestrator_playbooks.py.
+    playbook = get_playbook("comprehensive_summary")
+    assert playbook is not None
+    tool_ids = [step.tool_id for step in playbook.steps]
+    assert tool_ids == [
+        "database.get_health",
+        "database.get_blocking_sessions",
+        "database.get_backup_status",
+        "database.get_storage",
+        "database.get_error_logs",
+    ]
+    assert len(tool_ids) == 5
+    # Availability/workload signals (health, blocking) must come before
+    # protection/config signals (backups, storage, error logs) —
+    # most-urgent-first.
+    workload_signals = ["database.get_health", "database.get_blocking_sessions"]
+    protection_signals = [
+        "database.get_backup_status", "database.get_storage", "database.get_error_logs",
+    ]
+    last_workload_index = max(tool_ids.index(t) for t in workload_signals)
+    first_protection_index = min(tool_ids.index(t) for t in protection_signals)
+    assert last_workload_index < first_protection_index
+
+
+def test_comprehensive_summary_matches_its_own_broad_phrasings():
+    cases = [
+        "can you give me a comprehensive health check on prod-db-01",
+        "we need a daily summary for CoreBanking",
+        "give me a full health report",
+        "what's the complete status of this server",
+        "tell me everything about this server",
+        "can you give a full report on postgres-local",
+        "send the daily report",
+        "run a comprehensive check on sqlserver-prod-01",
+        "run a complete health check",
+        "run a full diagnostic",
+    ]
+    for text in cases:
+        playbook = match_playbook(text)
+        assert playbook is not None, f"expected a match for {text!r}"
+        assert playbook.playbook_id == "comprehensive_summary", (
+            f"{text!r} matched {playbook.playbook_id!r}, expected 'comprehensive_summary'"
+        )
+
+
+def test_comprehensive_summary_does_not_shadow_general_healths_own_triggers():
+    # general_health's own triggers ("health check", "how is", "how's",
+    # "overall status", "general status", "status check", "how is it
+    # doing", "how's it doing", "everything okay", "everything ok") must
+    # still correctly route to general_health, not comprehensive_summary —
+    # even though comprehensive_summary is checked first in match_playbook's
+    # tuple order (a deliberate placement: some of comprehensive_summary's
+    # own triggers, like "comprehensive health check", contain general_
+    # health's "health check" as a substring, so comprehensive_summary must
+    # come first for ITS OWN phrasings to route correctly — but that must
+    # not come at the cost of general_health's own, narrower triggers).
+    general_health = get_playbook("general_health")
+    assert general_health is not None
+    for trigger in general_health.triggers:
+        playbook = match_playbook(trigger)
+        assert playbook is not None, f"expected a match for {trigger!r}"
+        assert playbook.playbook_id == "general_health", (
+            f"general_health trigger {trigger!r} matched {playbook.playbook_id!r} instead"
+        )
+
+
+def test_comprehensive_summary_does_not_match_any_other_playbooks_existing_triggers():
+    for playbook in PLAYBOOKS:
+        if playbook.playbook_id == "comprehensive_summary":
+            continue
+        for trigger in playbook.triggers:
+            matched = match_playbook(trigger)
+            assert matched is not None
+            assert matched.playbook_id != "comprehensive_summary", (
+                f"{playbook.playbook_id}'s trigger {trigger!r} unexpectedly matched "
+                "comprehensive_summary"
+            )
+
+
+def test_comprehensive_summarys_own_triggers_do_not_overlap_any_other_playbooks():
+    comprehensive_summary = get_playbook("comprehensive_summary")
+    assert comprehensive_summary is not None
+    for playbook in PLAYBOOKS:
+        if playbook.playbook_id == "comprehensive_summary":
+            continue
+        assert not (set(comprehensive_summary.triggers) & set(playbook.triggers)), (
+            f"comprehensive_summary shares a literal trigger string with {playbook.playbook_id}"
+        )
+
+
+def test_comprehensive_summary_guidance_directs_synthesis_and_restraint_not_a_wall_of_text():
+    playbook = get_playbook("comprehensive_summary")
+    assert playbook is not None
+    guidance = playbook.conclusion_guidance
+    # Category structure mirroring the external spec's General Health Check
+    # — limited to categories this playbook's own 5 fixed steps actually
+    # gather evidence for (no HA/replication or configuration step, so
+    # neither category — see the guidance's own explicit instruction not to
+    # guess).
+    for category in (
+        "availability", "resource pressure", "workload/blocking",
+        "protection/backups", "logs",
+    ):
+        assert category in guidance, f"expected {category!r} in comprehensive_summary guidance"
+    # Must not invite the model to fabricate a replication or configuration
+    # finding it never actually checked.
+    assert "replication" in guidance.lower()
+    assert "configuration" in guidance.lower()
+    assert "never state or imply" in guidance or "omit those categories" in guidance
+    # The restraint instruction itself — only deviations, not a clean-result
+    # wall of text.
+    assert "all other checks came back clean" in guidance
+    assert "ONLY what deviates" in guidance or "only what deviates" in guidance.lower()
+
+
+def test_comprehensive_summary_description_is_honest_about_scope():
+    playbook = get_playbook("comprehensive_summary")
+    assert playbook is not None
+    description = playbook.description
+    # Must not overclaim trend/history or multi-server sweeping — neither
+    # capability exists in this system yet.
+    assert "historical data store" in description or "no historical" in description.lower()
+    assert "one server" in description.lower() or "single server" in description.lower() or (
+        "one shot" in description.lower()
+    )
+    assert "deferred" in description.lower()
+    # Must also be honest about why this playbook has 5 steps, not one for
+    # every instance-wide read tool — the shared investigation turn budget,
+    # not an oversight.
+    assert "_MAX_INVESTIGATION_TURNS" in description
+    assert "orchestrator.py" in description
