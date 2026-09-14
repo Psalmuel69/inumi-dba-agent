@@ -90,7 +90,9 @@ async def test_a_bare_environment_answer_continues_without_calling_extract_inten
 
     assert llm.extract_intent_calls == 0
     assert state.database_context["environment"] == "development"
-    assert state.investigation.status == "CONCLUDED"
+    # No tool call ever ran — collapses to CONCLUDED_NO_ACTION.
+    assert state.investigation.status == "CONCLUDED_NO_ACTION"
+    assert state.investigation.is_concluded is True
     assert reply.status == "ok"
     assert "Nothing wrong found" in reply.text
 
@@ -275,7 +277,7 @@ async def test_a_later_fresh_investigation_never_reasks_for_an_already_known_env
         channel_thread_id="", message="development, on postgres-local",
     )
     assert turn2.status == "ok"
-    assert state.investigation.status == "CONCLUDED"
+    assert state.investigation.status == "CONCLUDED_NO_ACTION"  # no tool call ever ran
 
     turn3 = await orchestrator.handle_message(
         channel="slack", channel_account_id="U123", conversation_id="conv7",

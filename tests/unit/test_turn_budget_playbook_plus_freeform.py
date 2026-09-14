@@ -114,5 +114,8 @@ async def test_an_investigation_cannot_bypass_the_turn_cap_via_endless_playbook_
     # proving there is no way to keep extending turns forever by having the
     # model perpetually claim "not enough evidence yet".
     assert len(llm.calls) == 3
-    assert investigation.status == "CONCLUDED"
+    # Every step and freeform call here is a read (get_health/get_top_
+    # queries/the blocking playbook's own steps) — no write ever ran, so
+    # this collapses to CONCLUDED_NO_ACTION (see InvestigationStage).
+    assert investigation.status == "CONCLUDED_NO_ACTION"
     assert "without reaching a confirmed root cause" in reply.text

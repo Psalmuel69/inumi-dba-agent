@@ -11,9 +11,43 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
-from typing import Any
+from typing import Any, Literal
 
 from inumi.common.ids import new_id
+
+# The stages this codebase's control flow can actually and accurately
+# observe an investigation transitioning through. Deliberately a small,
+# bounded subset of a much richer 17-state investigation lifecycle from an
+# external playbook spec (NEW -> TRIAGED -> ... -> AWAITING_APPROVAL ->
+# APPROVED -> EXECUTING -> ... -> RESOLVED/CLOSED): most of those states
+# aren't independently observable here (this Agent process has no distinct
+# moment where an investigation becomes "TRIAGED" or "EVIDENCE_COLLECTED"
+# as opposed to just "still investigating"), and the approval/execution
+# richness that spec bakes into its own state machine already lives
+# correctly elsewhere in this codebase — `PendingApproval` and the
+# Gateway's own audit trail — so duplicating it into a second, parallel
+# copy here would only ever be something that could drift out of sync with
+# the real decision-maker, never a source of truth of its own.
+#
+# "AWAITING_VERIFICATION" is deliberately never a value `status` itself is
+# ever assigned — see `InvestigationState.effective_status` below.
+InvestigationStage = Literal[
+    "INVESTIGATING",
+    "AWAITING_CLARIFICATION",
+    "AWAITING_VERIFICATION",
+    "CONCLUDED_VERIFIED",
+    "CONCLUDED_UNRESOLVED",
+    "CONCLUDED_UNVERIFIED",
+    "CONCLUDED_NO_ACTION",
+]
+
+# The four terminal stages — used by `InvestigationState.is_concluded` so a
+# call site that only cares about "concluded vs. not" never has to
+# enumerate all four itself (and can't silently miss one if a fifth were
+# ever added later).
+_CONCLUDED_STAGES: frozenset[str] = frozenset(
+    {"CONCLUDED_VERIFIED", "CONCLUDED_UNRESOLVED", "CONCLUDED_UNVERIFIED", "CONCLUDED_NO_ACTION"}
+)
 
 
 @dataclasses.dataclass
@@ -32,7 +66,7 @@ class InvestigationState:
     investigation_id: str
     problem: str
     target: dict[str, Any] = dataclasses.field(default_factory=dict)
-    status: str = "INVESTIGATING"
+    status: InvestigationStage = "INVESTIGATING"
     evidence: list[dict[str, Any]] = dataclasses.field(default_factory=list)
     hypotheses: list[str] = dataclasses.field(default_factory=list)
     findings: list[str] = dataclasses.field(default_factory=list)
@@ -94,6 +128,36 @@ class InvestigationState:
     # independently-checked outcome in the DBA-facing reply rather than
     # trusting the model's own free-text claim of success.
     last_verification: str | None = None
+
+    @property
+    def is_concluded(self) -> bool:
+        """True once this investigation has reached any of the four
+        CONCLUDED_* stages — the one place that answers "is this
+        investigation concluded or not" so a call site that only cares
+        about that (e.g. deciding whether a DBA's reply resumes an
+        existing investigation or starts a fresh one) never has to
+        enumerate all four itself."""
+        return self.status in _CONCLUDED_STAGES
+
+    @property
+    def effective_status(self) -> InvestigationStage:
+        """`status` as stored, with one addition: a write still awaiting
+        its independent post-execution re-check (see
+        `pending_verification`'s own docstring) reports as
+        AWAITING_VERIFICATION here, even though `status` itself is never
+        actually written to that value anywhere. Deliberate:
+        `pending_verification` is already the one authoritative record of
+        whether a re-check is outstanding — set and cleared in exactly one
+        place, `orchestrator._update_pending_verification` — so mirroring
+        it into a second, independently-written value on `status` would
+        just be two things that could drift out of sync. Only ever
+        overrides a plain INVESTIGATING: a stage the DBA is actively
+        blocking on (AWAITING_CLARIFICATION) or a stage that's already
+        final (any CONCLUDED_*) takes precedence over a re-check that can
+        simply wait for the loop to get back to it."""
+        if self.status == "INVESTIGATING" and self.pending_verification is not None:
+            return "AWAITING_VERIFICATION"
+        return self.status
 
 
 @dataclasses.dataclass

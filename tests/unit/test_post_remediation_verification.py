@@ -113,6 +113,10 @@ async def test_kill_session_then_immediate_conclude_without_recheck_is_rejected(
     assert investigation.transcript[1]["tool_id"] == "internal.verification_check"
     assert "kill_session" in investigation.transcript[1]["result"]["message"]
     assert reply.status == "ok"
+    # The eventual recheck (default fake-client response, empty rows) shows
+    # the session is gone — RESOLVED, so the final stage is VERIFIED even
+    # though the first Conclude attempt was rejected along the way.
+    assert investigation.status == "CONCLUDED_VERIFIED"
 
 
 @pytest.mark.asyncio
@@ -144,6 +148,11 @@ async def test_a_proper_recheck_afterward_is_accepted_with_a_verified_framing():
     assert investigation.last_verification == "RESOLVED"
     assert "independently re-checked afterward and confirmed resolved" in reply.text
     assert "internal.verification_check" not in [t.get("tool_id") for t in investigation.transcript]
+    # investigation.status is derived from these same last_verification/
+    # pending_verification signals (see AgentOrchestrator._conclusion_stage)
+    # — never a second, independent judgment that could disagree.
+    assert investigation.status == "CONCLUDED_VERIFIED"
+    assert investigation.is_concluded is True
 
 
 @pytest.mark.asyncio
@@ -177,6 +186,7 @@ async def test_a_recheck_showing_the_session_is_still_there_is_reported_unresolv
     assert reply.status == "ok"
     assert investigation.last_verification == "UNRESOLVED"
     assert "did NOT actually resolve" in reply.text
+    assert investigation.status == "CONCLUDED_UNRESOLVED"
 
 
 @pytest.mark.asyncio
@@ -205,6 +215,7 @@ async def test_repeated_conclude_without_ever_rechecking_falls_through_to_unveri
     assert reply.status == "ok"  # accepted, not the generic no-root-cause fallback
     assert "NOT independently verified" in reply.text
     assert investigation.pending_verification is not None  # still pending — never silently cleared
+    assert investigation.status == "CONCLUDED_UNVERIFIED"
 
 
 # --- Scoping: only the mapped writes trigger this, and only real writes --
@@ -239,6 +250,11 @@ async def test_a_write_tool_with_no_known_correlated_check_is_unaffected():
     assert reply.status == "ok"
     assert investigation.pending_verification is None
     assert "Verification:" not in reply.text
+    # A write ran, but one with no correlated re-check at all — never
+    # CONCLUDED_UNVERIFIED (that's reserved for a write that DOES have one
+    # and simply never got to it), just the same plain outcome as any
+    # investigation with no pending_verification/last_verification signal.
+    assert investigation.status == "CONCLUDED_NO_ACTION"
 
 
 @pytest.mark.asyncio

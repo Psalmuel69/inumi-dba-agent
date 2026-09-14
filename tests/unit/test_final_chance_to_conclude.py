@@ -85,4 +85,8 @@ async def test_an_uncooperative_final_chance_still_falls_through_to_the_safe_fal
 
     assert len(llm.calls) == 7  # still exactly one bounded extra call, never a loop
     assert "without reaching a confirmed root cause" in reply.text
-    assert investigation.status == "CONCLUDED"
+    # No write/verification was ever involved (only get_health reads) — the
+    # bounded set of CONCLUDED_* stages (see InvestigationStage on
+    # InvestigationState) collapses to CONCLUDED_NO_ACTION here.
+    assert investigation.status == "CONCLUDED_NO_ACTION"
+    assert investigation.is_concluded is True

@@ -43,7 +43,9 @@ async def test_repeated_record_observations_stop_before_the_full_turn_cap():
 
     assert len(llm.calls) == 2  # stopped asking well short of all 6 offered
     assert investigation.turn_count < 6
-    assert investigation.status == "CONCLUDED"
+    # Only record_observation ever ran — no write, no verification —
+    # collapses to CONCLUDED_NO_ACTION (see InvestigationStage).
+    assert investigation.status == "CONCLUDED_NO_ACTION"
     assert "without reaching a confirmed root cause" in reply.text
 
 

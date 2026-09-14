@@ -41,12 +41,17 @@ async def test_a_clarification_does_not_consume_the_diagnostic_turn_budget():
     assert reply.status == "clarification"
     assert investigation.turn_count == 0
     assert investigation.clarification_count == 1
+    # The loop is now genuinely blocked on the DBA's answer — reflected in
+    # `status` (not just `clarification_count`) so `/status` can say so.
+    assert investigation.status == "AWAITING_CLARIFICATION"
+    assert investigation.effective_status == "AWAITING_CLARIFICATION"
 
 
 @pytest.mark.asyncio
 async def test_a_real_action_resets_the_clarification_streak():
     state, investigation = _state_and_investigation(playbook_id=None)
     investigation.clarification_count = 3  # one short of the cap
+    investigation.status = "AWAITING_CLARIFICATION"  # left over from an earlier turn
     tool_client = _FakeToolClient()
     llm = _FakeLLM(actions=[Conclude(summary="Resolved after all.")])
     orchestrator = _orchestrator(tool_client)
@@ -57,6 +62,10 @@ async def test_a_real_action_resets_the_clarification_streak():
 
     assert reply.status == "ok"
     assert investigation.clarification_count == 0
+    # A real action (here, a Conclude) means the investigation was no
+    # longer actually blocked on a clarification the moment this call
+    # resumed it — status must not still say AWAITING_CLARIFICATION.
+    assert investigation.status == "CONCLUDED_NO_ACTION"
 
 
 @pytest.mark.asyncio
@@ -80,7 +89,9 @@ async def test_repeated_clarifications_eventually_give_up_instead_of_looping_for
         )
 
     assert len(llm.calls) == 5  # stopped asking, not exhausted the offered 6
-    assert investigation.status == "CONCLUDED"
+    # Only AskClarification was ever offered — no tool call ran, so this
+    # collapses to CONCLUDED_NO_ACTION (see InvestigationStage).
+    assert investigation.status == "CONCLUDED_NO_ACTION"
     assert "restate what you'd like me to check" in replies[-1].text
     assert replies[-1].status != "clarification"
 
@@ -104,6 +115,9 @@ async def test_a_real_action_resets_the_streak_across_separate_resumed_calls():
         state, investigation, _ALL_READ_TOOL_IDS, "dev", "dba_l2@example.com", llm, None
     )
     assert investigation.clarification_count == 2
+    # Still blocked on the DBA across these separate, resumed calls — not
+    # just a within-one-call detail.
+    assert investigation.status == "AWAITING_CLARIFICATION"
 
     llm._actions.append(Conclude(summary="Resolved after all."))
     await orchestrator._run_investigation_loop(
@@ -111,3 +125,4 @@ async def test_a_real_action_resets_the_streak_across_separate_resumed_calls():
     )
 
     assert investigation.clarification_count == 0
+    assert investigation.status == "CONCLUDED_NO_ACTION"

@@ -336,7 +336,7 @@ class AgentOrchestrator:
         # production targets I won't guess") — a bare answer to that
         # specific question is recognized deterministically; anything else
         # while it's still missing re-asks rather than guessing.
-        if state.investigation is not None and state.investigation.status != "CONCLUDED":
+        if state.investigation is not None and not state.investigation.is_concluded:
             investigation = state.investigation
             if "environment" not in state.database_context:
                 match = _ENVIRONMENT_ANSWER_RE.search(message)
@@ -586,6 +586,20 @@ class AgentOrchestrator:
         tool_operation_types: dict[str, OperationType] | None = None,
     ) -> AgentReply:
         while investigation.turn_count < _MAX_INVESTIGATION_TURNS:
+            # Every fresh pass through the loop means the investigation is
+            # actively investigating again, not still blocked on whatever
+            # it last asked — reached either because a playbook step or a
+            # freeform tool call is about to run, or because this is a
+            # brand-new call into the loop after the DBA answered a
+            # clarification from an earlier, separate request (see
+            # `handle_message`'s resume path). A CONCLUDED_* stage is never
+            # clobbered by this: every place below that sets one also
+            # returns immediately afterward, so this line never runs again
+            # in the same investigation once that's happened. Resetting
+            # here — rather than only where AskClarification is handled —
+            # also covers a playbook's own deterministic steps, which never
+            # pass through that branch at all.
+            investigation.status = "INVESTIGATING"
             step_action = self._next_playbook_action(investigation, available_ids)
             if step_action is not None:
                 # Deterministic step from a matched playbook — propose it
@@ -620,7 +634,7 @@ class AgentOrchestrator:
                 # itself produces below, just reached sooner and without
                 # spending further LLM calls on a pattern already proven
                 # stuck.
-                investigation.status = "CONCLUDED"
+                investigation.status = self._conclusion_stage(investigation)
                 return self._no_root_cause_reply(investigation)
 
             action = await llm.decide_next_action(
@@ -646,7 +660,7 @@ class AgentOrchestrator:
                 investigation.consecutive_record_observations = 0
                 investigation.clarification_count += 1
                 if investigation.clarification_count > _MAX_CLARIFICATION_TURNS:
-                    investigation.status = "CONCLUDED"
+                    investigation.status = self._conclusion_stage(investigation)
                     return AgentReply(
                         text=(
                             "I still don't have enough information to proceed — "
@@ -656,6 +670,13 @@ class AgentOrchestrator:
                         ),
                         investigation_id=investigation.investigation_id,
                     )
+                # The loop genuinely cannot proceed until the DBA answers
+                # this — reflected in `status` (not just `clarification_
+                # count`) so `/status` can report it plainly instead of
+                # just "investigating". Reset back to INVESTIGATING at the
+                # top of this same loop, the moment a real reply lets the
+                # loop run again (see that reset's own comment).
+                investigation.status = "AWAITING_CLARIFICATION"
                 return AgentReply(
                     text=action.question, status="clarification", investigation_id=investigation.investigation_id
                 )
@@ -726,7 +747,7 @@ class AgentOrchestrator:
             if reply is not None:
                 return reply
 
-        investigation.status = "CONCLUDED"
+        investigation.status = self._conclusion_stage(investigation)
         return self._no_root_cause_reply(investigation)
 
     def _finalize_conclude(
@@ -820,7 +841,7 @@ class AgentOrchestrator:
             )
             return None
 
-        investigation.status = "CONCLUDED"
+        investigation.status = self._conclusion_stage(investigation)
         if action.likely_root_cause:
             investigation.findings.append(action.likely_root_cause)
         if action.recommendation:
@@ -1293,6 +1314,36 @@ class AgentOrchestrator:
             return await self._handle_discover_command(server_id, channel, channel_account_id)
         return None
 
+    # Plain-language phrasing for every stage `effective_status` can return
+    # except AWAITING_VERIFICATION, which needs the specific tool_id it's
+    # waiting on — see `_stage_phrase` below, the one place that reads this.
+    _STAGE_PHRASES: dict[str, str] = {
+        "INVESTIGATING": "Investigating.",
+        "AWAITING_CLARIFICATION": "Awaiting your answer to a clarifying question.",
+        "CONCLUDED_VERIFIED": (
+            "Concluded — the remediation was independently re-checked and confirmed resolved."
+        ),
+        "CONCLUDED_UNRESOLVED": (
+            "Concluded — the remediation was independently re-checked and did NOT resolve the condition."
+        ),
+        "CONCLUDED_UNVERIFIED": "Concluded — a remediation ran but was never independently verified.",
+        "CONCLUDED_NO_ACTION": "Concluded.",
+    }
+
+    @staticmethod
+    def _stage_phrase(inv) -> str:
+        """The plain-language phrasing `/status` shows for `inv`'s current
+        stage — reads `effective_status` (see its own docstring on
+        `InvestigationState`), never `status` directly, so a write still
+        awaiting its post-execution re-check is reported as
+        AWAITING_VERIFICATION here even though `status` itself was never
+        actually set to that value."""
+        stage = inv.effective_status
+        if stage == "AWAITING_VERIFICATION":
+            tool_id = (inv.pending_verification or {}).get("tool_id", "the last action")
+            return f"Awaiting independent verification of {tool_id}."
+        return AgentOrchestrator._STAGE_PHRASES[stage]
+
     @staticmethod
     def _status_reply(state: ConversationState) -> AgentReply:
         inv = state.investigation
@@ -1306,7 +1357,7 @@ class AgentOrchestrator:
             else ""
         )
         return AgentReply(
-            text=f"Investigation {inv.investigation_id}: {inv.status}."
+            text=f"Investigation {inv.investigation_id}: {AgentOrchestrator._stage_phrase(inv)}"
             f"{playbook_note} {len(inv.evidence)} observations so far.",
             investigation_id=inv.investigation_id,
         )
@@ -1500,26 +1551,54 @@ class AgentOrchestrator:
         return "\n".join(lines)
 
     @staticmethod
+    def _conclusion_stage(investigation) -> str:
+        """Which of the four CONCLUDED_* stages (see `InvestigationStage`
+        on `context_manager.InvestigationState`) this investigation is
+        ending in — derived from exactly the same two signals,
+        `last_verification`/`pending_verification`, that `_verification_note`
+        below reads to build the DBA-facing text. Deliberately the ONE
+        place either of them reads those signals: `_verification_note`
+        maps this same stage to its wording rather than re-deriving its
+        own, separate judgment — so the stage recorded in
+        `investigation.status` can never disagree with what the reply
+        itself actually says happened. Called at every point this
+        investigation transitions into a CONCLUDED_* stage — not just the
+        primary action=conclude path in `_finalize_conclude` below, but
+        also the turn-cap, stuck-observation, and clarification-exhausted
+        fallbacks in `_run_investigation_loop`, none of which ever build a
+        `Conclude` action of their own to pass through here."""
+        if investigation.last_verification == "RESOLVED":
+            return "CONCLUDED_VERIFIED"
+        if investigation.last_verification == "UNRESOLVED":
+            return "CONCLUDED_UNRESOLVED"
+        if investigation.pending_verification is not None:
+            return "CONCLUDED_UNVERIFIED"
+        return "CONCLUDED_NO_ACTION"
+
+    @staticmethod
     def _verification_note(investigation) -> str | None:
         """States the real, independently-checked outcome of a write this
-        investigation performed — structurally derived from
-        `investigation.last_verification`/`pending_verification` (see
-        their own docstrings), never from the model's own free-text
+        investigation performed — structurally derived (via
+        `_conclusion_stage` above) from `investigation.last_verification`/
+        `pending_verification`, never from the model's own free-text
         Conclude, so a DBA is never left trusting a bare "Completed" for a
         write whose real-world effect was never actually checked. Three
         distinct, deliberately-worded outcomes (never collapsed into one
         generic "done"): independently confirmed resolved, independently
         confirmed NOT resolved, or executed but never independently
         checked at all (reachable only via the last-chance Conclude call —
-        see `_finalize_conclude`'s `final_chance`)."""
-        if investigation.last_verification == "RESOLVED":
+        see `_finalize_conclude`'s `final_chance`). CONCLUDED_NO_ACTION
+        (no write/verification involved at all) has nothing to add here —
+        returns None exactly like before this stage existed."""
+        stage = AgentOrchestrator._conclusion_stage(investigation)
+        if stage == "CONCLUDED_VERIFIED":
             return "Verification: independently re-checked afterward and confirmed resolved."
-        if investigation.last_verification == "UNRESOLVED":
+        if stage == "CONCLUDED_UNRESOLVED":
             return (
                 "Verification: independently re-checked afterward — this did NOT "
                 "actually resolve the condition; further action is likely still needed."
             )
-        if investigation.pending_verification is not None:
+        if stage == "CONCLUDED_UNVERIFIED":
             pending = investigation.pending_verification
             return (
                 f"Verification: {pending['tool_id']} executed, but I ran out of turns "

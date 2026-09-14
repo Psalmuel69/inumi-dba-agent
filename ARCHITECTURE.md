@@ -571,3 +571,103 @@ Implement a new adapter under `channels/<name>/` that verifies its own
 transport's authenticity, resolves identity via the shared
 `IdentityProvider`, and calls the Agent's `/v1/chat` — the same contract
 Slack and Teams use. No Gateway or Agent code changes.
+
+## `InvestigationState.status`: a bounded set of stages, not the full 17-state spec
+
+`InvestigationState.status` was, until now, only ever the string
+`"INVESTIGATING"` or `"CONCLUDED"` — a plain binary that couldn't say
+*why* an investigation was concluded (a confirmed fix? an unconfirmed
+one? nothing ever attempted?) or that it was currently blocked on the DBA
+versus a pending re-check. An external playbook spec this project has
+been compared against defines a much richer 17-state investigation
+lifecycle: `NEW → TRIAGED → INVESTIGATING → EVIDENCE_COLLECTED →
+ROOT_CAUSE_IDENTIFIED → RECOMMENDATION_READY → AWAITING_APPROVAL →
+APPROVED → EXECUTING → EXECUTED → VERIFICATION_PENDING →
+VERIFIED/UNVERIFIED/FAILED/REJECTED/ESCALATED → RESOLVED/CLOSED`.
+
+Building that state machine verbatim would be overengineering for this
+codebase specifically: most of those states aren't independently
+observable in its actual control flow (there is no code path where this
+Agent process has ever known, distinctly, that an investigation just
+became "TRIAGED" or "EVIDENCE_COLLECTED" as opposed to plain
+"still investigating"), and the richest part of that lifecycle — approval
+and execution — is already tracked correctly elsewhere: `PendingApproval`
+and the Gateway's own audit trail, never `InvestigationState`. Duplicating
+that into a second, parallel state machine here would only ever be
+something that could drift out of sync with the real decision-maker.
+
+Instead, `InvestigationState.status` (see `context_manager.py`'s
+`InvestigationStage` type) is a small, deliberately bounded `Literal` of
+exactly the stages this codebase's control flow can actually and
+accurately observe itself transitioning through:
+
+- `INVESTIGATING` — the existing default/starting stage, evidence still
+  being gathered.
+- `AWAITING_CLARIFICATION` — set the moment `_run_investigation_loop`
+  returns an `AskClarification` question within budget, reusing the
+  existing `clarification_count` tracking rather than a second mechanism.
+  Reset back to `INVESTIGATING` at the very top of the loop's own `while`
+  body — the one point every subsequent pass through the loop (a resumed
+  call after the DBA answers, or simply the next playbook step/tool call)
+  necessarily starts from, so this can never linger stale once the block
+  clears.
+- `AWAITING_VERIFICATION` — deliberately **never** a value `status` is
+  itself assigned. `InvestigationState.effective_status` computes it on
+  the fly from `pending_verification` (see "A write executing is not
+  license to conclude it worked" above) whenever `status` is plain
+  `INVESTIGATING`: that field is already the one authoritative record of
+  whether a post-write re-check is outstanding, so mirroring it into a
+  second, independently-written value on `status` would just be two
+  things that could drift apart. `AWAITING_CLARIFICATION` and any
+  `CONCLUDED_*` stage still take precedence over it — a clarification
+  actively blocking the loop right now, or an investigation that's
+  already final, both outrank a re-check that can simply wait.
+- `CONCLUDED_VERIFIED` / `CONCLUDED_UNRESOLVED` / `CONCLUDED_UNVERIFIED` /
+  `CONCLUDED_NO_ACTION` — four distinct conclusion outcomes in place of
+  the old flat `CONCLUDED`, computed by `orchestrator._conclusion_stage`
+  from exactly the same two signals (`last_verification`/
+  `pending_verification`) that `_verification_note` already reads to
+  build the DBA-facing verification text — `_verification_note` now maps
+  *this* stage to its wording rather than re-deriving its own, separate
+  judgment, so the stage recorded in `investigation.status` can never
+  disagree with what the reply itself says happened. `_conclusion_stage`
+  is called at every point an investigation ends, not only the primary
+  `action=conclude` path in `_finalize_conclude` — the turn-cap,
+  stuck-observation, and clarification-exhausted fallbacks in
+  `_run_investigation_loop` also end an investigation without ever
+  building a `Conclude` action of their own, and reuse this exact same
+  derivation instead of a third judgment.
+
+`InvestigationState.is_concluded` (`status` in the four `CONCLUDED_*`
+values) is the one place that answers "is this investigation concluded or
+not" — `handle_message`'s own resume-vs-fresh-investigation gate uses it
+instead of the old `status == "CONCLUDED"` equality check, so a call site
+that only cares about that distinction never has to enumerate all four
+values itself.
+
+`/status` (`_status_reply`) surfaces all of this in plain language via
+`_stage_phrase` — "Investigating.", "Awaiting your answer to a clarifying
+question.", "Awaiting independent verification of database.kill_session."
+(the specific tool_id, read off `pending_verification`), or the
+appropriate concluded-with-outcome phrasing — alongside the playbook/step
+note and evidence count it already showed.
+
+States deliberately left out, and why: `NEW`/`TRIAGED` (this Agent has no
+pre-investigation queue — an investigation is created already
+investigating); `EVIDENCE_COLLECTED`/`ROOT_CAUSE_IDENTIFIED`/
+`RECOMMENDATION_READY` (there is no distinct moment evidence-gathering
+"finishes" before root-cause analysis starts — one LLM call interleaves
+all three, and a playbook's own step count is already visible via the
+existing playbook/step note, not a status value); `AWAITING_APPROVAL`/
+`APPROVED`/`EXECUTING`/`EXECUTED` (this is exactly the approval lifecycle
+`PendingApproval` and the Gateway's audit trail already track
+authoritatively — see above); `VERIFICATION_PENDING` (this is
+`AWAITING_VERIFICATION`, computed rather than stored, as covered above);
+`FAILED`/`REJECTED`/`ESCALATED` (a denied or failed tool call is reported
+immediately as its own `AgentReply` — `status="denied"`/`"error"` — the
+investigation itself simply continues or the DBA sees the failure inline,
+never a terminal investigation stage of its own); `RESOLVED`/`CLOSED`
+(no separate closing step exists after a Conclude — the four `CONCLUDED_*`
+stages already are the terminal state, and reopening happens by simply
+starting a fresh investigation in the same conversation, not by
+transitioning a closed one).
