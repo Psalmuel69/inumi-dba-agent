@@ -283,7 +283,22 @@ def create_app(settings: Settings | None = None, *, agent_transport=None) -> Fas
             return {"text": "This account isn't recognized as a DBA team member."}
 
         channel_id = payload.get("channel", {}).get("id", "")
-        conversation_id = f"slack:{channel_id}:{payload.get('container', {}).get('message_ts', '')}"
+        # NOT the card's own container.message_ts -- that's unique to this
+        # one card message and matched by nothing else the conversation_id
+        # is ever computed from (see _slack_conversation_id's docstring and
+        # ARCHITECTURE.md's "A stable conversation_id is a channels-layer
+        # responsibility, not the Agent's"). An approval card lives in the
+        # SAME conversation as the investigation that produced it, so this
+        # must be computed exactly like the regular message path: from
+        # (channel, clicking user, thread), via the same helper. A threaded
+        # card carries its thread_ts on `container` or `message` (Slack
+        # populates either depending on payload shape/version); a
+        # non-threaded card carries neither, exactly like a non-threaded
+        # regular message, and falls back to (channel, user) the same way.
+        thread_ts = payload.get("container", {}).get("thread_ts") or payload.get(
+            "message", {}
+        ).get("thread_ts", "")
+        conversation_id = _slack_conversation_id(channel_id, user_id, thread_ts)
         reply = await _call_agent_event(
             channel="slack",
             channel_account_id=user_id,

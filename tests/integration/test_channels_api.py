@@ -21,6 +21,7 @@ from fastapi.testclient import TestClient
 from inumi.agent.api.app import create_app as create_agent_app
 from inumi.channels.api.app import _slack_conversation_id
 from inumi.channels.api.app import create_app as create_channels_app
+from inumi.channels.slack.sender import SlackMessageSender
 from inumi.common.config import Settings
 from inumi.execution.api.app import create_app as create_execution_app
 from inumi.gateway.api.app import create_app as create_gateway_app
@@ -348,3 +349,184 @@ def test_three_plain_non_threaded_slack_messages_from_the_same_dba_share_one_con
 
     assert len(seen_conversation_ids) == 3
     assert seen_conversation_ids[0] == seen_conversation_ids[1] == seen_conversation_ids[2]
+
+
+def test_slack_interactive_button_click_resolves_to_the_same_conversation_as_the_originating_message():
+    """The sibling bug to the one `_slack_conversation_id` fixed above, found
+    live: clicking Approve/Reject on an approval card never resolved the
+    pending approval. `/webhooks/slack/interactive` computed its own
+    `conversation_id` from the approval CARD's `container.message_ts` --
+    unique to that one card message and never used as a conversation_id
+    anywhere else -- instead of going through `_slack_conversation_id` like
+    the regular message path (this file's tests above) now does. Since the
+    card's own message_ts can never match the conversation_id the original
+    request (and its `state.pending_approval`) actually lives under,
+    `_call_agent_event`'s approve/reject lookup was guaranteed to find no
+    matching `ConversationState`, no matter who clicked or what card.
+
+    Isolates the channels-layer contract with a stub `/v1/chat` and
+    `/v1/chat/events` standing in for the Agent -- the same pattern as
+    `test_three_plain_non_threaded_slack_messages_from_the_same_dba_share_one_conversation`
+    above -- so it doesn't depend on any LLM/Gateway behavior. See
+    `test_slack_approval_card_button_click_actually_resolves_the_pending_approval_end_to_end`
+    below for the full, real-stack round trip proving a button click
+    actually resolves a real pending approval, not just that the ids happen
+    to match in isolation."""
+    settings = _settings()
+    seen_chat_conversation_ids: list[str] = []
+    seen_event_conversation_ids: list[str] = []
+
+    stub_agent = FastAPI()
+
+    @stub_agent.post("/v1/chat")
+    async def _chat(body: dict) -> dict:
+        seen_chat_conversation_ids.append(body["conversation_id"])
+        return {
+            "text": "This requires approval.",
+            "status": "approval_required",
+            "approval_card": {
+                "approval_id": "appr-123",
+                "tool_id": "kill_session",
+                "target_summary": "corebanking-prod",
+                "reason": "blocking session",
+                "risk_level": "high",
+                "blast_radius": "single session",
+            },
+        }
+
+    @stub_agent.post("/v1/chat/events")
+    async def _events(body: dict) -> dict:
+        seen_event_conversation_ids.append(body["conversation_id"])
+        return {"text": "Action approved.", "status": "ok"}
+
+    channels_app = create_channels_app(
+        settings, agent_transport=httpx.ASGITransport(app=stub_agent)
+    )
+
+    plain_message_body = json.dumps(
+        {
+            "type": "event_callback",
+            "event": {
+                "type": "message",
+                "user": "U_MOCK_L2",
+                "text": "check blocking on corebanking production",
+                "channel": "C123",
+                "ts": "300.001",
+                # No thread_ts -- an ordinary channel message, exactly like
+                # the approval card the Agent's reply to it will carry.
+            },
+        }
+    ).encode()
+    request_ts = str(int(time.time()))
+    sig = _sign_slack(settings.slack_signing_secret, plain_message_body, request_ts)
+
+    # Slack's real block_actions shape: the card's OWN message_ts
+    # (container.message_ts) is deliberately different from anything the
+    # originating plain message used -- that mismatch is exactly the bug.
+    interactive_payload = json.dumps(
+        {
+            "type": "block_actions",
+            "user": {"id": "U_MOCK_L2"},
+            "channel": {"id": "C123"},
+            "container": {"type": "message", "message_ts": "300.999", "channel_id": "C123"},
+            "actions": [{"action_id": "inumi_approve", "value": "appr-123"}],
+        }
+    )
+
+    with TestClient(channels_app) as client:
+        chat_response = client.post(
+            "/webhooks/slack",
+            content=plain_message_body,
+            headers={"X-Slack-Request-Timestamp": request_ts, "X-Slack-Signature": sig},
+        )
+        assert chat_response.status_code == 200
+
+        interactive_response = client.post(
+            "/webhooks/slack/interactive", data={"payload": interactive_payload}
+        )
+        assert interactive_response.status_code == 200
+
+    assert len(seen_chat_conversation_ids) == 1
+    assert len(seen_event_conversation_ids) == 1
+    assert seen_chat_conversation_ids[0] == seen_event_conversation_ids[0]
+
+
+def test_slack_approval_card_button_click_actually_resolves_the_pending_approval_end_to_end(monkeypatch):
+    """The full, real-stack proof that the fix isn't just id-equality on
+    paper: a real plain (non-threaded) Slack message drives a real
+    investigation through the real Agent -> Gateway -> Execution stack to
+    APPROVAL_REQUIRED (spec §66's exact worked example, from
+    `test_dev_chat_full_round_trip_investigation_and_approval` above,
+    replayed through Slack instead of `/dev/chat`); the approval card
+    actually posted back to Slack is captured; and clicking its Approve
+    button (`/webhooks/slack/interactive`, the real form-encoded shape
+    Slack sends) must resolve the SAME `state.pending_approval` the
+    investigation created -- not silently miss it and fall back to the
+    generic "There is no pending approval on this conversation" error
+    `AgentOrchestrator.handle_approval_decision` returns whenever
+    conversation_id doesn't match."""
+    settings = _settings()
+    _gateway_app, channels_app = _build_full_stack(settings)
+
+    posted: list[tuple[str, str, list[dict]]] = []
+
+    async def _capture_post_message(self, channel, text, blocks):
+        posted.append((channel, text, blocks))
+
+    monkeypatch.setattr(SlackMessageSender, "post_message", _capture_post_message)
+
+    plain_message_body = json.dumps(
+        {
+            "type": "event_callback",
+            "event": {
+                "type": "message",
+                "user": "U_MOCK_L2",
+                "text": "Check blocking on CoreBanking production.",
+                "channel": "C_APPROVAL",
+                "ts": "400.001",
+                # No thread_ts -- an ordinary channel message.
+            },
+        }
+    ).encode()
+    request_ts = str(int(time.time()))
+    sig = _sign_slack(settings.slack_signing_secret, plain_message_body, request_ts)
+
+    with TestClient(channels_app) as client:
+        response = client.post(
+            "/webhooks/slack",
+            content=plain_message_body,
+            headers={"X-Slack-Request-Timestamp": request_ts, "X-Slack-Signature": sig},
+        )
+        assert response.status_code == 200
+        assert len(posted) == 1
+        _channel, _text, blocks = posted[0]
+        actions_block = next(b for b in blocks if b["type"] == "actions")
+        approval_id = actions_block["elements"][0]["value"]
+        assert approval_id
+
+        # The real Slack interactive payload shape: form-encoded
+        # `payload={...}`, the card's own (different) message_ts in
+        # `container`, no thread_ts (the card was posted as a plain
+        # channel message, not a threaded reply).
+        interactive_payload = json.dumps(
+            {
+                "type": "block_actions",
+                "user": {"id": "U_MOCK_L2"},
+                "channel": {"id": "C_APPROVAL"},
+                "container": {
+                    "type": "message",
+                    "message_ts": "400.777",
+                    "channel_id": "C_APPROVAL",
+                },
+                "actions": [{"action_id": "inumi_approve", "value": approval_id}],
+            }
+        )
+        interactive_response = client.post(
+            "/webhooks/slack/interactive", data={"payload": interactive_payload}
+        )
+        assert interactive_response.status_code == 200
+
+    assert len(posted) == 2
+    _channel, approve_text, _blocks = posted[1]
+    assert "Action approved" in approve_text
+    assert "There is no pending approval" not in approve_text

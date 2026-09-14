@@ -647,6 +647,62 @@ for the reproduction, and `tests/unit/test_environment_clarification.py`'s
 for the confirmation that, given that one stable id, the orchestrator side
 already had no remaining gap.
 
+### A sibling bug: the interactive-button path had its own, separate copy of the same mistake
+
+Fixing the regular-message path did not fix approvals — a second, structurally
+identical bug lived in `/webhooks/slack/interactive` (the Slack
+Approve/Reject button handler), found live immediately after: clicking
+either button never resolved the pending approval, no matter who clicked or
+what card they clicked. It computed its own `conversation_id` inline,
+independently of `_slack_conversation_id`, as:
+
+```python
+conversation_id = f"slack:{channel_id}:{payload.get('container', {}).get('message_ts', '')}"
+```
+
+— the approval CARD MESSAGE's own `message_ts`, which is unique to that one
+card and never used as a `conversation_id` anywhere else in the system. An
+approval card lives in the same conversation as the investigation that
+produced it, so this could never match the `conversation_id` `state.
+pending_approval` actually lives under — `AgentOrchestrator.
+handle_approval_decision`'s `pending = state.pending_approval` lookup found
+a brand-new, empty `ConversationState` every time and returned "There is no
+pending approval on this conversation." regardless of who clicked or which
+card.
+
+This was the exact same class of mistake as the regular-message bug above
+(deriving a conversation-scoped id from a single message's own unique
+timestamp instead of from the stable `(channel, user, thread)` triple), just
+in a second, independent code path that had never been routed through
+`_slack_conversation_id` in the first place — extracting that helper fixed
+only the one call site it replaced. Fixed by routing the interactive handler
+through the same `_slack_conversation_id(channel, slack_user_id, thread_ts)`
+helper, reading `thread_ts` from the interactive payload's `container` or
+`message` object (whichever Slack populates — both are checked, `container`
+first) exactly as a real block_actions payload can carry it. In this
+codebase that resolves to the empty-string fallback in practice today,
+since `SlackMessageSender.post_message` doesn't yet thread its own replies
+(so an approval card is always posted as a plain, non-threaded message) —
+but it now goes through the exact same `(channel, user)`-scoped computation
+the regular, non-threaded message path uses, which is what actually matters
+here: whatever the originating plain message's `conversation_id` was, the
+card's button click now reproduces it exactly, instead of a third, unrelated
+derivation. See `tests/integration/test_channels_api.py`'s
+`test_slack_interactive_button_click_resolves_to_the_same_conversation_as_the_originating_message`
+(isolates the channels-layer contract with a stub Agent) and
+`test_slack_approval_card_button_click_actually_resolves_the_pending_approval_end_to_end`
+(the full, real Agent/Gateway/Execution round trip: a real investigation
+reaches `APPROVAL_REQUIRED`, the real card is captured, and clicking Approve
+on it actually resolves and executes the real `state.pending_approval`,
+not just a matching id in isolation).
+
+The Microsoft Teams equivalent (`teams_webhook`) does **not** have this bug:
+it computes `conversation_id` exactly once, from the Bot Framework's own
+stable `activity.conversation.id`, before branching into the approve/reject
+(`Action.Submit`) case versus the regular-message case — both branches read
+the same already-computed value, so there was never a second, independent
+derivation for the two paths to disagree about. Teams was left unchanged.
+
 ## The identity re-resolution point (why "UX check" ≠ "security boundary")
 
 Channel Adapters and the Agent both *can* check whether a channel account is
