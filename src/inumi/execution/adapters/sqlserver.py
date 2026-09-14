@@ -7,6 +7,7 @@ Uses DMVs (`sys.dm_exec_*`, `sys.dm_os_*`, `sys.dm_tran_*`,
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from inumi.execution.adapters.base import DatabaseAdapter
@@ -205,10 +206,22 @@ class SQLServerAdapter(DatabaseAdapter):
             EXEC sys.xp_readerrorlog 0, 1, NULL, NULL,
                  %(since)s, NULL, N'desc'
         """
+        # xp_readerrorlog's start_time/end_time parameters are NOT a SQL
+        # datetime/datetime2 type despite what the proc signature suggests —
+        # it's an extended stored procedure that parses this argument as
+        # text internally. Binding a native Python `datetime` (which pyodbc
+        # sends as SQL_TYPE_TIMESTAMP) fails with "The format for the date
+        # filter is incorrect" (live-verified against sqlserver-dev-01); it
+        # wants an unambiguous 'YYYY-MM-DD HH:MM:SS' *string*, one of the
+        # formats the engine's own error message documents. Passing the raw
+        # `since_minutes` int (the original bug) failed even earlier, with
+        # "Invalid Parameter Type" — this was never a valid start_time at
+        # all, integer or otherwise.
+        since = (datetime.now(UTC) - timedelta(minutes=since_minutes)).strftime("%Y-%m-%d %H:%M:%S")
         # xp_readerrorlog does not support a row-limit parameter directly;
         # the Gateway's Data Policy Layer enforces `limit` on the returned
         # rows regardless of what the engine returns.
-        return await self._executor.fetch_all(sql, {"since": since_minutes})
+        return await self._executor.fetch_all(sql, {"since": since})
 
     # --- controlled write operations ------------------------------------------
 

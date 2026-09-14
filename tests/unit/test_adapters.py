@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 
 from inumi.execution.adapters.mysql import MySQLAdapter
@@ -212,6 +214,31 @@ async def test_sqlserver_storage_is_instance_wide_and_surfaces_database_name():
     assert "sys.master_files" in sql
     assert "sys.databases" in sql
     assert rows[0]["database_name"] == "CoreBanking"
+
+
+@pytest.mark.asyncio
+async def test_sqlserver_error_logs_passes_a_formatted_datetime_not_raw_minutes():
+    """xp_readerrorlog's start_time argument is parsed as TEXT by the
+    extended stored procedure, not bound as a SQL datetime type — binding
+    the raw `since_minutes` int (the original bug: "Invalid Parameter
+    Type") or even a native Python `datetime` (fails live with "The format
+    for the date filter is incorrect") both error on a real instance. Only
+    an explicit 'YYYY-MM-DD HH:MM:SS' string works (live-verified against
+    sqlserver-dev-01). Assert the bound `since` param is such a string,
+    roughly `since_minutes` in the past, never a bare int."""
+    executor = FakeQueryExecutor(canned_rows=[])
+    adapter = SQLServerAdapter(executor, "CoreBanking")
+    before = datetime.now(UTC) - timedelta(minutes=60, seconds=5)
+
+    await adapter.error_logs(since_minutes=60, limit=50)
+
+    assert "xp_readerrorlog" in executor.executed_sql[0]
+    since = executor.executed_params[0]["since"]
+    assert isinstance(since, str)
+    assert not isinstance(since, int)
+    parsed = datetime.strptime(since, "%Y-%m-%d %H:%M:%S")
+    after = datetime.now(UTC) - timedelta(minutes=60) + timedelta(seconds=5)
+    assert before.replace(tzinfo=None) <= parsed <= after.replace(tzinfo=None)
 
 
 @pytest.mark.asyncio
