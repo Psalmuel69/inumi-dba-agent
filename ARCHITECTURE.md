@@ -336,6 +336,50 @@ This is what lets the agent *investigate* which database is affected (e.g.
 only remembering one once a DBA happens to name it — a DBA asking about an
 incident often doesn't know the database yet; that's the point of asking.
 
+### Follow-up: get_storage joined the instance-wide set too
+
+`get_storage` was deliberately left database-scoped in the fix above — a
+re-examination found that was the wrong call. All three engines'
+`storage()` methods had the same shape of artificial restriction as
+Postgres's original bug:
+
+- **PostgreSQL**: `pg_database_size(current_database())` only ever reported
+  the one database the connection happened to be on, even though
+  `pg_database` is a global catalog (no per-connection restriction) listing
+  every database on the cluster and its size. Now
+  `select datname as database_name, pg_database_size(datname) as
+  database_size_bytes from pg_database where datistemplate = false order by
+  database_size_bytes desc` — genuinely cluster-wide, with `database_name`
+  on every row.
+- **SQL Server**: `sys.master_files` is ALREADY a cluster-wide catalog view
+  — every data/log file for every database on the instance. The
+  `WHERE database_id = DB_ID()` clause was the artificial restriction;
+  removed, with `sys.databases` joined in for the database name
+  (`sys.master_files` only carries the numeric `database_id`).
+- **MySQL/MariaDB**: `information_schema.TABLES` spans every schema on the
+  instance. `WHERE TABLE_SCHEMA = DATABASE()` was the artificial
+  restriction; replaced with `GROUP BY TABLE_SCHEMA`, so one call reports
+  every schema's size with the schema name as a column.
+
+Honest caveat: Postgres's per-*table* breakdown (`pg_stat_user_tables`,
+used by `get_tables`) is itself connection-scoped in Postgres — you can
+only see the currently-connected database's own tables through it, unlike
+`pg_stat_activity`/`pg_locks`. So only the *database-size* figure in
+`get_storage` became instance-wide; the per-table level of detail still
+requires `get_tables` (already database-scoped, unchanged) for whichever
+database is of interest.
+
+`database.get_storage` now declares `required_target_scope = ["environment",
+"instance"]`, same as the rest of the set above. Verified live-effect via a
+new integration test
+(`test_comprehensive_summary_runs_exactly_five_tool_calls_through_the_real_gateway`
+in `tests/integration/test_agent_orchestrator.py`): the `comprehensive_
+summary` playbook's `get_storage` step (`target={}`, no database) used to
+be denied `INVALID_TARGET` by the real Gateway and burn a 6th tool call on
+a self-correction retry — one over its 5-step, 6-turn shared budget. It now
+runs cleanly on the first attempt, leaving the playbook's intended one turn
+free for the model's own concluding call.
+
 ## execute() must surface the query's own result, not just rowcount
 
 Found while live-testing the blocking playbook against a real, currently

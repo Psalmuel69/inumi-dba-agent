@@ -13,10 +13,11 @@ from __future__ import annotations
 
 import httpx
 
-from inumi.agent.context_manager import ContextManager
+from inumi.agent.context_manager import ContextManager, ConversationState, InvestigationState
 from inumi.agent.llm.mock import MockLLMProvider
 from inumi.agent.llm.registry import LLMRegistry
 from inumi.agent.orchestrator import AgentOrchestrator
+from inumi.agent.planner.actions import Conclude
 from inumi.agent.tool_client import ToolClient
 from inumi.common.config import Settings
 from inumi.common.service_auth import ServiceTokenIssuer
@@ -119,3 +120,70 @@ async def test_l1_user_gets_denied_response_not_a_crash():
     # DBA_L1 cannot even reach kill_session on this critical prod database.
     assert reply.status == "denied"
     assert "can't do that" in reply.text
+
+
+class _FakeLLM:
+    """Only `decide_next_action` is exercised once comprehensive_summary's 5
+    fixed steps are exhausted — stubbed for determinism (matches the
+    pattern in tests/unit/test_orchestrator_playbooks.py) so this test
+    verifies the real Gateway's target-validation/tool-catalog pipeline,
+    not a real model's own heuristics."""
+
+    def __init__(self, actions: list):
+        self._actions = list(actions)
+        self.calls: list[dict] = []
+
+    async def decide_next_action(self, **kwargs):
+        self.calls.append(kwargs)
+        return self._actions.pop(0)
+
+
+async def test_comprehensive_summary_runs_exactly_five_tool_calls_through_the_real_gateway():
+    """Reproduces (and pins the fix for) a live finding: comprehensive_
+    summary's `database.get_storage` step runs with `target={}` (no
+    database named) — before get_storage joined the instance-wide tool set
+    in tool_catalog.py, the real Gateway's target validation rejected that
+    with INVALID_TARGET, triggering a self-correction retry and burning a
+    6th tool call within the playbook's 5-step, 6-turn shared budget. Runs
+    through the REAL Gateway pipeline (target validation, tool catalog,
+    execution) exactly like the acceptance scenario above — only the final
+    concluding LLM call is stubbed, since a real model's own heuristics
+    aren't what's under test here."""
+    orchestrator = await _build_orchestrator()
+    state = ConversationState(
+        conversation_id="conv_cs_1", channel="teams", channel_thread_id="", channel_account_id="aad-mock-l2"
+    )
+    state.database_context["environment"] = "development"
+    state.database_context["instance"] = "sqlserver-dev-01"
+    investigation = InvestigationState(
+        investigation_id="inv_cs_1", problem="full health report", playbook_id="comprehensive_summary"
+    )
+    llm = _FakeLLM(actions=[Conclude(summary="All other checks came back clean.")])
+
+    reply = await orchestrator._run_investigation_loop(
+        state,
+        investigation,
+        [
+            "database.get_health", "database.get_blocking_sessions", "database.get_backup_status",
+            "database.get_storage", "database.get_error_logs",
+        ],
+        "teams",
+        "aad-mock-l2",
+        llm,
+        None,
+    )
+
+    assert reply.status == "ok"
+    assert len(llm.calls) == 1  # exactly one turn left free for the LLM's own conclude call
+    tool_ids = [t["tool_id"] for t in investigation.transcript]
+    assert tool_ids == [
+        "database.get_health",
+        "database.get_blocking_sessions",
+        "database.get_backup_status",
+        "database.get_storage",
+        "database.get_error_logs",
+    ]
+    # Every step, including get_storage, executed cleanly on the first
+    # attempt — no self-correction retry inflating this to 6 tool calls.
+    for entry in investigation.transcript:
+        assert entry["result"].get("failure_code") is None, entry

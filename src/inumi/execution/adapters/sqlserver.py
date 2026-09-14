@@ -155,11 +155,16 @@ class SQLServerAdapter(DatabaseAdapter):
         return await self._executor.fetch_all(sql)
 
     async def storage(self) -> list[dict[str, Any]]:
+        # sys.master_files is ALREADY a cluster-wide catalog view — every
+        # data/log file for every database on the instance. The old
+        # `WHERE database_id = DB_ID()` was the artificial restriction;
+        # removed, and sys.databases joined in so each row names its
+        # database (sys.master_files only carries the numeric database_id).
         sql = """
-            SELECT name AS file_name, type_desc, size * 8 / 1024 AS size_mb,
-                   max_size, growth
-            FROM sys.master_files
-            WHERE database_id = DB_ID()
+            SELECT d.name AS database_name, mf.name AS file_name, mf.type_desc,
+                   mf.size * 8 / 1024 AS size_mb, mf.max_size, mf.growth
+            FROM sys.master_files mf
+            JOIN sys.databases d ON d.database_id = mf.database_id
         """
         return await self._executor.fetch_all(sql)
 

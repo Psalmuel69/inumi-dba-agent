@@ -147,6 +147,28 @@ async def test_postgres_create_index_never_receives_raw_sql_from_caller():
 
 
 @pytest.mark.asyncio
+async def test_postgres_storage_is_cluster_wide_and_surfaces_database_name():
+    """pg_database is a global catalog (no per-connection restriction) —
+    an artificial `pg_database_size(current_database())` used to hide that
+    every database's size on the cluster is available in one call. The
+    per-table breakdown (pg_stat_user_tables) stays database-scoped — that
+    level of detail is still `get_tables`'s job, not this one's."""
+    executor = FakeQueryExecutor(
+        canned_rows=[
+            {"database_name": "analytics_prod", "database_size_bytes": 9000},
+            {"database_name": "postgres", "database_size_bytes": 100},
+        ]
+    )
+    adapter = PostgreSQLAdapter(executor, "postgres")
+    rows = await adapter.storage()
+    sql = executor.executed_sql[0]
+    assert "current_database()" not in sql
+    assert "pg_database" in sql
+    assert "datname" in sql
+    assert rows[0]["database_name"] == "analytics_prod"
+
+
+@pytest.mark.asyncio
 async def test_sqlserver_blocking_uses_dm_exec_requests():
     executor = FakeQueryExecutor(canned_rows=[{"blocked_session_id": 9183}])
     adapter = SQLServerAdapter(executor, "CoreBanking")
@@ -171,6 +193,25 @@ async def test_sqlserver_kill_session_rejects_non_numeric_session_id():
     adapter = SQLServerAdapter(executor, "CoreBanking")
     with pytest.raises(ValueError):
         await adapter.kill_session("9182; DROP TABLE x", "attempted injection")
+
+
+@pytest.mark.asyncio
+async def test_sqlserver_storage_is_instance_wide_and_surfaces_database_name():
+    """sys.master_files is ALREADY a cluster-wide catalog view — every
+    data/log file for every database on the instance. The old
+    `WHERE database_id = DB_ID()` was the artificial restriction; removed,
+    with sys.databases joined in for the database name (sys.master_files
+    only carries the numeric database_id)."""
+    executor = FakeQueryExecutor(
+        canned_rows=[{"database_name": "CoreBanking", "file_name": "primary_data", "size_mb": 48213}]
+    )
+    adapter = SQLServerAdapter(executor, "CoreBanking")
+    rows = await adapter.storage()
+    sql = executor.executed_sql[0]
+    assert "DB_ID()" not in sql
+    assert "sys.master_files" in sql
+    assert "sys.databases" in sql
+    assert rows[0]["database_name"] == "CoreBanking"
 
 
 @pytest.mark.asyncio
@@ -199,6 +240,26 @@ async def test_mysql_blocking_uses_data_lock_waits_and_innodb_trx():
     assert rows == [{"blocked_session_id": 42, "blocking_session_id": 7}]
     assert "performance_schema.data_lock_waits" in executor.executed_sql[0]
     assert "information_schema.INNODB_TRX" in executor.executed_sql[0]
+
+
+@pytest.mark.asyncio
+async def test_mysql_storage_is_instance_wide_and_surfaces_schema_name():
+    """information_schema.TABLES spans every schema on the instance — the
+    old `WHERE TABLE_SCHEMA = DATABASE()` was the artificial restriction.
+    Removed in favor of GROUP BY TABLE_SCHEMA, so one call reports every
+    schema's size with the schema name as a column."""
+    executor = FakeQueryExecutor(
+        canned_rows=[
+            {"schema_name": "app_db", "database_size_bytes": 5000},
+            {"schema_name": "analytics", "database_size_bytes": 7000},
+        ]
+    )
+    adapter = MySQLAdapter(executor, "app_db")
+    rows = await adapter.storage()
+    sql = executor.executed_sql[0]
+    assert "TABLE_SCHEMA = DATABASE()" not in sql
+    assert "GROUP BY TABLE_SCHEMA" in sql
+    assert rows[0]["schema_name"] == "app_db"
 
 
 @pytest.mark.asyncio

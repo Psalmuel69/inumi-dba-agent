@@ -7,7 +7,16 @@ instance/cluster-wide on every engine we support (SQL Server DMVs, MySQL
 information_schema/performance_schema, Postgres pg_stat_activity et al. are
 never scoped to one database). These tools must never demand a database —
 that's what lets the agent *discover* which database is affected (e.g. by
-checking what's running server-wide) instead of only ever being told."""
+checking what's running server-wide) instead of only ever being told.
+
+get_storage was added to this set in a follow-up (it was deliberately left
+database-scoped in the original fix, which was the wrong call): SQL
+Server's sys.master_files and MySQL's information_schema.TABLES are
+themselves already instance-wide catalogs, and Postgres's pg_database is
+too, for the database-size figure — see test_adapters.py for the
+per-engine SQL assertions and the honest caveat that Postgres's per-table
+breakdown stays database-scoped (pg_stat_user_tables), still available via
+get_tables."""
 
 from __future__ import annotations
 
@@ -34,6 +43,7 @@ _INSTANCE_WIDE_TOOLS = {
     "database.get_backup_status",
     "database.get_configuration",
     "database.get_error_logs",
+    "database.get_storage",
 }
 
 # These stay genuinely database-scoped and must keep requiring one.
@@ -43,7 +53,6 @@ _STILL_DATABASE_SCOPED_TOOLS = {
     "database.get_indexes",
     "database.get_statistics",
     "database.get_tables",
-    "database.get_storage",
     "database.get_transaction_log",
 }
 

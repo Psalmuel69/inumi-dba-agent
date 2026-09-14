@@ -249,7 +249,11 @@ def build_tool_catalog(settings: Settings) -> list[ToolDefinition]:
             required_scope=["environment", "instance", "database", "schema_name", "object_name"],
         ),
         _read_tool("database.get_tables", "Table inventory for a database."),
-        _read_tool("database.get_storage", "Storage/space utilization."),
+        _read_tool(
+            "database.get_storage",
+            "Storage/space utilization.",
+            required_scope=_INSTANCE_WIDE_SCOPE,
+        ),
         _read_tool("database.get_transaction_log", "Transaction log / WAL usage."),
         _read_tool(
             "database.get_replication_status",

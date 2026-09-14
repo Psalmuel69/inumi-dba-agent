@@ -175,9 +175,21 @@ class PostgreSQLAdapter(DatabaseAdapter):
         return await self._executor.fetch_all(sql)
 
     async def storage(self) -> list[dict[str, Any]]:
+        # pg_database is a global catalog (no per-connection restriction) —
+        # every database on the cluster and its size, genuinely instance-wide,
+        # unlike the old `pg_database_size(current_database())` which only
+        # ever reported the one database this connection happened to be on.
+        # pg_stat_user_tables (the per-table breakdown) is itself
+        # connection-scoped in Postgres — you can only see the currently-
+        # connected database's own tables through it, unlike
+        # pg_stat_activity/pg_locks — so that level of detail can't become
+        # instance-wide here without opening a connection per database;
+        # `get_tables` (already database-scoped) remains the way to get it.
         sql = """
-            select pg_database_size(current_database()) as database_size_bytes,
-                   (select sum(pg_total_relation_size(relid)) from pg_stat_user_tables) as tables_size_bytes
+            select datname as database_name, pg_database_size(datname) as database_size_bytes
+            from pg_database
+            where datistemplate = false
+            order by database_size_bytes desc
         """
         return await self._executor.fetch_all(sql)
 

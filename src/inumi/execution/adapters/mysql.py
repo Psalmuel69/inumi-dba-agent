@@ -185,12 +185,19 @@ class MySQLAdapter(DatabaseAdapter):
         return await self._executor.fetch_all(sql)
 
     async def storage(self) -> list[dict[str, Any]]:
+        # information_schema.TABLES spans every schema on the instance —
+        # the old `WHERE TABLE_SCHEMA = DATABASE()` was the artificial
+        # restriction. Removed in favor of grouping by schema, so one call
+        # reports every schema's size on the instance with the schema name
+        # as a column, instead of only the one this connection happened to
+        # default to.
         sql = """
-            SELECT SUM(DATA_LENGTH) AS data_bytes, SUM(INDEX_LENGTH) AS index_bytes,
+            SELECT TABLE_SCHEMA AS schema_name,
+                   SUM(DATA_LENGTH) AS data_bytes, SUM(INDEX_LENGTH) AS index_bytes,
                    SUM(DATA_FREE) AS free_bytes,
                    SUM(DATA_LENGTH + INDEX_LENGTH) AS database_size_bytes
             FROM information_schema.TABLES
-            WHERE TABLE_SCHEMA = DATABASE()
+            GROUP BY TABLE_SCHEMA
         """
         return await self._executor.fetch_all(sql)
 
