@@ -67,7 +67,11 @@ def create_app(settings: Settings | None = None, *, adapter_factory=None) -> Fas
     async def ready() -> dict:
         return {"status": "ready"}
 
-    @app.post("/v1/execute", response_model=ExecutionResult, dependencies=[Depends(require_gateway_service_token)])
+    @app.post(
+        "/v1/execute",
+        response_model=ExecutionResult,
+        dependencies=[Depends(require_gateway_service_token)],
+    )
     async def execute(request: ExecutionRequest) -> ExecutionResult:
         logger.info(
             "execution_request_received",

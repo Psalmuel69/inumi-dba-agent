@@ -775,7 +775,9 @@ class AgentOrchestrator:
                 # loop run again (see that reset's own comment).
                 investigation.status = "AWAITING_CLARIFICATION"
                 return AgentReply(
-                    text=action.question, status="clarification", investigation_id=investigation.investigation_id
+                    text=action.question,
+                    status="clarification",
+                    investigation_id=investigation.investigation_id,
                 )
 
             investigation.turn_count += 1
@@ -1398,16 +1400,28 @@ class AgentOrchestrator:
         if stripped.startswith("/approve "):
             approval_id = stripped.split(" ", 1)[1].strip()
             if state.pending_approval and state.pending_approval.approval_id != approval_id:
-                return AgentReply(text="That approval id doesn't match the pending action on this conversation.", status="error")
+                return AgentReply(
+                    text="That approval id doesn't match the pending action on this conversation.",
+                    status="error",
+                )
             return await self.handle_approval_decision(
-                conversation_id=state.conversation_id, decision="approve", channel=channel, channel_account_id=channel_account_id
+                conversation_id=state.conversation_id,
+                decision="approve",
+                channel=channel,
+                channel_account_id=channel_account_id,
             )
         if stripped.startswith("/reject "):
             approval_id = stripped.split(" ", 1)[1].strip()
             if state.pending_approval and state.pending_approval.approval_id != approval_id:
-                return AgentReply(text="That approval id doesn't match the pending action on this conversation.", status="error")
+                return AgentReply(
+                    text="That approval id doesn't match the pending action on this conversation.",
+                    status="error",
+                )
             return await self.handle_approval_decision(
-                conversation_id=state.conversation_id, decision="reject", channel=channel, channel_account_id=channel_account_id
+                conversation_id=state.conversation_id,
+                decision="reject",
+                channel=channel,
+                channel_account_id=channel_account_id,
             )
         if stripped in ("/models", "/model"):
             return await self._handle_model_command(state, stripped)

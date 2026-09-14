@@ -41,7 +41,13 @@ def _build():
     return gateway_app, token
 
 
-def _submit_restart(client: TestClient, token: str, requester_account: str, request_id: str, approval_id: str | None = None):
+def _submit_restart(
+    client: TestClient,
+    token: str,
+    requester_account: str,
+    request_id: str,
+    approval_id: str | None = None,
+):
     body = {
         "tool_id": "database.restart_instance",
         "arguments": {"reason": "applying patch"},

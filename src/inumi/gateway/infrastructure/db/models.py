@@ -50,7 +50,9 @@ class UserRecord(Base):
     last_seen_groups: Mapped[list] = mapped_column(JSON, default=list)
     last_seen_roles: Mapped[list] = mapped_column(JSON, default=list)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
-    updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
 
 
 class IdentityGroupRecord(Base):
@@ -145,7 +147,9 @@ class ConversationRecord(Base):
     channel_thread_id: Mapped[str] = mapped_column(String, default="")
     user_subject_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
-    updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
 
 
 class AgentSessionRecord(Base):
@@ -158,7 +162,9 @@ class AgentSessionRecord(Base):
     database_context: Mapped[dict] = mapped_column(JSON, default=dict)
     investigation_id: Mapped[str | None] = mapped_column(String, default=None)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
-    updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
 
 
 class InvestigationRecord(Base):
@@ -178,7 +184,9 @@ class InvestigationRecord(Base):
     recommendations: Mapped[list] = mapped_column(JSON, default=list)
     actions: Mapped[list] = mapped_column(JSON, default=list)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
-    updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
 
 
 class InvestigationEventRecord(Base):
@@ -325,7 +333,9 @@ class IncidentRecord(Base):
     status: Mapped[str] = mapped_column(String, default="OPEN")
     severity: Mapped[str] = mapped_column(String, default="")
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
-    updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
 
 
 class KnowledgeDocumentRecord(Base):

@@ -392,7 +392,10 @@ def create_app(settings: Settings | None = None, *, agent_transport=None) -> Fas
         agent_reply = AgentReply.model_validate(reply)
         card = render_reply_card(agent_reply)
         await teams_sender.send_reply_to_activity(
-            activity.get("serviceUrl", ""), activity.get("conversation", {}).get("id", ""), activity.get("id", ""), card
+            activity.get("serviceUrl", ""),
+            activity.get("conversation", {}).get("id", ""),
+            activity.get("id", ""),
+            card,
         )
         return {"type": "message", "text": agent_reply.text}
 

@@ -22,7 +22,11 @@ from inumi.gateway.api.state import GatewayState
 from inumi.gateway.domain.discovery import DiscoveryOrchestrator
 from inumi.gateway.domain.tool_call_handler import ToolCallHandler
 
-router = APIRouter(prefix="/v1/tool-calls", tags=["tool-calls"], dependencies=[Depends(require_agent_service_token)])
+router = APIRouter(
+    prefix="/v1/tool-calls",
+    tags=["tool-calls"],
+    dependencies=[Depends(require_agent_service_token)],
+)
 
 
 @router.post("", response_model=ToolCallResponse)
