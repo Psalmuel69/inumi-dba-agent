@@ -23,7 +23,7 @@ import pytest
 from inumi.agent.context_manager import ContextManager, InvestigationState
 from inumi.agent.llm.registry import LLMRegistry
 from inumi.agent.orchestrator import AgentOrchestrator
-from inumi.agent.planner.actions import Conclude, IntentExtraction
+from inumi.agent.planner.actions import AskClarification, Conclude, IntentExtraction
 
 
 class _FakeToolClient:
@@ -348,3 +348,98 @@ def test_environment_for_instance_matches_id_or_alias_case_insensitively():
     assert asyncio.run(orchestrator._environment_for_instance("Postgres-Local")) == "development"
     assert asyncio.run(orchestrator._environment_for_instance("MyLocal")) == "development"
     assert asyncio.run(orchestrator._environment_for_instance("nope")) is None
+
+
+class _Turn2AsksThenConcludesLLM:
+    """Live-reproduced regression, both halves in one conversation:
+    `extract_intent` returns each of `intents` in order (one per FRESH
+    investigation); `decide_next_action` conclude on its first call
+    (turn 1's investigation), asks a clarifying question on its second
+    call (turn 2's fresh, zero-entity investigation — simulating a real
+    model that still asks something despite `state.database_context`
+    already having resolved environment/instance, since
+    `decide_next_action`'s prompt is never told that directly — see
+    `_continue_investigation`), then concludes again on its third call
+    (turn 2's investigation, RESUMED by turn 3's bare reply). Deliberately
+    NOT the orchestrator's own hardcoded environment-question wording —
+    that string exists nowhere in any LLM prompt (verified by a grep of
+    every `src/inumi/agent/llm/*.py` system prompt) and a real model could
+    not plausibly echo it character-for-character; this fake asks a
+    plausible free-form question instead, to test the GENERAL resume
+    mechanism (`investigation.last_message`), not the one hardcoded
+    environment-answer fast path."""
+
+    def __init__(self, intents: list[IntentExtraction]):
+        self._intents = list(intents)
+        self.extract_intent_calls = 0
+        self._decide_calls = 0
+
+    async def extract_intent(self, *args, **kwargs):
+        self.extract_intent_calls += 1
+        return self._intents.pop(0)
+
+    async def decide_next_action(self, **kwargs):
+        self._decide_calls += 1
+        if self._decide_calls == 2:
+            return AskClarification(question="Which server is the replication check for?")
+        return Conclude(summary="Investigated.")
+
+
+@pytest.mark.asyncio
+async def test_the_live_three_turn_sequence_is_handled_correctly_given_one_stable_conversation():
+    """Isolates whether `handle_message` itself has any remaining gap in
+    the live-reported 3-turn sequence — run here with a single, constant
+    `conversation_id` throughout, which is exactly what `handle_message`
+    always receives from its caller. `tests/integration/
+    test_channels_api.py` covers the separate, real root cause: the
+    Slack webhook computing a NEW `conversation_id` for every non-threaded
+    message, which is what actually broke this live (see
+    `_slack_conversation_id`'s own docstring). Turn 1: "check backup
+    health on postgres-local" (names the server, concludes normally).
+    Turn 2: "and what about replication?" — zero named entities of its
+    own; must not re-ask for the already-known environment (commit
+    1f83133), but a real model can still ask something else mid-
+    investigation (simulated here). Turn 3: a bare "development" — must
+    resume turn 2's investigation via `investigation.last_message`
+    (never reclassified by a fresh `extract_intent` call, never dropped
+    into the generic chitchat fallback)."""
+    servers = [{"id": "postgres-local", "aliases": [], "environment": "development"}]
+    llm = _Turn2AsksThenConcludesLLM(
+        [
+            IntentExtraction(
+                is_dba_task=True,
+                instance_hint="postgres-local",
+                problem_summary="check backup health on postgres-local",
+            ),
+            IntentExtraction(is_dba_task=True, problem_summary="check replication status"),
+        ]
+    )
+    orchestrator, context = _orchestrator(llm, servers=servers)
+    state = context.get_or_create("conv10", "slack", "", "U123")
+
+    turn1 = await orchestrator.handle_message(
+        channel="slack", channel_account_id="U123", conversation_id="conv10",
+        channel_thread_id="", message="check backup health on postgres-local",
+    )
+    assert turn1.status == "ok"
+    assert state.investigation.is_concluded is True
+    assert state.database_context["environment"] == "development"
+
+    turn2 = await orchestrator.handle_message(
+        channel="slack", channel_account_id="U123", conversation_id="conv10",
+        channel_thread_id="", message="and what about replication?",
+    )
+    # The orchestrator's own environment gate must not fire on this
+    # zero-entity follow-up — environment/instance are already known.
+    assert "Which environment" not in turn2.text
+    assert turn2.status == "clarification"
+    assert state.investigation.status == "AWAITING_CLARIFICATION"
+    assert state.investigation.is_concluded is False
+
+    turn3 = await orchestrator.handle_message(
+        channel="slack", channel_account_id="U123", conversation_id="conv10",
+        channel_thread_id="", message="development",
+    )
+    assert turn3.status == "ok"
+    assert "tell me more" not in turn3.text
+    assert llm.extract_intent_calls == 2  # turn 3 resumed rather than reclassifying

@@ -599,6 +599,54 @@ pinned: a later fresh investigation never re-asking for an
 already-known environment, and switching to an unresolvable instance
 correctly forgetting the stale one instead of guessing.
 
+## A stable conversation_id is a channels-layer responsibility, not the Agent's
+
+The previous section's fix (and its tests) assume `handle_message` receives
+the SAME `conversation_id` for every message in one ongoing exchange — and
+traced in isolation, every piece of the Agent's own persistence logic
+(`state.database_context` surviving across investigations,
+`InvestigationState.is_concluded` correctly gating fresh-vs-resume,
+`_ENVIRONMENT_ANSWER_RE`'s deterministic resume path) held up fine under
+that assumption. Live testing then reproduced the identical-looking symptom
+again anyway — a DBA's follow-up with zero named entities of its own asked
+for an already-known environment, and even a bare "development" answer to
+that clarification fell through to the generic chitchat fallback instead of
+resuming — and this time it turned out that assumption itself was false.
+
+The real bug was one line in `channels/api/app.py`'s Slack webhook:
+
+```python
+conversation_id = f"slack:{event.get('channel')}:{event.get('thread_ts', event.get('ts'))}"
+```
+
+A threaded reply's `thread_ts` is shared by every message in that thread, so
+that half is fine. But an ordinary, non-threaded message — exactly how a
+DBA naturally follows up in a channel that (by this webhook's own design)
+"responds to plain messages too", no @-mention or thread reply required —
+has no `thread_ts` at all, so this fell back to `event["ts"]`: that
+message's own timestamp, unique to it and matched by nothing that comes
+after. Every plain follow-up therefore silently started a brand-new, empty
+`ConversationState` — `state.database_context` empty, `state.investigation`
+`None` — no matter how thoroughly the Agent's own state persisted *within*
+one `conversation_id`, because no two consecutive plain messages actually
+shared one. Fixed in `_slack_conversation_id` by scoping a non-threaded
+message to `(channel, slack_user_id)` instead of `(channel, message)`, so a
+DBA's own consecutive plain messages share one conversation while two
+different DBAs typing in the same channel still don't cross.
+
+The general lesson: a fix verified end-to-end at the orchestrator level
+(stable `conversation_id` held constant across calls, as every unit test in
+`tests/unit/` necessarily does) only proves the orchestrator's *own* logic
+is correct — it can't by itself prove the id it's keyed on is actually
+stable in production, since that id is computed one layer up, by a
+different service, from data the Agent never sees. See
+`tests/integration/test_channels_api.py`'s
+`test_three_plain_non_threaded_slack_messages_from_the_same_dba_share_one_conversation`
+for the reproduction, and `tests/unit/test_environment_clarification.py`'s
+`test_the_live_three_turn_sequence_is_handled_correctly_given_one_stable_conversation`
+for the confirmation that, given that one stable id, the orchestrator side
+already had no remaining gap.
+
 ## The identity re-resolution point (why "UX check" ≠ "security boundary")
 
 Channel Adapters and the Agent both *can* check whether a channel account is

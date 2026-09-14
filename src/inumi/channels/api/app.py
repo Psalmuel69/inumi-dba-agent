@@ -45,6 +45,52 @@ class DevChatRequest(BaseModel):
     conversation_id: str = "dev-conversation"
 
 
+def _slack_conversation_id(channel: str, slack_user_id: str, thread_ts: str) -> str:
+    """The Agent-side `conversation_id` this Slack event belongs to.
+
+    A threaded reply (`thread_ts` non-empty) always scopes to that thread,
+    unchanged — deliberately shared by whoever replies in it, since a
+    Slack thread is inherently one collaborative investigation.
+
+    An ordinary, non-threaded message (`thread_ts` empty) used to fall
+    back to `event["ts"]` — that message's own timestamp, unique to it
+    alone and never matched by any later message. That silently gave
+    *every* plain follow-up typed into the channel its own brand-new,
+    empty `ConversationState` — verified live: a real DBA's entirely
+    ordinary "and what about replication?", typed straight into a channel
+    that (by design — see the webhook's own no-bot-id/message-type check)
+    responds to plain messages with no @-mention required, arrived with no
+    `thread_ts` of its own (it was never posted as a threaded reply, just
+    the next line in the channel) and got a fresh conversation with none
+    of `state.database_context`'s already-established environment/
+    instance in it — and a follow-up bare "development" answer to the
+    resulting misfire got classified as chitchat instead of resuming,
+    because there was no `state.investigation` left to resume either.
+    Every symptom `agent.orchestrator`'s own environment-persistence logic
+    (see ARCHITECTURE.md's "A known environment must survive across
+    investigations") was built to prevent still happened, because the
+    conversation itself was silently a different one every single time —
+    the orchestrator's own state-persistence logic was never actually
+    reached with the same `ConversationState` twice. Confirmed by direct
+    trace of `agent.orchestrator.handle_message`/`context_manager.
+    ContextManager.get_or_create`: neither has any bug reachable when
+    `conversation_id` is actually held constant across turns — see
+    `tests/unit/test_environment_clarification.py`'s
+    `test_a_later_fresh_investigation_never_reasks_for_an_already_known_environment`,
+    which exercises the exact same zero-named-entity follow-up sentence
+    shape and passes.
+
+    Fixed by scoping a non-threaded message to `(channel, user)` instead
+    of `(channel, message)`: every plain message the same DBA sends in
+    this channel, outside of an explicit thread, is now one continuing
+    conversation — exactly what `state.database_context` and the
+    fresh-vs-resume `investigation.is_concluded` gate in
+    `orchestrator.handle_message` already exist to manage over time —
+    while two different DBAs typing in the same channel still get
+    independent conversations, never crossed."""
+    return f"slack:{channel}:{thread_ts or slack_user_id}"
+
+
 def create_app(settings: Settings | None = None, *, agent_transport=None) -> FastAPI:
     settings = settings or get_settings()
     settings.validate_for_production()
@@ -197,7 +243,9 @@ def create_app(settings: Settings | None = None, *, agent_transport=None) -> Fas
                 )
                 return {"ok": True}
 
-            conversation_id = f"slack:{event.get('channel')}:{event.get('thread_ts', event.get('ts'))}"
+            conversation_id = _slack_conversation_id(
+                event.get("channel", ""), slack_user_id, event.get("thread_ts", "")
+            )
             reply = await _call_agent_chat(
                 channel="slack",
                 channel_account_id=slack_user_id,
