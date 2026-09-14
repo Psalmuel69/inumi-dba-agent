@@ -307,3 +307,157 @@ def test_total_playbook_count_after_the_storage_transaction_log_split():
     # combined storage playbook into storage + transaction_log adds one
     # more, for 13 total.
     assert len(PLAYBOOKS) == 13
+
+
+# --- deepening the remaining 7 playbooks (deadlocks, blocking, high_memory, ---
+# --- replication, backups, errors, general_health) against the same ---
+# --- external playbook specification already used for the slow_queries/ ---
+# --- high_cpu/connections/storage/transaction_log rounds above — see ---
+# --- library.py's PLAYBOOKS tuple and ARCHITECTURE.md's playbook section ---
+
+
+def test_deadlocks_playbook_steps_include_a_session_duration_check():
+    playbook = get_playbook("deadlocks")
+    assert playbook is not None
+    assert [step.tool_id for step in playbook.steps] == [
+        "database.get_deadlocks",
+        "database.get_blocking_sessions",
+        "database.get_running_queries",
+        "database.get_sessions",
+    ]
+
+
+def test_deadlocks_guidance_names_root_cause_categories_and_asks_for_the_cycle():
+    playbook = get_playbook("deadlocks")
+    assert playbook is not None
+    guidance = playbook.conclusion_guidance
+    for phrase in (
+        "lock-acquisition cycle", "deadlock victim", "access order",
+        "missing index", "long-running transaction", "lock escalation",
+        "isolation level", "foreign-key", "maintenance operation",
+    ):
+        assert phrase in guidance, f"expected {phrase!r} in deadlocks guidance"
+
+
+def test_blocking_guidance_classifies_the_blocker_and_tests_hypotheses():
+    playbook = get_playbook("blocking")
+    assert playbook is not None
+    guidance = playbook.conclusion_guidance
+    for phrase in (
+        "idle-in-transaction", "reporting query", "DDL statement",
+        "maintenance operation", "replication/log-shipping process",
+        "longest single wait", "spreading", "missing index",
+        "lock escalation", "isolation level", "connection/transaction leak",
+        "infrastructure slowdown",
+    ):
+        assert phrase in guidance, f"expected {phrase!r} in blocking guidance"
+
+
+def test_high_memory_guidance_separates_pressure_sources_and_gates_restart():
+    playbook = get_playbook("high_memory")
+    assert playbook is not None
+    guidance = playbook.conclusion_guidance
+    for phrase in (
+        "the database engine's own allocations", "the host", "container/VM",
+        "another service", "oversized memory grant", "poor query plan",
+        "excessive concurrent sessions", "genuine leak", "host-level overcommitment",
+        "last resort", "explicit DBA approval", "never the first recommendation",
+    ):
+        assert phrase in guidance, f"expected {phrase!r} in high_memory guidance"
+    # Never claim host/container memory is actually measured — this system
+    # has no host-level diagnostic tool, matching the honesty standard the
+    # configuration_review playbook already sets for its own scope limits.
+    assert "isn't something this system can directly measure" in guidance
+
+
+def test_replication_playbook_steps_are_unchanged_by_the_guidance_enrichment():
+    # No new step was added here — a 4th step (e.g. get_storage) would push
+    # this playbook's step count to the same boundary that made
+    # test_stuck_observation_loop's replication regression test start
+    # burning the full 6-turn cap instead of exiting early on a stuck model
+    # (interaction between _MAX_CONSECUTIVE_RECORD_OBSERVATIONS and
+    # _MAX_INVESTIGATION_TURNS in orchestrator.py, which this task does not
+    # touch) — so this round only deepens conclusion_guidance for replication.
+    playbook = get_playbook("replication")
+    assert playbook is not None
+    assert [step.tool_id for step in playbook.steps] == [
+        "database.get_replication_status",
+        "database.get_health",
+        "database.get_wait_statistics",
+    ]
+
+
+def test_replication_guidance_covers_risk_exposure_not_just_the_lag_number():
+    playbook = get_playbook("replication")
+    assert playbook is not None
+    guidance = playbook.conclusion_guidance
+    for phrase in (
+        "stale-read risk", "RPO/RTO exposure", "primary-side risk",
+        "growing or holding steady", "applications or read paths",
+        "network latency", "long-running transaction", "disconnected or dropped replica",
+        "replication-slot retention", "apply/redo worker", "undersized",
+    ):
+        assert phrase in guidance, f"expected {phrase!r} in replication guidance"
+
+
+def test_backups_guidance_calculates_the_recovery_point_gap_and_classifies_severity():
+    playbook = get_playbook("backups")
+    assert playbook is not None
+    guidance = playbook.conclusion_guidance
+    for phrase in (
+        "recovery-point gap", "restore-test history",
+        "informational", "warning", "high", "critical",
+    ):
+        assert phrase in guidance, f"expected {phrase!r} in backups guidance"
+
+
+def test_errors_playbook_steps_include_blocking_and_deadlock_correlation():
+    playbook = get_playbook("errors")
+    assert playbook is not None
+    assert [step.tool_id for step in playbook.steps] == [
+        "database.get_error_logs",
+        "database.get_health",
+        "database.get_blocking_sessions",
+        "database.get_deadlocks",
+        "database.get_running_queries",
+    ]
+
+
+def test_errors_guidance_classifies_findings_into_categories_and_correlates_signals():
+    playbook = get_playbook("errors")
+    assert playbook is not None
+    guidance = playbook.conclusion_guidance
+    for category in (
+        "availability", "authentication", "authorization", "storage", "memory",
+        "CPU", "network", "corruption", "backup", "replication", "locking",
+        "configuration", "security", "application integration",
+    ):
+        assert category in guidance, f"expected category {category!r} in errors guidance"
+    assert "Correlate against the other signals gathered" in guidance
+
+
+def test_general_health_guidance_requires_an_explicit_status_classification():
+    playbook = get_playbook("general_health")
+    assert playbook is not None
+    guidance = playbook.conclusion_guidance
+    for status in ("healthy", "informational", "warning", "high", "critical", "unknown"):
+        assert status in guidance, f"expected status {status!r} in general_health guidance"
+    # The DBA must get an equally complete/confident answer whether or not
+    # anything is actually wrong — not a vaguer reply on the all-clear path.
+    assert "just as complete and confident" in guidance
+
+
+def test_deepened_playbooks_stay_within_the_shared_turn_budget():
+    # _MAX_INVESTIGATION_TURNS is 6 (orchestrator.py) and each playbook step
+    # spends one turn before the model ever gets its own (unrestricted) turn
+    # to conclude or extend — a playbook with 6+ steps would exhaust the
+    # entire budget before that final call ever happens, silently changing
+    # the "LLM is asked exactly once" property the whole feature relies on.
+    # Every playbook, including the 7 deepened here, must leave at least one
+    # turn free.
+    _MAX_INVESTIGATION_TURNS = 6
+    for playbook in PLAYBOOKS:
+        assert len(playbook.steps) < _MAX_INVESTIGATION_TURNS, (
+            f"{playbook.playbook_id} has {len(playbook.steps)} steps, leaving no "
+            "turn free for the model's own unrestricted conclude/extend call"
+        )

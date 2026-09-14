@@ -88,11 +88,33 @@ PLAYBOOKS: tuple[Playbook, ...] = (
             _step("database.get_deadlocks", "Pulling recent deadlock graphs."),
             _step("database.get_blocking_sessions", "Checking for blocking still in progress."),
             _step("database.get_running_queries", "Checking what's running now around the same objects."),
+            _step(
+                "database.get_sessions",
+                "Checking session durations for long-running transactions that could "
+                "be contributing to the lock-acquisition cycle.",
+            ),
         ),
         conclusion_guidance=(
-            "State which sessions/queries were involved in the deadlock graph(s), "
-            "which was chosen as the deadlock victim, and whether the same access "
-            "pattern is still occurring."
+            "Reconstruct the lock-acquisition cycle from the deadlock graph(s): "
+            "which sessions/queries were involved, what each held and what each "
+            "was waiting on, and in what order. State which session was chosen as "
+            "the deadlock victim and whether the same access pattern is still "
+            "occurring now. Then identify the root-cause category the evidence "
+            "actually supports, rather than a generic 'a deadlock happened': "
+            "inconsistent table/object access order across the competing "
+            "transactions, a missing index forcing a broader scan-and-lock "
+            "footprint than necessary, a long-running transaction (check session "
+            "durations) holding locks longer than needed, a large batch operation "
+            "or lock escalation turning many row locks into a table lock, an "
+            "isolation level stricter than the workload needs, a trigger or "
+            "foreign-key check acquiring an additional unexpected lock, or a "
+            "maintenance operation contending with normal traffic. If more than "
+            "one deadlock graph was returned, note how often this pattern is "
+            "recurring and whether it clusters around a particular time. "
+            "Recommend a fix that matches the actual root cause — consistent "
+            "access order, an index, smaller transactions/batches, "
+            "application-level retry handling, an isolation-level review, or "
+            "separating conflicting workloads — rather than generic advice."
         ),
     ),
     Playbook(
@@ -111,10 +133,28 @@ PLAYBOOKS: tuple[Playbook, ...] = (
         ),
         conclusion_guidance=(
             "Identify the head blocker (session, query, how long it's held the "
-            "lock) and who's waiting on it. Recommend cancelling the blocking "
-            "query or killing the session only if it's clearly safe to do so — "
-            "never propose it as the only option without saying what it would "
-            "affect."
+            "lock) and who's waiting on it. Classify what the head blocker "
+            "actually is, not just that it's blocking: an active/long-running "
+            "query, an idle-in-transaction session (its statement finished but "
+            "the transaction was never committed/rolled back), a large batch "
+            "operation, a reporting query, a DDL statement, a maintenance "
+            "operation, a replication/log-shipping process, or unknown if the "
+            "evidence doesn't clearly say. Quantify the impact: how many "
+            "sessions are blocked, the longest single wait, and whether the "
+            "chain is static or spreading (more waiters appearing behind the "
+            "same head blocker). Then test — not just narrate — the plausible "
+            "hypotheses against the evidence actually gathered: a long-running "
+            "transaction holding locks past when they were needed, a missing "
+            "index forcing broader locking, lock escalation to a table-level "
+            "lock, DDL contention (a schema change blocking readers/writers), "
+            "an isolation level stricter than necessary, an application "
+            "connection/transaction leak (a session left open after its work "
+            "finished), a large batch operation, or a broader infrastructure "
+            "slowdown making every query — including the blocker itself — run "
+            "long. State which hypothesis the evidence supports and which it "
+            "rules out. Recommend cancelling the blocking query or killing the "
+            "session only if it's clearly safe to do so — never propose it as "
+            "the only option without saying what it would affect."
         ),
     ),
     Playbook(
@@ -192,7 +232,29 @@ PLAYBOOKS: tuple[Playbook, ...] = (
         conclusion_guidance=(
             "State whether the configured memory limit looks undersized for the "
             "observed load, or whether a small number of queries are driving "
-            "the pressure."
+            "the pressure. Before recommending anything, work out where the "
+            "pressure is actually coming from: the database engine's own "
+            "allocations (buffer pool/shared buffers/plan cache), a specific "
+            "query or small set of queries, or pressure outside the engine "
+            "entirely (the host, a container/VM memory limit, or another "
+            "service sharing the box) — note plainly that host/container-level "
+            "memory isn't something this system can directly measure, so treat "
+            "that as a hypothesis to raise when the in-engine evidence doesn't "
+            "explain the pressure, not a measured finding. Validate — don't "
+            "just assume — each plausible hypothesis against the evidence "
+            "gathered: an oversized memory grant/setting relative to the actual "
+            "workload, a poor query plan requesting more memory than it needs "
+            "(e.g. a bad cardinality estimate driving a large sort/hash), "
+            "excessive concurrent sessions each holding their own allocation, a "
+            "genuine leak (usage that only climbs, with no corresponding "
+            "drop), a configuration value left at an unreasonable default, "
+            "host-level overcommitment, or the instance being undersized for "
+            "its actual load. Treat a restart as a last resort that requires "
+            "explicit DBA approval — never the first recommendation, and never "
+            "proposed unprompted before the above has actually been checked; "
+            "when it is worth mentioning, say plainly that it only clears "
+            "symptoms like a leak or plan-cache bloat and does not fix a "
+            "genuine undersizing or misconfiguration, which will recur."
         ),
     ),
     Playbook(
@@ -236,7 +298,24 @@ PLAYBOOKS: tuple[Playbook, ...] = (
         ),
         conclusion_guidance=(
             "State the current lag (or sync state) per replica and whether it's "
-            "within the expected range for this environment."
+            "within the expected range for this environment — but go beyond the "
+            "raw number: assess stale-read risk for anything reading from that "
+            "replica, RPO/RTO exposure if the primary failed over right now, "
+            "whether the lag is itself creating primary-side risk (a lagging or "
+            "disconnected replica can hold WAL/log open, which shows up as "
+            "unexpected storage growth on the primary — worth a separate storage "
+            "check if that's suspected), whether the lag/queue is growing or "
+            "holding steady, and which applications or read paths are actually "
+            "affected. Validate the likely cause "
+            "against the evidence rather than only reporting the lag figure: "
+            "network latency between primary and replica, storage or CPU "
+            "pressure on the replica itself, an unusually large write volume on "
+            "the primary outpacing apply capacity, a long-running transaction "
+            "on the replica blocking apply, a disconnected or dropped replica, "
+            "replication-slot retention holding WAL/log no longer being "
+            "consumed, an apply/redo worker that has stalled or errored, or the "
+            "replica being undersized for the write rate it needs to keep up "
+            "with."
         ),
     ),
     Playbook(
@@ -251,7 +330,24 @@ PLAYBOOKS: tuple[Playbook, ...] = (
         conclusion_guidance=(
             "State the time and status of the most recent full/log backup and "
             "whether it's within the expected recovery-point objective for this "
-            "environment."
+            "environment — and do the actual arithmetic: explicitly calculate "
+            "and state the recovery-point gap (time elapsed since the last "
+            "successful full backup, and separately since the last successful "
+            "log/differential backup) against the environment's expected RPO, "
+            "rather than only reporting whether the most recent job "
+            "'succeeded' or 'failed'. If the backup history data returned "
+            "includes any signal about restore-test history (e.g. a last "
+            "restore-test timestamp or status), report it; if no such signal "
+            "is present, say plainly that restore-test history isn't available "
+            "from this data rather than guessing or omitting it silently. "
+            "Classify the overall finding with an explicit severity instead of "
+            "a flat pass/fail: informational (healthy, comfortably within "
+            "RPO), warning (approaching the RPO boundary, or a single "
+            "non-critical job failed), high (the RPO is already exceeded, or "
+            "the full-backup chain is broken), or critical (no successful "
+            "backup within a large multiple of the RPO, or backups have been "
+            "failing repeatedly with no current recovery point achievable). "
+            "State which severity applies and why."
         ),
     ),
     Playbook(
@@ -324,12 +420,34 @@ PLAYBOOKS: tuple[Playbook, ...] = (
         steps=(
             _step("database.get_error_logs", "Pulling recent error log entries."),
             _step("database.get_health", "Establishing a baseline."),
+            _step(
+                "database.get_blocking_sessions",
+                "Checking for current blocking to correlate against any lock-timeout "
+                "or blocking-related error entries.",
+            ),
+            _step(
+                "database.get_deadlocks",
+                "Checking for recent deadlock graphs to correlate against any "
+                "deadlock-related error entries.",
+            ),
             _step("database.get_running_queries", "Checking what's currently executing."),
         ),
         conclusion_guidance=(
             "Summarize the distinct error(s) found (not just a raw dump), how "
             "recent/frequent each is, and which looks most likely to be the "
-            "reported problem."
+            "reported problem. Classify each distinct finding into a category "
+            "rather than a raw list of log lines — pick whichever of these "
+            "actually fits: availability, authentication, authorization, "
+            "storage, memory, CPU, network, corruption, backup, replication, "
+            "locking, configuration, security, or application integration. "
+            "Correlate against the other signals gathered in this same "
+            "investigation when relevant, rather than treating log entries in "
+            "isolation: a lock-timeout or deadlock-related error should be "
+            "cross-checked against the blocking-chain and deadlock-graph "
+            "evidence gathered above to say whether it's still happening or "
+            "was transient, and note when a logged error's underlying "
+            "condition no longer appears in the other evidence gathered (it "
+            "looks resolved) versus still being present now (still ongoing)."
         ),
     ),
     Playbook(
@@ -348,8 +466,20 @@ PLAYBOOKS: tuple[Playbook, ...] = (
             _step("database.get_storage", "Checking storage headroom."),
         ),
         conclusion_guidance=(
-            "Give a concise overall status (healthy / attention needed) and "
-            "call out anything that stood out, even if nothing looks urgent."
+            "Give a concise overall status and call out anything that stood "
+            "out, even if nothing looks urgent. Classify the overall finding "
+            "with one explicit status word — healthy, informational, warning, "
+            "high, critical, or unknown (use unknown only when the "
+            "diagnostics themselves failed or returned unusable data, never as "
+            "a hedge when they succeeded) — rather than a loose narrative. "
+            "Crucially: an all-clear answer must look just as complete and "
+            "confident as a problem answer, never vaguer or shorter just "
+            "because nothing was wrong — a DBA reading the reply should not be "
+            "able to tell, from how thin it is, whether things were actually "
+            "checked and found fine versus not checked carefully. State "
+            "plainly what was checked (current activity, dominant wait types, "
+            "storage headroom) and that nothing concerning was found there, "
+            "rather than a one-line 'looks fine'."
         ),
     ),
     Playbook(

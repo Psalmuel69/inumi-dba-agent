@@ -294,3 +294,64 @@ async def test_configuration_review_playbook_runs_its_two_steps_with_zero_interm
     # must reach the LLM call, not just live in the source file.
     assert "hardware" in problem or "instance-class" in problem
     assert reply.status == "ok"
+
+
+# --- deepened playbooks (deadlocks, errors) that gained new steps against ---
+# --- the same external playbook specification — see agent.playbooks.library ---
+
+
+@pytest.mark.asyncio
+async def test_deadlocks_playbook_runs_its_four_steps_with_zero_intermediate_llm_calls():
+    """The deadlocks playbook gained a `get_sessions` step (checking for
+    long-running transactions contributing to the lock cycle) — it must
+    still run entirely before the LLM is ever asked anything, and the LLM
+    must be asked exactly once, to conclude."""
+    state, investigation = _state_and_investigation(playbook_id="deadlocks")
+    tool_client = _FakeToolClient()
+    llm = _FakeLLM(actions=[Conclude(summary="Identified the lock cycle.")])
+    orchestrator = _orchestrator(tool_client)
+
+    reply = await orchestrator._run_investigation_loop(
+        state, investigation, _ALL_READ_TOOL_IDS, "dev", "dba_l2@example.com", llm, None
+    )
+
+    assert [r.tool_id for r in tool_client.requests] == [
+        "database.get_deadlocks",
+        "database.get_blocking_sessions",
+        "database.get_running_queries",
+        "database.get_sessions",
+    ]
+    assert len(llm.calls) == 1
+    problem = llm.calls[0]["problem_statement"]
+    assert "Deadlock Investigation" in problem
+    assert "lock-acquisition cycle" in problem  # from the playbook's own conclusion_guidance
+    assert reply.status == "ok"
+
+
+@pytest.mark.asyncio
+async def test_errors_playbook_runs_its_five_steps_with_zero_intermediate_llm_calls():
+    """The errors playbook gained `get_blocking_sessions` and `get_deadlocks`
+    steps (correlating error-log findings against other signals) — five
+    steps total, still one turn short of the shared 6-turn budget, so the
+    model must still get its own unrestricted turn at the end."""
+    state, investigation = _state_and_investigation(playbook_id="errors")
+    tool_client = _FakeToolClient()
+    llm = _FakeLLM(actions=[Conclude(summary="Classified the errors found.")])
+    orchestrator = _orchestrator(tool_client)
+
+    reply = await orchestrator._run_investigation_loop(
+        state, investigation, _ALL_READ_TOOL_IDS, "dev", "dba_l2@example.com", llm, None
+    )
+
+    assert [r.tool_id for r in tool_client.requests] == [
+        "database.get_error_logs",
+        "database.get_health",
+        "database.get_blocking_sessions",
+        "database.get_deadlocks",
+        "database.get_running_queries",
+    ]
+    assert len(llm.calls) == 1
+    problem = llm.calls[0]["problem_statement"]
+    assert "Error Log Investigation" in problem
+    assert "Correlate against the other signals gathered" in problem
+    assert reply.status == "ok"

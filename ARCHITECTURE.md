@@ -148,6 +148,44 @@ Within the turn/observation bounds, a step is decided one of two ways:
   failed/stalled log backup, log shipping/mirroring/snapshots, or
   maintenance) the evidence supports, not just report current usage.
 
+  A further pass against that same external playbook specification deepened
+  the remaining 7 playbooks that hadn't had this treatment yet: `deadlocks`,
+  `blocking`, `high_memory`, `replication`, `backups`, `errors`, and
+  `general_health`. Each now asks the model to test explicit hypotheses
+  (root-cause categories for deadlocks and blocking; pressure-source
+  categories for high memory; risk/exposure dimensions beyond the raw
+  number for replication lag; a calculated recovery-point gap and explicit
+  severity for backups; a finding taxonomy plus cross-checking against
+  other gathered signals for error logs; an explicit status word for
+  general health) rather than reporting raw findings. Two steps were added
+  where a genuinely missing, already-registered diagnostic closed a real
+  gap: `deadlocks` now also calls `get_sessions` (checking for long-running
+  transactions contributing to the lock cycle), and `errors` now also
+  calls `get_blocking_sessions` and `get_deadlocks` (so a lock-timeout or
+  deadlock-flavored log entry can actually be correlated against current
+  evidence instead of only the raw log text). A step was deliberately
+  *not* added to `replication` for the analogous "check storage for
+  retained WAL" case — `replication` already sat at 3 steps, and a 4th
+  would have pushed it to the exact turn-count boundary where
+  `_MAX_CONSECUTIVE_RECORD_OBSERVATIONS`'s check-before-call ordering (see
+  the loop above) stops catching a stuck model early and lets it burn the
+  full `_MAX_INVESTIGATION_TURNS` cap instead — the live-verified regression
+  `test_stuck_observation_loop.py::test_the_replication_playbook_no_longer_
+  burns_the_full_turn_cap` pins exactly this, and every playbook's step
+  count is now asserted to leave at least one turn free
+  (`test_deepened_playbooks_stay_within_the_shared_turn_budget`). No new
+  diagnostic tool was invented for any of the 7 — every addition is an
+  existing, already-registered read tool from `gateway/domain/tool_catalog
+  .py`. As with `configuration_review`'s own scoping note, this round is
+  honest about what the system still can't do: `high_memory`'s guidance
+  now explicitly says host/container-level memory isn't something this
+  system can directly measure (no host/OS-level diagnostic tool exists
+  here) rather than claiming to assess it, and none of the 7 claim any
+  capacity forecasting or trend-over-time analysis — Inumi has no
+  historical/time-series data store, so every playbook's conclusion is
+  still built only from what its own diagnostic calls returned in this one
+  investigation.
+
 **A playbook's fixed steps are a floor, not a ceiling.** That first
 post-playbook call is *not* restricted to `conclude` — `_next_playbook_
 action` returning `None` (steps exhausted) simply makes the loop fall
