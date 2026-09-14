@@ -222,6 +222,57 @@ async def test_playbooks_command_lists_every_playbook():
 
 
 @pytest.mark.asyncio
+async def test_transaction_log_playbook_runs_its_four_steps_with_zero_intermediate_llm_calls():
+    """The split-off transaction_log playbook (see agent.playbooks.library —
+    previously folded into the combined 'storage' playbook with no
+    replication/backup checks at all) must run its full step sequence,
+    including the replication-lag and backup-status checks that are the
+    whole point of the split, before the LLM is asked anything."""
+    state, investigation = _state_and_investigation(playbook_id="transaction_log")
+    tool_client = _FakeToolClient()
+    llm = _FakeLLM(actions=[Conclude(summary="Identified the reuse blocker.")])
+    orchestrator = _orchestrator(tool_client)
+
+    reply = await orchestrator._run_investigation_loop(
+        state, investigation, _ALL_READ_TOOL_IDS, "dev", "dba_l2@example.com", llm, None
+    )
+
+    assert [r.tool_id for r in tool_client.requests] == [
+        "database.get_transaction_log",
+        "database.get_replication_status",
+        "database.get_backup_status",
+        "database.get_health",
+    ]
+    assert len(llm.calls) == 1
+    problem = llm.calls[0]["problem_statement"]
+    assert "Transaction Log Investigation" in problem
+    assert "replication lag" in problem  # from the playbook's own conclusion_guidance
+    assert reply.status == "ok"
+
+
+@pytest.mark.asyncio
+async def test_storage_playbook_runs_its_two_steps_post_split():
+    """The `storage` playbook, post-split, is capacity-only (get_storage +
+    get_health) — it must no longer run the old combined 3-step sequence
+    that included get_transaction_log."""
+    state, investigation = _state_and_investigation(playbook_id="storage")
+    tool_client = _FakeToolClient()
+    llm = _FakeLLM(actions=[Conclude(summary="Capacity looks fine.")])
+    orchestrator = _orchestrator(tool_client)
+
+    reply = await orchestrator._run_investigation_loop(
+        state, investigation, _ALL_READ_TOOL_IDS, "dev", "dba_l2@example.com", llm, None
+    )
+
+    assert [r.tool_id for r in tool_client.requests] == [
+        "database.get_storage",
+        "database.get_health",
+    ]
+    assert len(llm.calls) == 1
+    assert reply.status == "ok"
+
+
+@pytest.mark.asyncio
 async def test_configuration_review_playbook_runs_its_two_steps_with_zero_intermediate_llm_calls():
     state, investigation = _state_and_investigation(playbook_id="configuration_review")
     tool_client = _FakeToolClient()

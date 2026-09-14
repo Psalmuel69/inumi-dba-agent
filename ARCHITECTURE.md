@@ -94,10 +94,11 @@ Within the turn/observation bounds, a step is decided one of two ways:
   next tool from the ones it was offered, or concludes.
 - **Playbook-driven**: on a new investigation, `agent.playbooks.library
   .match_playbook` runs a deterministic, zero-LLM-call keyword match
-  against the problem text. For 12 known scenarios (slow queries, high CPU,
+  against the problem text. For 13 known scenarios (slow queries, high CPU,
   high memory, blocking, deadlocks, connection saturation, replication lag,
-  backup health, storage/transaction log, error logs, general health,
-  configuration tuning review), this picks a fixed, named sequence of
+  backup health, storage capacity, transaction log reuse, error logs,
+  general health, configuration tuning review), this picks a fixed, named
+  sequence of
   read-only diagnostic calls. Each step of a matched playbook is submitted
   directly — **no LLM call in between** — and once the sequence completes,
   the LLM is called again to interpret everything gathered (nudged by the
@@ -115,6 +116,19 @@ Within the turn/observation bounds, a step is decided one of two ways:
   misconfiguration flags rather than true capacity-based sizing, since
   Inumi's server registry has no instance-class/hardware-sizing data to
   size against.
+
+  Checked against a separate external playbook specification: the original
+  combined `storage` playbook (disk/capacity *and* transaction log growth,
+  3 steps, one shared trigger list) never checked replication lag or backup
+  status — two of the most common real reasons a transaction log can't
+  reuse space. Split into `storage` (disk/capacity only — `get_storage`,
+  `get_health`) and a new `transaction_log` playbook (`get_transaction_log`,
+  `get_replication_status`, `get_backup_status`, `get_health`), each with
+  its own trigger list and a `conclusion_guidance` that matches its actual
+  hypothesis set — `transaction_log`'s specifically asks the model to name
+  which concrete reuse blocker (active/long transaction, replication lag,
+  failed/stalled log backup, log shipping/mirroring/snapshots, or
+  maintenance) the evidence supports, not just report current usage.
 
 **A playbook's fixed steps are a floor, not a ceiling.** That first
 post-playbook call is *not* restricted to `conclude` — `_next_playbook_

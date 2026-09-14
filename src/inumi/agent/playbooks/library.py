@@ -256,23 +256,61 @@ PLAYBOOKS: tuple[Playbook, ...] = (
     ),
     Playbook(
         playbook_id="storage",
-        name="Storage / Transaction Log Investigation",
-        description="Disk space, storage growth, or transaction log growth.",
+        name="Storage Capacity Investigation",
+        description="Disk space or overall storage capacity risk (not specifically the transaction log).",
         triggers=(
             "disk space", "disk full", "running out of space", "out of disk",
-            "storage", "transaction log full", "log growing", "log full",
-            "log is full", "wal growing", "out of space",
+            "out of space", "storage",
         ),
         steps=(
             _step("database.get_storage", "Checking overall storage/space utilization."),
-            _step("database.get_transaction_log", "Checking transaction log / WAL usage."),
             _step("database.get_health", "Establishing a baseline."),
         ),
         conclusion_guidance=(
-            "State current usage vs. capacity, and whether the transaction log "
-            "specifically (vs. data files) is the growth driver — that usually "
-            "points to a long-running or uncommitted transaction, or a paused "
-            "log backup chain."
+            "State current usage vs. capacity, and — if the evidence points to "
+            "one — what's actually driving growth: unexpected data growth, "
+            "transaction log retention, a failed/paused backup chain, table/"
+            "index bloat, an archive/purge job that stopped running, "
+            "auto-growth events, replication backlog holding old WAL/log "
+            "segments, or storage throttling. If the transaction log "
+            "specifically looks like the driver, say so explicitly and note "
+            "that the transaction_log playbook (triggered by phrasing like "
+            "'transaction log full' or 'log won't truncate') investigates log "
+            "reuse blockers in depth."
+        ),
+    ),
+    Playbook(
+        playbook_id="transaction_log",
+        name="Transaction Log Investigation",
+        description="The transaction log (or WAL) growing, filling up, or failing to reuse space.",
+        triggers=(
+            "transaction log full", "transaction log growth", "log growing",
+            "log full", "log is full", "wal growing", "log can't reuse",
+            "log cannot reuse", "log won't truncate", "log will not truncate",
+            "log reuse", "transaction log",
+        ),
+        steps=(
+            _step("database.get_transaction_log", "Checking transaction log / WAL usage."),
+            _step(
+                "database.get_replication_status",
+                "Checking for a lagging replica holding the log/WAL open.",
+            ),
+            _step(
+                "database.get_backup_status",
+                "Checking for a stalled or failed log backup blocking log reuse.",
+            ),
+            _step("database.get_health", "Establishing a baseline."),
+        ),
+        conclusion_guidance=(
+            "Identify which concrete reuse blocker is actually responsible, "
+            "not just current log usage: an active or long-running "
+            "transaction, replication lag (a lagging replica holding the log "
+            "open), a failed or stalled log backup (the single most common "
+            "reuse blocker on SQL Server, and often tied to WAL retention/"
+            "archiving on Postgres), log shipping/mirroring/snapshots holding "
+            "old log records, or a maintenance operation blocking log reuse. "
+            "Name the specific blocker the evidence supports rather than "
+            "describing usage alone."
         ),
     ),
     Playbook(

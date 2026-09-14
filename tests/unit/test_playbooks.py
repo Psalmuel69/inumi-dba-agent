@@ -59,7 +59,8 @@ def test_matcher_picks_the_intended_playbook_for_real_world_phrasings():
         "getting connection refused, too many connections": "connections",
         "replication lag on the standby is growing": "replication",
         "did last night's backup job fail?": "backups",
-        "the transaction log is full on CoreBanking": "storage",
+        "the transaction log is full on CoreBanking": "transaction_log",
+        "we're running out of disk space on postgres-local": "storage",
         "seeing a lot of errors in the error log": "errors",
         "can you do a health check on CoreBanking": "general_health",
         "can you tune this instance for us?": "configuration_review",
@@ -186,3 +187,123 @@ def test_configuration_review_guidance_scopes_itself_honestly_and_names_engine_p
     # The scoping limitation must also be stated in the description, not just
     # buried in the conclusion guidance.
     assert "instance-class" in description or "hardware" in description
+
+
+# --- storage / transaction_log split (previously one combined "Storage / ---
+# --- Transaction Log Investigation" playbook with 3 steps and no ---
+# --- replication/backup checks at all — see library.py's PLAYBOOKS tuple) ---
+
+
+def test_storage_playbook_is_now_capacity_only():
+    playbook = get_playbook("storage")
+    assert playbook is not None
+    assert [step.tool_id for step in playbook.steps] == [
+        "database.get_storage",
+        "database.get_health",
+    ]
+    # The old combined playbook's transaction-log-specific triggers must no
+    # longer live on `storage` — they belong to `transaction_log` now.
+    assert "transaction log full" not in playbook.triggers
+    assert "log growing" not in playbook.triggers
+    assert "wal growing" not in playbook.triggers
+
+
+def test_transaction_log_playbook_exists_with_the_expected_steps():
+    playbook = get_playbook("transaction_log")
+    assert playbook is not None
+    assert playbook.name == "Transaction Log Investigation"
+    assert [step.tool_id for step in playbook.steps] == [
+        "database.get_transaction_log",
+        "database.get_replication_status",
+        "database.get_backup_status",
+        "database.get_health",
+    ]
+
+
+def test_transaction_log_guidance_names_the_concrete_reuse_blockers():
+    playbook = get_playbook("transaction_log")
+    assert playbook is not None
+    guidance = playbook.conclusion_guidance
+    for phrase in (
+        "long-running", "replication lag", "failed or stalled log backup",
+        "log shipping", "maintenance",
+    ):
+        assert phrase in guidance, f"expected {phrase!r} in transaction_log guidance"
+
+
+def test_a_bare_storage_question_still_routes_to_the_capacity_playbook():
+    playbook = match_playbook("we're running out of storage on prod-db-01")
+    assert playbook is not None
+    assert playbook.playbook_id == "storage"
+
+
+def test_transaction_log_phrasings_route_to_transaction_log_not_storage():
+    cases = [
+        "the transaction log is full on CoreBanking",
+        "our log is full and won't truncate",
+        "the wal growing fast on postgres-local",
+        "the transaction log can't reuse space",
+        "log won't truncate even after a checkpoint",
+    ]
+    for text in cases:
+        playbook = match_playbook(text)
+        assert playbook is not None, f"expected a match for {text!r}"
+        assert playbook.playbook_id == "transaction_log", (
+            f"{text!r} matched {playbook.playbook_id!r}, expected 'transaction_log'"
+        )
+
+
+def test_disk_space_phrasings_still_route_to_storage_not_transaction_log():
+    cases = [
+        "disk space is running low on prod-db-01",
+        "we're out of disk space",
+        "running out of space on the data volume",
+    ]
+    for text in cases:
+        playbook = match_playbook(text)
+        assert playbook is not None, f"expected a match for {text!r}"
+        assert playbook.playbook_id == "storage", (
+            f"{text!r} matched {playbook.playbook_id!r}, expected 'storage'"
+        )
+
+
+def test_transaction_log_does_not_overlap_backups_triggers():
+    # "backup" and "transaction log" are two different questions ("is my
+    # last backup okay" vs. "why can't my transaction log reuse space") —
+    # their trigger sets must stay clearly distinct even though
+    # transaction_log's steps include a backup-status check.
+    backups = get_playbook("backups")
+    transaction_log = get_playbook("transaction_log")
+    assert backups is not None and transaction_log is not None
+    assert not (set(backups.triggers) & set(transaction_log.triggers))
+    assert match_playbook("did last night's backup job fail?").playbook_id == "backups"
+    assert match_playbook("the transaction log is full").playbook_id == "transaction_log"
+    # Neither playbook's triggers should fire on the other's canonical phrasing.
+    for trigger in backups.triggers:
+        assert match_playbook(f"checking {trigger} now").playbook_id != "transaction_log"
+
+
+def test_transaction_log_does_not_overlap_replication_or_general_health_triggers():
+    replication = get_playbook("replication")
+    general_health = get_playbook("general_health")
+    transaction_log = get_playbook("transaction_log")
+    assert replication is not None and general_health is not None and transaction_log is not None
+    assert not (set(replication.triggers) & set(transaction_log.triggers))
+    assert not (set(general_health.triggers) & set(transaction_log.triggers))
+
+
+def test_storage_does_not_overlap_transaction_log_or_backups_triggers():
+    storage = get_playbook("storage")
+    transaction_log = get_playbook("transaction_log")
+    backups = get_playbook("backups")
+    assert storage is not None and transaction_log is not None and backups is not None
+    assert not (set(storage.triggers) & set(transaction_log.triggers))
+    assert not (set(storage.triggers) & set(backups.triggers))
+
+
+def test_total_playbook_count_after_the_storage_transaction_log_split():
+    # 12 playbooks existed going into this change (11 original scenarios
+    # plus a concurrently-landed 12th, configuration_review). Splitting the
+    # combined storage playbook into storage + transaction_log adds one
+    # more, for 13 total.
+    assert len(PLAYBOOKS) == 13
