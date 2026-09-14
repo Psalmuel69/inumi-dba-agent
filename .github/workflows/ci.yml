@@ -1,0 +1,78 @@
+name: CI
+
+# Mirrors `make test` / `make security-test` / `make lint` exactly (see
+# Makefile) — this workflow is deliberately just those same commands run on
+# a clean checkout, not a separate definition of "passing" to drift out of
+# sync with local dev. Runs on every push and PR against main; nothing here
+# touches a real database, LLM API, or Slack/Teams endpoint (see
+# TESTING.md's "Deterministic execution without 'mock mode'" and "Opt-in
+# live tests" — RUN_LIVE_LLM_TESTS/RUN_LIVE_DB_TESTS are never set here).
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# A second push to the same branch/PR supersedes the still-running check
+# for the first — no point finishing a run whose result is already stale.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test (unit + integration + security)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # unixodbc-dev / default-libmysqlclient-dev: build prerequisites for
+      # pyodbc and asyncmy (SQL Server / MySQL-MariaDB drivers) in case no
+      # prebuilt wheel matches this runner — installed unconditionally
+      # since the base package install (not just an opt-in extra) depends
+      # on both, and neither driver is ever actually connected to in this
+      # job (TESTING.md: real engines are exercised only by the opt-in,
+      # never-run-here tests/e2e/test_live_databases.py).
+      - name: Install system build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends unixodbc-dev default-libmysqlclient-dev
+
+      - name: Install package
+        run: python -m pip install -e ".[dev]"
+
+      - name: Unit + integration tests
+        run: python -m pytest tests/unit tests/integration -q
+
+      - name: Security suite
+        run: python -m pytest tests/security -q
+
+  lint:
+    name: Lint (ruff + mypy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install system build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends unixodbc-dev default-libmysqlclient-dev
+
+      - name: Install package
+        run: python -m pip install -e ".[dev]"
+
+      - name: ruff
+        run: python -m ruff check src tests
+
+      - name: mypy
+        run: python -m mypy src

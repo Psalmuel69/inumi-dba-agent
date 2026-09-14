@@ -1,5 +1,7 @@
 # Inumi — Enterprise AI DBA Agent & Secure DBA Control Gateway
 
+[![CI](https://github.com/Psalmuel69/inumi-dba-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/Psalmuel69/inumi-dba-agent/actions/workflows/ci.yml)
+
 **Inumi** (`@Inumi`) is an AI database administration assistant that DBA teams talk
 to over Slack and Microsoft Teams. It investigates incidents, analyzes
 performance, and — only through a fully independent, non-bypassable **DBA
