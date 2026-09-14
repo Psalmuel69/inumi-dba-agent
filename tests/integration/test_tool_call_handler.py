@@ -4,12 +4,14 @@ import pytest
 
 from inumi.common.config import Settings
 from inumi.common.ids import new_id
+from inumi.common.models.catalog import ServerCatalog
+from inumi.common.models.execution import DiscoveryRequest, ExecutionRequest, ExecutionResult
 from inumi.common.models.tool import ToolCallRequest, ToolCallStatus
 from inumi.execution.service import ExecutionService
 from inumi.gateway.domain.data_policy import DataMinimizer
 from inumi.gateway.domain.risk_engine import RiskEngine
 from inumi.gateway.domain.tool_call_handler import ToolCallHandler
-from inumi.gateway.infrastructure.execution_client import InProcessExecutionClient
+from inumi.gateway.infrastructure.execution_client import ExecutionClient, InProcessExecutionClient
 from tests.canned_adapter import canned_adapter_factory
 
 
@@ -17,12 +19,39 @@ def _settings() -> Settings:
     return Settings(_env_file=None)
 
 
-async def _make_handler(db, tool_registry, server_registry, target_validator, policy_engine, rate_limiter):
-    settings = _settings()
-    execution_service = ExecutionService(
-        settings, credential_provider=None, adapter_factory=canned_adapter_factory  # type: ignore[arg-type]
-    )
-    execution_client = InProcessExecutionClient(execution_service)
+class _FailingExecutionClient(ExecutionClient):
+    """A stand-in for the Execution Service reporting a genuine execution
+    attempt that failed — e.g. the real, live `database.get_error_logs`
+    adapter bug against sqlserver-dev-01 this reproduces: the Execution
+    Service itself returns `success=False, error_code="EXECUTION_FAILED"`,
+    never raising. Used to drive that exact shape through the real
+    `ToolCallHandler.handle` without needing a broken adapter query."""
+
+    def __init__(self, error_code: str = "EXECUTION_FAILED", error_detail: str = "adapter execution failed"):
+        self._error_code = error_code
+        self._error_detail = error_detail
+
+    async def execute(self, request: ExecutionRequest) -> ExecutionResult:
+        return ExecutionResult(
+            execution_id=request.execution_id,
+            success=False,
+            error_code=self._error_code,
+            error_detail=self._error_detail,
+        )
+
+    async def discover(self, request: DiscoveryRequest) -> ServerCatalog:  # pragma: no cover - unused
+        raise NotImplementedError
+
+
+async def _make_handler(
+    db, tool_registry, server_registry, target_validator, policy_engine, rate_limiter, execution_client=None
+):
+    if execution_client is None:
+        settings = _settings()
+        execution_service = ExecutionService(
+            settings, credential_provider=None, adapter_factory=canned_adapter_factory  # type: ignore[arg-type]
+        )
+        execution_client = InProcessExecutionClient(execution_service)
     session_cm = db.session()
     session = await session_cm.__aenter__()
     handler = ToolCallHandler(
@@ -134,6 +163,80 @@ async def test_full_approval_workflow_kill_session(
         second = await handler.handle(identity, second_request)
         assert second.status == ToolCallStatus.EXECUTED
         assert second.result["affected"]["terminated"] is True
+    finally:
+        await cm.__aexit__(None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_an_actual_execution_attempt_that_fails_is_reported_as_failed_not_denied(
+    db, tool_registry, server_registry, target_validator, policy_engine, rate_limiter, identity_provider
+):
+    """Live-verified bug (Slack test against sqlserver-dev-01, comprehensive_summary
+    playbook): `database.get_error_logs` hit a genuine Execution Service failure
+    (`success=False, error_code=EXECUTION_FAILED`) — a real *attempt* that didn't
+    succeed, not a Gateway refusal. `handle_tool_call`'s single outer
+    `except InumiError` previously converted this to `ToolCallStatus.DENIED`
+    unconditionally (correct only for pre-execution refusals), which aborted the
+    whole investigation instead of reaching the orchestrator's already-correct
+    `ToolCallStatus.FAILED` handling (record the failure as evidence and keep
+    going — see `_submit_and_relay` in orchestrator.py)."""
+    handler, session, cm = await _make_handler(
+        db,
+        tool_registry,
+        server_registry,
+        target_validator,
+        policy_engine,
+        rate_limiter,
+        execution_client=_FailingExecutionClient(),
+    )
+    try:
+        identity = await identity_provider.resolve_by_external_account("slack", "U_MOCK_L2")
+        request = ToolCallRequest(
+            tool_id="database.get_error_logs",
+            arguments={"since_minutes": 60, "limit": 50},
+            target={"environment": "production", "database": "CoreBanking"},
+            reason="comprehensive_summary playbook step",
+            conversation_id="conv_5",
+            request_id=new_id("req"),
+            channel="slack",
+            channel_account_id="U_MOCK_PLACEHOLDER",
+        )
+        response = await handler.handle(identity, request)
+        assert response.status == ToolCallStatus.FAILED
+        assert response.failure_code == "EXECUTION_FAILED"
+    finally:
+        await cm.__aexit__(None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_a_genuine_pre_execution_refusal_still_returns_denied(
+    db, tool_registry, server_registry, target_validator, policy_engine, rate_limiter, identity_provider
+):
+    """Regression guard for the FAILED/DENIED split above: a target that was
+    never even accepted (INVALID_TARGET) never reaches execution at all, so it
+    must stay DENIED, not become FAILED."""
+    handler, session, cm = await _make_handler(
+        db, tool_registry, server_registry, target_validator, policy_engine, rate_limiter
+    )
+    try:
+        identity = await identity_provider.resolve_by_external_account("slack", "U_MOCK_L2")
+        request = ToolCallRequest(
+            tool_id="database.get_health",
+            arguments={},
+            target={
+                "environment": "production",
+                "instance": "no-such-server-registered",
+                "database": "CoreBanking",
+            },
+            reason="investigating slowness",
+            conversation_id="conv_6",
+            request_id=new_id("req"),
+            channel="slack",
+            channel_account_id="U_MOCK_PLACEHOLDER",
+        )
+        response = await handler.handle(identity, request)
+        assert response.status == ToolCallStatus.DENIED
+        assert response.failure_code == "INVALID_TARGET"
     finally:
         await cm.__aexit__(None, None, None)
 

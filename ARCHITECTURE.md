@@ -71,6 +71,23 @@ not a class boundary a bug could accidentally erase.
 5. Gateway applies `DataMinimizer`, records an `AuditEventRecord`, and
    returns a structured `ToolCallResponse` (EXECUTED / APPROVAL_REQUIRED /
    DENIED / FAILED) — never a stack trace, never raw DB error text.
+
+   **DENIED vs. FAILED** (`tool_call_handler.py::handle`'s single
+   `except InumiError`, ~line 109): DENIED means the Gateway refused
+   *before* dispatching to the Execution Service — target/auth/rate-limit/
+   policy/risk/approval all raise `InumiError` codes that stay DENIED
+   (`INVALID_TARGET`, `UNAUTHORIZED`, `POLICY_DENIED`, `APPROVAL_*`,
+   `RATE_LIMITED`, etc.). FAILED means step 9 actually dispatched to the
+   Execution Service and the attempt itself didn't succeed —
+   `EXECUTION_FAILED`, `EXECUTION_TIMEOUT`, or `DATABASE_UNAVAILABLE`,
+   the only codes `_handle_inner` can raise *after* `self._execution.execute(...)`
+   returns `success=False`. This distinction is what makes a playbook's "one
+   failed diagnostic shouldn't abort the rest of the investigation"
+   guarantee actually hold: `agent/orchestrator.py::_submit_and_relay`
+   treats DENIED as a policy fact that ends the turn, but records FAILED as
+   evidence and lets the investigation continue (verified live: a genuine
+   `database.get_error_logs` adapter failure was previously misreported as
+   DENIED and aborted a `comprehensive_summary` playbook run outright).
 6. Agent relays the result (or an approval card) back through the Channel
    Adapter to the human.
 

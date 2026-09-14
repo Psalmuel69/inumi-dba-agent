@@ -253,13 +253,20 @@ only partially enforced — called out honestly rather than papered over.
     **Enforced for investigation/approval/execution; not as its own
     distinct event type for verification.** `AuditLog.record`
     (`gateway/domain/audit.py`) is called from every branch of
-    `_handle_inner` (`TOOL_CALL_EXECUTED`, `TOOL_CALL_DENIED`,
-    `APPROVAL_REQUESTED`), and `ApprovalEngine` separately records
-    `CREATED`/`APPROVER_1_APPROVED`/`APPROVER_2_APPROVED`/`APPROVED`/
-    `REJECTED`/`EXPIRED`/`EXECUTED` events. `request.investigation_id` is
-    threaded into every `TOOL_CALL_EXECUTED`/`TOOL_CALL_DENIED` record's
-    correlation ids, so an investigation's tool calls are traceable in the
-    audit log. But the gate 11 verification re-check is just another tool
+    `_handle_inner`/`handle` (`TOOL_CALL_EXECUTED`, `TOOL_CALL_DENIED`,
+    `TOOL_CALL_FAILED`, `APPROVAL_REQUESTED`), and `ApprovalEngine`
+    separately records `CREATED`/`APPROVER_1_APPROVED`/
+    `APPROVER_2_APPROVED`/`APPROVED`/`REJECTED`/`EXPIRED`/`EXECUTED`
+    events. `handle`'s single `except InumiError` block (around
+    `tool_call_handler.py` line 109) picks `TOOL_CALL_DENIED` vs.
+    `TOOL_CALL_FAILED` from the `FailureCode`: `EXECUTION_FAILED`/
+    `EXECUTION_TIMEOUT`/`DATABASE_UNAVAILABLE` — the only codes that can be
+    raised *after* `self._execution.execute(...)` actually ran (step 9) —
+    audit as `TOOL_CALL_FAILED`; every other code is a pre-execution
+    refusal and stays `TOOL_CALL_DENIED`. `request.investigation_id` is
+    threaded into every `TOOL_CALL_EXECUTED`/`TOOL_CALL_DENIED`/
+    `TOOL_CALL_FAILED` record's correlation ids, so an investigation's tool
+    calls are traceable in the audit log. But the gate 11 verification re-check is just another tool
     call from the Gateway's point of view — audited only as an ordinary
     `TOOL_CALL_EXECUTED` event, indistinguishable from any other read. The
     actual verification verdict (`InvestigationState.last_verification`,

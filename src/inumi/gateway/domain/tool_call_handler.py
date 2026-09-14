@@ -107,8 +107,35 @@ class ToolCallHandler:
             response = await self._handle_inner(identity, request, correlation)
             return response
         except InumiError as exc:
+            # `_handle_inner` raises `InumiError` from two structurally different
+            # places, and this is the one place that tells them apart: a
+            # pre-execution refusal (target/auth/policy/risk/approval — the
+            # Gateway never even attempted the operation) vs. the single
+            # raise site after `self._execution.execute(...)` returns
+            # `success=False` (step 9) — a real execution attempt that was
+            # made and didn't succeed. Only `EXECUTION_FAILED`,
+            # `EXECUTION_TIMEOUT`, and `DATABASE_UNAVAILABLE` can be raised
+            # from that post-execution site (see the `FailureCode(result.error_code)`
+            # construction there); every other code is necessarily a
+            # pre-execution refusal. Centralizing the split here (rather than
+            # threading a status distinction through every raise site in
+            # `_handle_inner`) keeps `_handle_inner` reading as a linear
+            # pipeline while still letting the Agent's orchestrator apply the
+            # already-correct, already-tested distinction downstream: DENIED
+            # is a policy fact that ends the turn, FAILED is evidence the
+            # investigation records and continues past (see
+            # `_submit_and_relay` in agent/orchestrator.py). Live-verified:
+            # a real `database.get_error_logs` adapter failure against
+            # sqlserver-dev-01 was previously misreported as DENIED and
+            # aborted the whole investigation.
+            is_execution_outcome = exc.code in (
+                FailureCode.EXECUTION_FAILED,
+                FailureCode.EXECUTION_TIMEOUT,
+                FailureCode.DATABASE_UNAVAILABLE,
+            )
+            status = ToolCallStatus.FAILED if is_execution_outcome else ToolCallStatus.DENIED
             await self._audit.record(
-                event_type="TOOL_CALL_DENIED",
+                event_type="TOOL_CALL_FAILED" if is_execution_outcome else "TOOL_CALL_DENIED",
                 correlation_ids=correlation,
                 actor_subject_id=identity.subject_id,
                 identity_provider=self._identity_provider_name,
@@ -133,7 +160,7 @@ class ToolCallHandler:
                     detail={"tool_id": request.tool_id, "detail": exc.detail},
                 )
             return ToolCallResponse(
-                status=ToolCallStatus.DENIED,
+                status=status,
                 failure_code=exc.code.value,
                 message=exc.detail,
             )
