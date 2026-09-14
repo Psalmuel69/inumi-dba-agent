@@ -335,3 +335,21 @@ retries and model switches happens underneath, one call is never worse than
 
 The selection is stored on `ConversationState` (in Agent process memory)
 and is never an input to any Gateway decision.
+
+## "Who can approve this?" — answered honestly, without exposing policy data
+
+A DBA can ask this in plain language (`meta_command="approvers"` on
+`IntentExtraction`, handled by `AgentOrchestrator._handle_approvers_command`,
+also reachable as the literal `/approvers` command). The reply is a static,
+general description of the model above (role tiers, environment-based
+escalation, no self-approval, dual approval for critical actions) — **never**
+a read of `config/policy.yaml` itself. Two reasons: that file is loaded only
+by the Gateway process (see "Configuration" above), and even if the Agent
+could read it, the Agent has no way to know a specific role's actual
+per-tool/per-environment decision without duplicating the Policy Engine's
+own logic outside the Gateway, which this architecture deliberately never
+does ("Business rules live only here... never in an agent prompt"). When a
+DBA's own request actually needs approval, the real, request-specific
+requirement is still always shown at that moment via the normal
+`APPROVAL_REQUIRED` flow — this command is a general explainer, not a
+lookup.

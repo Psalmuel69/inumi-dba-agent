@@ -48,9 +48,27 @@ _SESSION_ID_RE = re.compile(r"\bsession\s+(\d+)\b|\bkill\s+(\d+)\b", re.IGNORECA
 # offline "go ahead"/"do it" heuristic risks misfiring far more than a
 # real model's contextual judgment would) — the orchestrator still
 # supports them from a real provider, this planner just never emits them.
+# "models" and "approvers" (added after a live finding: "who can approve
+# requests from you?" and "what environments and databases do you have
+# access to?" both fell through to the generic chitchat fallback) ARE safe
+# to pattern-match offline — both are informational questions, not actions,
+# so a false positive here is never worse than the DBA getting a slightly
+# premature/irrelevant informational reply instead of an investigation.
 _META_COMMAND_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\b(list|show|what)\b.*\b(servers?|instances?)\b", re.IGNORECASE), "servers"),
     (re.compile(r"\bregistered servers\b", re.IGNORECASE), "servers"),
+    (re.compile(r"\bwhat servers?\b.*\bknow about\b", re.IGNORECASE), "servers"),
+    (
+        re.compile(
+            r"\bwhat\b.*\benvironments?\b.*\bdatabases?\b.*\baccess\b"
+            r"|\bwhat\b.*\bdatabases?\b.*\benvironments?\b.*\baccess\b",
+            re.IGNORECASE,
+        ),
+        "servers",
+    ),
+    (re.compile(r"\bwhat can you see\b", re.IGNORECASE), "servers"),
+    (re.compile(r"\bwhat.?s registered\b", re.IGNORECASE), "servers"),
+    (re.compile(r"\bwhat do you have access to\b", re.IGNORECASE), "servers"),
     (re.compile(r"\b(list|show|what)\b.*\bplaybooks?\b", re.IGNORECASE), "playbooks"),
     (
         re.compile(r"\b(run|start)\b.*\bdiscover|^\s*discover\b|\brefresh\b.*\bcatalog\b", re.IGNORECASE),
@@ -59,6 +77,19 @@ _META_COMMAND_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\b(show|what.?s)\b.*\bcatalog\b", re.IGNORECASE), "catalog"),
     (re.compile(r"\bwhat.?s the status\b|\bwhere are we\b|\bany update\b", re.IGNORECASE), "status"),
     (re.compile(r"\bwhat can you do\b", re.IGNORECASE), "help"),
+    (
+        re.compile(r"\b(what|which|list|show)\b.*\bmodels?\b|\bswitch\b.*\bmodel\b", re.IGNORECASE),
+        "models",
+    ),
+    (
+        re.compile(
+            r"\bwho\b.*\bapprov\w*\b.*\b(you|your requests|this|that)\b"
+            r"|\bwho\b.*\b(needs?|has) to (sign off|approve)\b"
+            r"|\bwhat roles?\b.*\bapprov\w*\b",
+            re.IGNORECASE,
+        ),
+        "approvers",
+    ),
 )
 
 

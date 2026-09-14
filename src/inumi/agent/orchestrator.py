@@ -88,6 +88,35 @@ _CAMEL_CASE_NAME_RE = re.compile(r"\b[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)+\b")
 # site in handle_message for why this exists as a fast-path.
 _ENVIRONMENT_ANSWER_RE = re.compile(r"\b(development|uat|production)\b", re.IGNORECASE)
 
+# Slack renders an @-mention as a literal `<@U0BOTID>` token in the message
+# text delivered to the webhook (see channels/api/app.py's slack_webhook:
+# `message=event.get("text", "")`, forwarded completely unmodified — nothing
+# anywhere in the channels layer resolves or strips it). Verified live:
+# sending "@Inumi DBA Agent /models" — the ordinary way of addressing the
+# bot in a shared channel, often the only way to get its attention there —
+# arrived here as "<@U0BOTID> /models", which matched neither
+# `_handle_command_if_any`'s exact-match check nor any known free-form
+# phrasing, and fell through into the normal DBA-task path: reported live as
+# the exact, already-advertised `/models` command misrouting into "Which
+# environment should I investigate?" instead of listing models. Stripped
+# once, centrally, at the very top of handle_message (never by loosening
+# each individual exact-match check) so every literal slash command, every
+# free-form meta_command phrase, and every downstream problem_summary/
+# last_message all see the DBA's actual words, never this delivery
+# artifact. Deliberately only strips a LEADING or TRAILING mention token,
+# never one in the middle of a message — a mid-message mention can
+# meaningfully name a different person (e.g. "check with <@U999> about
+# approving this"), and that must never be silently discarded.
+_MENTION_TOKEN = r"<@[^>]+>"
+_LEADING_MENTIONS_RE = re.compile(rf"^(?:\s*{_MENTION_TOKEN}\s*)+")
+_TRAILING_MENTIONS_RE = re.compile(rf"(?:\s*{_MENTION_TOKEN}\s*)+$")
+
+
+def _strip_bot_mention_noise(message: str) -> str:
+    stripped = _LEADING_MENTIONS_RE.sub("", message)
+    stripped = _TRAILING_MENTIONS_RE.sub("", stripped)
+    return stripped.strip()
+
 
 def _ungrounded_identifiers(conclusion: Conclude, investigation) -> list[str]:
     """CamelCase-looking identifiers the conclusion's summary/root-cause/
@@ -199,7 +228,37 @@ _HELP_TEXT = (
     "actions. Try: \"Why is CoreBanking slow?\" or \"Check blocking on "
     "CoreBanking production.\"\n\nCommands: /help, /status, /approve <id>, "
     "/reject <id>, /models, /model <provider> <model>, /servers, /catalog <id>, "
-    "/discover, /playbooks"
+    "/discover, /playbooks, /approvers\n\nYou never need the exact slash "
+    "syntax for any of these — plain language works too (e.g. \"what "
+    "servers do you have\" instead of /servers)."
+)
+
+# A general, honest answer to "who can approve requests from you?" and
+# similar RBAC/approval-policy questions — deliberately NOT a dump of
+# config/policy.yaml (that file is loaded only by the Gateway process, see
+# POLICY_MODEL.md, and its exact per-role/per-environment grants are never
+# meant to live in an agent prompt or reply) and deliberately not a per-role
+# lookup this layer has no way to compute correctly anyway (the Agent's own
+# ToolClient only ever sees a coarse allowed_roles list per tool, filtered
+# to the asking DBA's own role — see tool_client.available_tools — never
+# the full ALLOW/DENY/REQUIRES_APPROVAL table for every role). What follows
+# is the general shape of the model as documented in POLICY_MODEL.md and
+# implemented in gateway/domain/approval.py — true for every deployment,
+# never a specific grant — plus a pointer to where a DBA gets the exact
+# answer for their own request.
+_APPROVAL_MODEL_TEXT = (
+    "Approval requirements are decided by the DBA Control Gateway's policy "
+    "engine, not by me — they depend on your own DBA role, the specific "
+    "action, and the target environment, so there's no single fixed answer "
+    "I can give in the abstract. In general: routine read-only checks never "
+    "need approval; higher-risk write actions typically require a more "
+    "senior DBA role or a separate, independent approver (you can never "
+    "approve your own request); and the most critical actions (an instance "
+    "restart or a failover) require two different qualified approvers, not "
+    "just one. Whenever one of your own requests actually needs approval, "
+    "I'll show you exactly what's required at that moment — for your "
+    "role's specific permissions ahead of time, check with your "
+    "organization's RBAC documentation or a DBA_MANAGER."
 )
 
 
@@ -251,6 +310,7 @@ class AgentOrchestrator:
         channel_thread_id: str,
         message: str,
     ) -> AgentReply:
+        message = _strip_bot_mention_noise(message)
         state = self._context.get_or_create(
             conversation_id, channel, channel_thread_id, channel_account_id
         )
@@ -1220,6 +1280,8 @@ class AgentOrchestrator:
             return await self._handle_model_command(state, stripped)
         if stripped.startswith("/model "):
             return await self._handle_model_command(state, stripped)
+        if stripped == "/approvers":
+            return self._handle_approvers_command()
         if stripped == "/servers":
             return await self._handle_servers_command()
         if stripped == "/catalog" or stripped.startswith("/catalog "):
@@ -1269,6 +1331,10 @@ class AgentOrchestrator:
             return await self._handle_catalog_command(intent.instance_hint)
         if command == "discover":
             return await self._handle_discover_command(intent.instance_hint, channel, channel_account_id)
+        if command == "models":
+            return await self._handle_model_command(state, "/models")
+        if command == "approvers":
+            return self._handle_approvers_command()
         if command in ("approve", "reject"):
             # Only ever acts on the one pending approval this conversation
             # already has (handle_approval_decision itself replies clearly
@@ -1298,16 +1364,34 @@ class AgentOrchestrator:
         lines = []
         for s in servers:
             cat = s.get("catalog")
-            summary = (
-                f"{cat['database_count']} databases, discovered "
-                f"{(cat['discovered_at'] or '')[:16]}"
-                if cat
-                else "not yet discovered — run /discover"
-            )
+            if cat:
+                # `databases` is already the full list of discovered database
+                # NAMES on this same /v1/catalog/servers response (see
+                # gateway/api/routers/catalog.py's list_servers — the same
+                # field `_known_database_names` already reads elsewhere) —
+                # free to include here too, no extra discovery call or new
+                # tool needed. Answers "what databases do you have access
+                # to?" directly instead of only a bare count, which was the
+                # one real content gap in this reply. Truncated defensively;
+                # the full per-database detail still lives behind
+                # /catalog <id>.
+                names = cat.get("databases") or []
+                preview = ", ".join(names[:8]) + (", …" if len(names) > 8 else "")
+                db_part = f" ({preview})" if preview else ""
+                summary = (
+                    f"{cat['database_count']} databases{db_part}, discovered "
+                    f"{(cat['discovered_at'] or '')[:16]}"
+                )
+            else:
+                summary = "not yet discovered — run /discover"
             lines.append(
                 f"- {s['id']}  [{s['environment']}/{s['platform']}, {s['criticality']}]  {summary}"
             )
         return AgentReply(text="Registered servers:\n" + "\n".join(lines))
+
+    @staticmethod
+    def _handle_approvers_command() -> AgentReply:
+        return AgentReply(text=_APPROVAL_MODEL_TEXT)
 
     async def _handle_catalog_command(self, server_id: str | None) -> AgentReply:
         if not server_id:

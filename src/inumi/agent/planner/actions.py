@@ -82,8 +82,26 @@ class IntentExtraction(BaseModel):
     # own words — never a slash command required. `instance_hint` doubles
     # as the target server id for "catalog"/"discover" when one is named.
     # None for a genuine DBA investigation request or unrelated chitchat.
+    # "models" and "approvers" were added after a live finding: two
+    # legitimate free-form questions ("who can approve requests from you?",
+    # "what environments and databases do you have access to?") both fell
+    # through to the generic fallback because nothing recognized them as
+    # meta-commands at all — see orchestrator._handle_meta_command and
+    # llm/base.py's _INTENT_SYSTEM for what each one now does.
     meta_command: (
-        Literal["help", "status", "servers", "playbooks", "catalog", "discover", "approve", "reject"] | None
+        Literal[
+            "help",
+            "status",
+            "servers",
+            "playbooks",
+            "catalog",
+            "discover",
+            "approve",
+            "reject",
+            "models",
+            "approvers",
+        ]
+        | None
     ) = None
     problem_summary: str = ""
 

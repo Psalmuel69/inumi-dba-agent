@@ -222,6 +222,104 @@ async def test_a_freeform_help_request_gets_the_help_text():
     assert "Inumi" in reply.text
 
 
+@pytest.mark.asyncio
+async def test_what_environments_and_databases_do_you_have_access_to_lists_servers():
+    """Live-reproduced finding: this exact phrasing got the generic canned
+    fallback instead of an answer. It most naturally maps to the existing
+    "servers" meta_command, whose reply already names each server's
+    environment — and (see the next test) now also its databases."""
+    llm = _FakeLLM(IntentExtraction(is_dba_task=False, meta_command="servers"))
+    servers = [
+        {
+            "id": "postgres-local",
+            "environment": "development",
+            "platform": "postgresql",
+            "criticality": "standard",
+        }
+    ]
+    orchestrator = _orchestrator(llm, servers=servers)
+
+    reply = await orchestrator.handle_message(
+        channel="slack", channel_account_id="U123", conversation_id="conv8", channel_thread_id="",
+        message="What environments and databases do you have access to?",
+    )
+
+    assert reply.status != "clarification"
+    assert "development" in reply.text
+    assert "postgres-local" in reply.text
+
+
+@pytest.mark.asyncio
+async def test_servers_reply_names_actual_databases_not_just_a_count():
+    """The one real content gap identified for the "environments and
+    databases" question: /servers previously only ever showed a bare
+    database COUNT per server, never names — even though the names are
+    already present on the very same list_servers() response (the same
+    field AgentOrchestrator._known_database_names already reads). No new
+    discovery call or tool is involved."""
+    llm = _FakeLLM(IntentExtraction(is_dba_task=False, meta_command="servers"))
+    servers = [
+        {
+            "id": "postgres-local",
+            "environment": "development",
+            "platform": "postgresql",
+            "criticality": "standard",
+            "catalog": {
+                "database_count": 2,
+                "discovered_at": "2026-01-01T00:00:00",
+                "databases": ["CoreBanking", "Reporting"],
+            },
+        }
+    ]
+    orchestrator = _orchestrator(llm, servers=servers)
+
+    reply = await orchestrator.handle_message(
+        channel="slack", channel_account_id="U123", conversation_id="conv9", channel_thread_id="",
+        message="what servers do you have",
+    )
+
+    assert "CoreBanking" in reply.text
+    assert "Reporting" in reply.text
+
+
+@pytest.mark.asyncio
+async def test_a_freeform_models_request_lists_available_models():
+    llm = _FakeLLM(IntentExtraction(is_dba_task=False, meta_command="models"))
+    orchestrator = _orchestrator(llm)
+
+    reply = await orchestrator.handle_message(
+        channel="slack", channel_account_id="U123", conversation_id="conv10", channel_thread_id="",
+        message="what models can I use",
+    )
+
+    assert reply.status != "clarification"
+    # For a test registry with no configured providers this is the honest
+    # "none configured" message — the point of this test is that it routed
+    # to the models handler at all, not the specific copy.
+    assert "LLM" in reply.text or "model" in reply.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_who_can_approve_requests_is_recognized_and_answered_honestly():
+    """Live-reproduced finding: this got the generic canned fallback. It's
+    an RBAC/policy question, not answered verbatim by any of the original 8
+    meta-commands — this asserts it's now recognized as a legitimate
+    informational question and answered with real, honest, general
+    content, never the old boilerplate and never a made-up specific."""
+    llm = _FakeLLM(IntentExtraction(is_dba_task=False, meta_command="approvers"))
+    orchestrator = _orchestrator(llm)
+
+    reply = await orchestrator.handle_message(
+        channel="slack", channel_account_id="U123", conversation_id="conv11", channel_thread_id="",
+        message="who can approve requests from you?",
+    )
+
+    assert reply.status != "clarification"
+    assert "Try:" not in reply.text  # not the generic _HELP_TEXT fallback
+    assert "role" in reply.text.lower()
+    assert "policy.yaml" not in reply.text  # never dumps the raw config
+
+
 class TestMockPlannerMetaCommandDetection:
     """The deterministic offline planner recognizes the same free-text
     phrasings, deliberately more conservatively than the real-provider
@@ -252,3 +350,62 @@ class TestMockPlannerMetaCommandDetection:
         )
         assert result.meta_command is None
         assert result.is_dba_task is True
+
+    @pytest.mark.asyncio
+    async def test_environments_and_databases_access_phrasing(self):
+        result = await MockLLMProvider().extract_intent(
+            "What environments and databases do you have access to?", known_database_names=[]
+        )
+        assert result.meta_command == "servers"
+
+    @pytest.mark.asyncio
+    async def test_what_servers_do_you_know_about_phrasing(self):
+        result = await MockLLMProvider().extract_intent(
+            "what servers do you know about", known_database_names=[]
+        )
+        assert result.meta_command == "servers"
+
+    @pytest.mark.asyncio
+    async def test_what_can_you_see_phrasing(self):
+        result = await MockLLMProvider().extract_intent("what can you see", known_database_names=[])
+        assert result.meta_command == "servers"
+
+    @pytest.mark.asyncio
+    async def test_whats_registered_phrasing(self):
+        result = await MockLLMProvider().extract_intent("what's registered", known_database_names=[])
+        assert result.meta_command == "servers"
+
+    @pytest.mark.asyncio
+    async def test_what_do_you_have_access_to_phrasing(self):
+        result = await MockLLMProvider().extract_intent(
+            "what do you have access to", known_database_names=[]
+        )
+        assert result.meta_command == "servers"
+
+    @pytest.mark.asyncio
+    async def test_models_phrasing(self):
+        result = await MockLLMProvider().extract_intent(
+            "what models can I use", known_database_names=[]
+        )
+        assert result.meta_command == "models"
+
+    @pytest.mark.asyncio
+    async def test_switch_model_phrasing(self):
+        result = await MockLLMProvider().extract_intent(
+            "switch to a different model", known_database_names=[]
+        )
+        assert result.meta_command == "models"
+
+    @pytest.mark.asyncio
+    async def test_who_can_approve_phrasing(self):
+        result = await MockLLMProvider().extract_intent(
+            "who can approve requests from you?", known_database_names=[]
+        )
+        assert result.meta_command == "approvers"
+
+    @pytest.mark.asyncio
+    async def test_who_needs_to_sign_off_phrasing(self):
+        result = await MockLLMProvider().extract_intent(
+            "who needs to sign off on this action?", known_database_names=[]
+        )
+        assert result.meta_command == "approvers"
