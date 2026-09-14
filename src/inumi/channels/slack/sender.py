@@ -37,3 +37,26 @@ class SlackMessageSender:
             body = response.json()
             if not body.get("ok"):
                 logger.error("slack_post_message_failed", error=body.get("error"))
+
+    async def update_message(
+        self, channel: str, ts: str, text: str, blocks: list[dict[str, Any]]
+    ) -> None:
+        """Rewrite an already-posted message in place (`chat.update`) —
+        used to collapse an approval card's Approve/Reject buttons into a
+        static resolved line the instant either one is clicked, so neither
+        button is still clickable a second time (spec: a stale/duplicate
+        decision shouldn't even be offered, not just rejected server-side
+        once submitted). Requires the message's own `ts`, not a new post."""
+        if not self._bot_token:
+            logger.info("slack_message_update_dev_stub", channel=channel, ts=ts, text=text)
+            return
+        async with httpx.AsyncClient(base_url="https://slack.com/api") as client:
+            response = await client.post(
+                "/chat.update",
+                headers={"Authorization": f"Bearer {self._bot_token}"},
+                json={"channel": channel, "ts": ts, "text": text, "blocks": blocks},
+            )
+            response.raise_for_status()
+            body = response.json()
+            if not body.get("ok"):
+                logger.error("slack_update_message_failed", error=body.get("error"))

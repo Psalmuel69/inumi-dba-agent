@@ -703,6 +703,61 @@ stable `activity.conversation.id`, before branching into the approve/reject
 the same already-computed value, so there was never a second, independent
 derivation for the two paths to disagree about. Teams was left unchanged.
 
+## An approval card must collapse on a decision — but only when it actually resolved
+
+An approval card's Approve/Reject buttons stayed fully clickable forever
+after a real decision was made — nothing ever rewrote the original Slack
+message, so a second click (by the same person, or someone else entirely)
+was always technically possible, even though the server-side decision was
+already final. `slack_interactive` now calls
+`SlackMessageSender.update_message` (Slack's `chat.update`) against the
+card's own message (`payload["message"]["ts"]`/`blocks` — Slack's own echo
+of the message the click happened on) to replace its `actions` block (found
+by `block_id == f"inumi_approval_{approval_id}"`, set when the card was
+first rendered) with a static line: "✅ Approved by \<name\>" or "❌
+Rejected by \<name\>". Slack buttons have no disabled-but-visible state to
+toggle — swapping the interactive block for a plain one, the same pattern
+real Slack apps (GitHub, PagerDuty, ...) use for this, is what actually
+removes them.
+
+The first version of this collapsed on *which button was clicked*, decision
+alone. Live testing immediately surfaced why that's wrong: a DBA clicked
+Approve on their own CRITICAL request and got correctly blocked by
+separation of duties ("The requester cannot approve their own critical
+action") — but the card still collapsed to "✅ Approved by \<them\>", both
+lying about the outcome and hiding a still-open approval from the one
+different, eligible DBA who actually could act on it. The same problem
+applies to the first leg of a dual-approval requirement
+(`AWAITING_SECOND_APPROVAL`): that decision succeeded, but the card must
+stay live for a second, different approver.
+
+The fix is a structured signal, not a guess from `status` or the reply
+text: `AgentReply.approval_still_pending` (default `False`), set `True` by
+`AgentOrchestrator.handle_approval_decision` in exactly those two cases —
+both of which deliberately leave `state.pending_approval` un-cleared for
+the same reason. `slack_interactive` only calls `update_message` when this
+is `False`. See `tests/integration/test_channels_api.py`'s
+`test_slack_approval_card_buttons_collapse_after_a_decision_is_clicked`
+(the genuine-resolution case) and
+`test_slack_approval_card_buttons_stay_live_after_a_failed_decision` (the
+separation-of-duties case that exposed the first version's bug).
+
+## A `message` subtype without a top-level "user" must not crash the webhook
+
+`/webhooks/slack` unconditionally read `event["user"]` after checking only
+`event.get("type") != "message"` and `event.get("bot_id")` — found live as
+a genuine, unhandled `KeyError` 500ing the whole webhook. Slack sends
+several `message`-typed events that are not a DBA sending Inumi a fresh
+instruction and carry no top-level `"user"` at all: `message_changed`
+(edits — the author lives nested under `event["message"]["user"]`
+instead), `message_deleted`, and others. Since Slack retries any delivery
+it doesn't get a fast 200 for, one crash like this risks compounding into
+repeated retries rather than one cleanly-ignored event. Fixed by reading
+`event.get("user")` and skipping (same as the existing bot-message skip)
+whenever it's absent, rather than assuming the key exists. See
+`tests/integration/test_channels_api.py`'s
+`test_slack_message_edit_event_with_no_top_level_user_does_not_crash_the_webhook`.
+
 ## The identity re-resolution point (why "UX check" ≠ "security boundary")
 
 Channel Adapters and the Agent both *can* check whether a channel account is

@@ -121,6 +121,48 @@ def test_slack_message_from_verified_dba_is_processed():
         assert response.json() == {"ok": True}
 
 
+def test_slack_message_edit_event_with_no_top_level_user_does_not_crash_the_webhook():
+    """Reproduces a live finding: an unhandled `KeyError: 'user'` 500'd the
+    whole webhook. `event.get("bot_id")` alone doesn't cover every
+    `message`-typed event this service must ignore -- a `message_changed`
+    (edit) carries its author nested under `event["message"]["user"]`, not
+    at the top level `event["user"]` the handler used unconditionally.
+    Slack retries a delivery it never got a 200 for, so one crash like this
+    can also cascade into repeated retries, not just a single dropped
+    event. Any `message`-typed event missing a top-level "user" (edits,
+    deletions, and other subtypes alike) must be skipped exactly like a
+    bot-authored message already is, not crash."""
+    settings = _settings()
+    _gw, channels_app = _build_full_stack(settings)
+    import json
+
+    body = json.dumps(
+        {
+            "type": "event_callback",
+            "event_id": "Ev_EDIT_TEST_1",
+            "event": {
+                "type": "message",
+                "subtype": "message_changed",
+                "channel": "C123",
+                "ts": "111.300",
+                "message": {"user": "U_MOCK_L2", "text": "edited text"},
+                "previous_message": {"user": "U_MOCK_L2", "text": "original text"},
+                # No top-level "user" -- this is the exact shape that crashed.
+            },
+        }
+    ).encode()
+    ts = str(int(time.time()))
+    sig = _sign_slack(settings.slack_signing_secret, body, ts)
+    with TestClient(channels_app) as client:
+        response = client.post(
+            "/webhooks/slack",
+            content=body,
+            headers={"X-Slack-Request-Timestamp": ts, "X-Slack-Signature": sig},
+        )
+        assert response.status_code == 200
+        assert response.json() == {"ok": True}
+
+
 def test_a_retried_slack_event_is_deduplicated_not_reprocessed(capsys):
     """Reproduces a live finding: Slack retries a webhook delivery it
     hasn't gotten a fast ack for (its own ~3s timeout), reusing the same
@@ -530,3 +572,194 @@ def test_slack_approval_card_button_click_actually_resolves_the_pending_approval
     _channel, approve_text, _blocks = posted[1]
     assert "Action approved" in approve_text
     assert "There is no pending approval" not in approve_text
+
+
+def test_slack_approval_card_buttons_collapse_after_a_decision_is_clicked(monkeypatch):
+    """A resolved approval card must stop offering both buttons, not just
+    stop honoring a second click server-side -- found live: the card sat
+    fully clickable forever after a real Approve/Reject, since nothing ever
+    rewrote the original message. `slack_interactive` must call
+    `SlackMessageSender.update_message` (`chat.update`) against the SAME
+    message (`payload["message"]["ts"]`, Slack's own echo of the card being
+    acted on) with the `actions` block (matched by its `inumi_approval_*`
+    block_id) replaced by a static resolved line -- proof the buttons are
+    actually gone, not merely that the approval itself resolved (already
+    covered above)."""
+    settings = _settings()
+    _gateway_app, channels_app = _build_full_stack(settings)
+
+    posted: list[tuple[str, str, list[dict]]] = []
+    updated: list[tuple[str, str, str, list[dict]]] = []
+
+    async def _capture_post_message(self, channel, text, blocks):
+        posted.append((channel, text, blocks))
+
+    async def _capture_update_message(self, channel, ts, text, blocks):
+        updated.append((channel, ts, text, blocks))
+
+    monkeypatch.setattr(SlackMessageSender, "post_message", _capture_post_message)
+    monkeypatch.setattr(SlackMessageSender, "update_message", _capture_update_message)
+
+    plain_message_body = json.dumps(
+        {
+            "type": "event_callback",
+            "event": {
+                "type": "message",
+                "user": "U_MOCK_L2",
+                "text": "Check blocking on CoreBanking production.",
+                "channel": "C_COLLAPSE",
+                "ts": "500.001",
+            },
+        }
+    ).encode()
+    request_ts = str(int(time.time()))
+    sig = _sign_slack(settings.slack_signing_secret, plain_message_body, request_ts)
+
+    with TestClient(channels_app) as client:
+        response = client.post(
+            "/webhooks/slack",
+            content=plain_message_body,
+            headers={"X-Slack-Request-Timestamp": request_ts, "X-Slack-Signature": sig},
+        )
+        assert response.status_code == 200
+        assert len(posted) == 1
+        _channel, _text, card_blocks = posted[0]
+        actions_block = next(b for b in card_blocks if b["type"] == "actions")
+        approval_id = actions_block["elements"][0]["value"]
+        assert approval_id
+
+        # Slack's real block_actions payload echoes the full original
+        # message (ts + blocks) it was clicked on -- exactly what
+        # `resolve_approval_blocks` needs to rewrite it in place.
+        interactive_payload = json.dumps(
+            {
+                "type": "block_actions",
+                "user": {"id": "U_MOCK_L2"},
+                "channel": {"id": "C_COLLAPSE"},
+                "container": {
+                    "type": "message",
+                    "message_ts": "500.777",
+                    "channel_id": "C_COLLAPSE",
+                },
+                "message": {"ts": "500.777", "blocks": card_blocks, "text": _text},
+                "actions": [{"action_id": "inumi_reject", "value": approval_id}],
+            }
+        )
+        interactive_response = client.post(
+            "/webhooks/slack/interactive", data={"payload": interactive_payload}
+        )
+        assert interactive_response.status_code == 200
+
+    assert len(updated) == 1
+    channel, ts, _text, rebuilt_blocks = updated[0]
+    assert channel == "C_COLLAPSE"
+    assert ts == "500.777"
+    # The actions block (both buttons) is gone entirely.
+    assert not any(b["type"] == "actions" for b in rebuilt_blocks)
+    # Replaced by a static, resolved line naming who decided and what.
+    resolved_block = next(b for b in rebuilt_blocks if b["type"] == "context")
+    resolved_text = resolved_block["elements"][0]["text"]
+    assert "Rejected" in resolved_text
+    assert "Dev DBA L2" in resolved_text
+    # Every other block from the original card (the summary text, the
+    # divider, the approval detail section) survives untouched.
+    assert len(rebuilt_blocks) == len(card_blocks)
+
+
+def test_slack_approval_card_buttons_stay_live_after_a_failed_decision(monkeypatch):
+    """A card must NOT collapse when the click didn't actually resolve the
+    approval -- found live: a separation-of-duties rejection ("the
+    requester cannot approve their own critical action") still left the
+    SAME card actionable by a different, eligible DBA, but the card
+    collapsed to a false '✅ Approved by <requester>' anyway, since the
+    first version of this fix collapsed on *which button was clicked*
+    rather than on whether the decision actually closed the approval.
+    `AgentReply.approval_still_pending=True` (set by
+    `AgentOrchestrator.handle_approval_decision` for exactly this case, and
+    for AWAITING_SECOND_APPROVAL) must suppress the collapse entirely."""
+    settings = _settings()
+
+    stub_agent = FastAPI()
+
+    @stub_agent.post("/v1/chat")
+    async def _chat(body: dict) -> dict:
+        return {
+            "text": "This requires approval.",
+            "status": "approval_required",
+            "approval_card": {
+                "approval_id": "appr-sod-1",
+                "tool_id": "restart_instance",
+                "target_summary": "postgres-local",
+                "reason": "DBA requested restart",
+                "risk_level": "CRITICAL",
+                "blast_radius": "SINGLE_DATABASE",
+            },
+        }
+
+    @stub_agent.post("/v1/chat/events")
+    async def _events(body: dict) -> dict:
+        return {
+            "text": "Approval failed: The requester cannot approve their own critical action.",
+            "status": "error",
+            "approval_still_pending": True,
+        }
+
+    channels_app = create_channels_app(settings, agent_transport=httpx.ASGITransport(app=stub_agent))
+
+    posted: list[tuple[str, str, list[dict]]] = []
+    updated: list[tuple[str, str, str, list[dict]]] = []
+
+    async def _capture_post_message(self, channel, text, blocks):
+        posted.append((channel, text, blocks))
+
+    async def _capture_update_message(self, channel, ts, text, blocks):
+        updated.append((channel, ts, text, blocks))
+
+    monkeypatch.setattr(SlackMessageSender, "post_message", _capture_post_message)
+    monkeypatch.setattr(SlackMessageSender, "update_message", _capture_update_message)
+
+    plain_message_body = json.dumps(
+        {
+            "type": "event_callback",
+            "event": {
+                "type": "message",
+                "user": "U_MOCK_L2",
+                "text": "restart the postgres-local instance",
+                "channel": "C_SOD",
+                "ts": "600.001",
+            },
+        }
+    ).encode()
+    request_ts = str(int(time.time()))
+    sig = _sign_slack(settings.slack_signing_secret, plain_message_body, request_ts)
+
+    with TestClient(channels_app) as client:
+        response = client.post(
+            "/webhooks/slack",
+            content=plain_message_body,
+            headers={"X-Slack-Request-Timestamp": request_ts, "X-Slack-Signature": sig},
+        )
+        assert response.status_code == 200
+        _channel, _text, card_blocks = posted[0]
+
+        # The same requester clicking Approve on their own card.
+        interactive_payload = json.dumps(
+            {
+                "type": "block_actions",
+                "user": {"id": "U_MOCK_L2"},
+                "channel": {"id": "C_SOD"},
+                "container": {"type": "message", "message_ts": "600.777", "channel_id": "C_SOD"},
+                "message": {"ts": "600.777", "blocks": card_blocks, "text": _text},
+                "actions": [{"action_id": "inumi_approve", "value": "appr-sod-1"}],
+            }
+        )
+        interactive_response = client.post(
+            "/webhooks/slack/interactive", data={"payload": interactive_payload}
+        )
+        assert interactive_response.status_code == 200
+
+    # The failure was still posted as a normal message...
+    assert len(posted) == 2
+    assert "cannot approve their own" in posted[1][1]
+    # ...but the card's own buttons were never touched.
+    assert updated == []

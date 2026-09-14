@@ -1230,9 +1230,24 @@ class AgentOrchestrator:
 
         result = await self._tool_client.approve(pending.approval_id, channel, channel_account_id)
         if result.get("status") == "ERROR":
-            return AgentReply(text=f"Approval failed: {result.get('detail')}", status="error")
+            # `pending` deliberately NOT cleared here (see field above) --
+            # e.g. a separation-of-duties rejection means THIS identity
+            # can't approve their own request, not that the request itself
+            # is dead. A different, eligible DBA must still be able to act
+            # on the same card.
+            return AgentReply(
+                text=f"Approval failed: {result.get('detail')}",
+                status="error",
+                approval_still_pending=True,
+            )
         if result.get("status") == "AWAITING_SECOND_APPROVAL":
-            return AgentReply(text="Recorded — this critical action also needs a second approver.", status="ok")
+            # Also not cleared -- this leg succeeded, but a second,
+            # different approver still needs to act on the same card.
+            return AgentReply(
+                text="Recorded — this critical action also needs a second approver.",
+                status="ok",
+                approval_still_pending=True,
+            )
 
         # Fully approved — resubmit the exact original request with the approval_id.
         request = ToolCallRequest.model_validate({**pending.request, "approval_id": pending.approval_id})

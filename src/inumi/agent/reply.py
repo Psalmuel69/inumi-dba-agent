@@ -28,3 +28,18 @@ class AgentReply(BaseModel):
     approval_card: ApprovalCard | None = None
     investigation_id: str | None = None
     result_data: dict[str, Any] | None = None
+    # True only for a reply to an approve/reject decision where the
+    # approval is STILL open afterward -- a separation-of-duties (or other)
+    # rejection that leaves the request awaiting a *different* approver, or
+    # one leg of a dual-approval requirement still needing a second one.
+    # False (the default) covers both "not an approval decision at all" and
+    # "this approval is now genuinely closed" (rejected, or fully approved
+    # and resubmitted -- see `AgentOrchestrator.handle_approval_decision`,
+    # the only place this is ever set True). A channel adapter uses this,
+    # not `status`, to decide whether an approval card's buttons may be
+    # collapsed: `status == "error"` alone can't tell "this specific
+    # identity can't approve their own request, try someone else" apart
+    # from "this approval is dead, don't bother" -- collapsing the card on
+    # the former would hide it from the DBA who actually can still act on
+    # it.
+    approval_still_pending: bool = False

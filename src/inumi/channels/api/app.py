@@ -25,7 +25,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel
 
 from inumi.agent.reply import AgentReply
-from inumi.channels.slack.blocks import render_reply_blocks
+from inumi.channels.slack.blocks import render_reply_blocks, resolve_approval_blocks
 from inumi.channels.slack.sender import SlackMessageSender
 from inumi.channels.slack.signature import SlackSignatureError, verify_slack_signature
 from inumi.channels.teams.auth import BotFrameworkJWTVerifier, DevTeamsAuthVerifier, TeamsAuthError
@@ -232,10 +232,19 @@ def create_app(settings: Settings | None = None, *, agent_transport=None) -> Fas
                 return {"ok": True}
 
             event = payload.get("event", {})
-            if event.get("type") != "message" or event.get("bot_id"):
+            # `event.get("bot_id")` alone doesn't cover every message this
+            # service must ignore rather than act on -- found live (a real
+            # 500, unhandled `KeyError`, crashing the whole webhook):
+            # message_changed (edits), message_deleted, and other
+            # `message`-typed subtypes carry no top-level "user" at all
+            # (an edit's author lives nested under event["message"]["user"]
+            # instead). None of these are a DBA sending Inumi a fresh
+            # instruction, so skip anything without a top-level "user" the
+            # same way a bot message is already skipped, rather than
+            # assuming the key exists.
+            slack_user_id = event.get("user")
+            if event.get("type") != "message" or event.get("bot_id") or not slack_user_id:
                 return {"ok": True}
-
-            slack_user_id = event["user"]
             identity = await identity_provider.resolve_by_external_account("slack", slack_user_id)
             if identity is None or not identity.is_dba():
                 await slack_sender.post_message(
@@ -309,6 +318,38 @@ def create_app(settings: Settings | None = None, *, agent_transport=None) -> Fas
 
         agent_reply = AgentReply.model_validate(reply)
         await slack_sender.post_message(channel_id, agent_reply.text, render_reply_blocks(agent_reply))
+
+        # Collapse the card's own Approve/Reject buttons in place so neither
+        # is still clickable after this decision — but ONLY when the
+        # approval is actually, finally closed (agent_reply.approval_still_
+        # pending is False). Found live: a separation-of-duties rejection
+        # ("the requester cannot approve their own critical action") still
+        # leaves the SAME card actionable by a different, eligible DBA --
+        # collapsing it to a false "✅ Approved by <requester>" on that
+        # failure would both lie about the outcome and hide a still-live
+        # approval from the one person who could actually act on it. Same
+        # reasoning for AWAITING_SECOND_APPROVAL (dual-approval's first leg).
+        # Best-effort otherwise: the approval decision itself is already
+        # fully resolved above regardless of whether this cosmetic update
+        # succeeds, so a failure here (e.g. the bot token lacks chat:write,
+        # or Slack is briefly unavailable) is logged, not raised, and never
+        # blocks the real decision reaching the DBA in the message just
+        # posted.
+        message = payload.get("message", {})
+        message_ts = message.get("ts", "")
+        original_blocks = message.get("blocks", [])
+        if message_ts and original_blocks and approval_id and not agent_reply.approval_still_pending:
+            try:
+                await slack_sender.update_message(
+                    channel_id,
+                    message_ts,
+                    message.get("text", ""),
+                    resolve_approval_blocks(
+                        original_blocks, approval_id, decision, identity.display_name
+                    ),
+                )
+            except Exception:
+                logger.warning("slack_approval_card_collapse_failed", approval_id=approval_id, exc_info=True)
         return {"ok": True}
 
     # ------------------------------------------------------------------ Teams

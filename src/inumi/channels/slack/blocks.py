@@ -61,3 +61,41 @@ def render_reply_blocks(reply: AgentReply) -> list[dict[str, Any]]:
             }
         )
     return blocks
+
+
+def resolve_approval_blocks(
+    original_blocks: list[dict[str, Any]], approval_id: str, decision: str, decided_by: str
+) -> list[dict[str, Any]]:
+    """Rebuild a posted approval card's blocks with its `actions` block (the
+    Approve/Reject buttons) replaced by a static resolved line — used to
+    collapse both buttons the instant either is clicked, via `chat.update`,
+    rather than leaving a resolved card sitting there fully clickable
+    forever. Slack buttons have no "disabled but still visible" state to
+    toggle; swapping the interactive block for a plain one (same pattern
+    real Slack apps — GitHub, PagerDuty, ...— use for this) is what actually
+    removes them. Matches on `block_id` (`inumi_approval_{approval_id}`, set
+    when the card was first rendered above) rather than block position or
+    type, so it only ever touches the one block that was this specific
+    card's own buttons — never a coincidentally-shaped block belonging to
+    a different message. `original_blocks` is Slack's own echo of the
+    message being acted on (`payload["message"]["blocks"]`), not anything
+    reconstructed from the Agent's reply, since the reply for an
+    approve/reject *decision* carries no approval_card of its own (it's
+    already resolved by the time this handler gets it back)."""
+    icon = "✅" if decision == "approve" else "❌"
+    label = "Approved" if decision == "approve" else "Rejected"
+    resolved_block_id = f"inumi_approval_{approval_id}"
+    rebuilt: list[dict[str, Any]] = []
+    for block in original_blocks:
+        if block.get("block_id") == resolved_block_id:
+            rebuilt.append(
+                {
+                    "type": "context",
+                    "elements": [
+                        {"type": "mrkdwn", "text": f"{icon} *{label}* by {decided_by}"}
+                    ],
+                }
+            )
+        else:
+            rebuilt.append(block)
+    return rebuilt
