@@ -108,6 +108,77 @@ async def test_a_freeform_discover_request_names_the_instance_hint_as_the_target
 
 
 @pytest.mark.asyncio
+async def test_a_freeform_discover_all_request_formats_clean_lines_not_a_dict_repr():
+    """Live-reproduced finding: `/discover` with no target refreshes every
+    registered server, and the reply used to be a raw Python dict repr
+    (`{'sqlserver-dev-01': 'ok (12 databases)', ...}`) dumped straight into
+    the message text. It must instead be one clean, readable line per
+    server — matching how `_handle_servers_command` already formats its own
+    per-server listing."""
+
+    class _RefreshAllToolClient(_FakeToolClient):
+        async def refresh_catalog(self, channel, channel_account_id, server_id=None):
+            assert server_id is None
+            return {
+                "sqlserver-dev-01": "ok (12 databases)",
+                "sqlserver-uat-01": "failed: execution service returned an error (status 500)",
+            }
+
+    llm = _FakeLLM(IntentExtraction(is_dba_task=False, meta_command="discover", instance_hint=None))
+    orchestrator = AgentOrchestrator(
+        llm_registry=LLMRegistry.for_testing(llm),
+        tool_client=_RefreshAllToolClient(),
+        context=ContextManager(),
+    )
+
+    reply = await orchestrator.handle_message(
+        channel="slack", channel_account_id="U123", conversation_id="conv3b", channel_thread_id="",
+        message="run discovery on everything",
+    )
+
+    # Never a raw dict repr (Python's own str() of a dict).
+    assert "{'sqlserver-dev-01'" not in reply.text
+    assert "{\"sqlserver-dev-01\"" not in reply.text
+    assert "- sqlserver-dev-01: ok (12 databases)" in reply.text
+    assert "- sqlserver-uat-01: failed: execution service returned an error (status 500)" in reply.text
+
+
+@pytest.mark.asyncio
+async def test_a_freeform_discover_request_for_one_server_reports_its_clean_failure():
+    """The single-server `/discover <id>` path (gateway's
+    `POST /v1/catalog/refresh/{id}`) reports a failure via an `"error"` key
+    on an otherwise-200 response, not the `{"status": "ERROR"}` shape — this
+    must also surface as clean text, not silently look like a success."""
+
+    class _FailingOneToolClient(_FakeToolClient):
+        async def refresh_catalog(self, channel, channel_account_id, server_id=None):
+            return {
+                "server_id": server_id,
+                "databases": [],
+                "warnings": [],
+                "error": "could not reach the execution service",
+            }
+
+    llm = _FakeLLM(
+        IntentExtraction(is_dba_task=False, meta_command="discover", instance_hint="sqlserver-uat-01")
+    )
+    orchestrator = AgentOrchestrator(
+        llm_registry=LLMRegistry.for_testing(llm),
+        tool_client=_FailingOneToolClient(),
+        context=ContextManager(),
+    )
+
+    reply = await orchestrator.handle_message(
+        channel="slack", channel_account_id="U123", conversation_id="conv3c", channel_thread_id="",
+        message="run discovery on sqlserver-uat-01",
+    )
+
+    assert "sqlserver-uat-01" in reply.text
+    assert "could not reach the execution service" in reply.text
+    assert reply.status == "error"
+
+
+@pytest.mark.asyncio
 async def test_a_freeform_catalog_request_with_no_server_named_asks_which_one():
     llm = _FakeLLM(IntentExtraction(is_dba_task=False, meta_command="catalog", instance_hint=None))
     orchestrator = _orchestrator(llm)

@@ -12,9 +12,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from inumi.common.models.identity import DBARole
+from inumi.common.observability import get_logger
 from inumi.gateway.api.deps import get_state, require_agent_service_token, resolve_identity
 from inumi.gateway.api.state import GatewayState
-from inumi.gateway.domain.discovery import DiscoveryOrchestrator
+from inumi.gateway.domain.discovery import DiscoveryOrchestrator, clean_discovery_error
+
+logger = get_logger(__name__)
 
 router = APIRouter(
     prefix="/v1/catalog", tags=["catalog"], dependencies=[Depends(require_agent_service_token)]
@@ -106,7 +109,20 @@ async def refresh_one(
     try:
         catalog = await _orchestrator(state).refresh_server(server_id)
     except Exception as exc:  # noqa: BLE001 — an unreachable server is a normal outcome here
-        return {"server_id": server_id, "databases": [], "warnings": [], "error": str(exc)}
+        # Real exception goes to the log only — never to the DBA (same
+        # invariant as DiscoveryOrchestrator.refresh_all).
+        logger.warning(
+            "catalog_refresh_one_failed",
+            server_id=server_id,
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        return {
+            "server_id": server_id,
+            "databases": [],
+            "warnings": [],
+            "error": clean_discovery_error(exc),
+        }
     return {
         "server_id": server_id,
         "databases": catalog.database_names(),

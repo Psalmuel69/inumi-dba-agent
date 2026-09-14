@@ -1418,7 +1418,23 @@ class AgentOrchestrator:
         result = await self._tool_client.refresh_catalog(channel, channel_account_id, server_id)
         if result.get("status") == "ERROR":
             return AgentReply(text=f"Discovery failed: {result.get('detail')}", status="error")
-        return AgentReply(text=f"Discovery complete:\n{result}")
+        if server_id is not None:
+            # Single-server refresh: {"server_id", "databases", "warnings", "error"?}
+            # (gateway's POST /v1/catalog/refresh/{id} — see
+            # gateway/api/routers/catalog.py:refresh_one).
+            reported_id = result.get("server_id", server_id)
+            if "error" in result:
+                return AgentReply(
+                    text=f"Discovery failed for {reported_id}: {result['error']}",
+                    status="error",
+                )
+            db_count = len(result.get("databases") or [])
+            return AgentReply(text=f"Discovery complete: {reported_id} ({db_count} databases).")
+        # Refresh-all: {server_id: "ok (N databases)" | "failed: <reason>"} — one
+        # clean line per server, same style as _handle_servers_command above,
+        # never the raw dict repr.
+        lines = [f"- {sid}: {status}" for sid, status in result.items()]
+        return AgentReply(text="Discovery complete:\n" + "\n".join(lines))
 
     async def _handle_model_command(self, state: ConversationState, stripped: str) -> AgentReply:
         registry = self._llm_registry

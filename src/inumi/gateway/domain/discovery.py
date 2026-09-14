@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import datetime as dt
 
+import httpx
+
 from inumi.common.config import Settings
 from inumi.common.models.catalog import ServerCatalog
 from inumi.common.models.execution import DiscoveryRequest
@@ -19,6 +21,26 @@ from inumi.gateway.domain.servers import ServerRegistry
 from inumi.gateway.infrastructure.execution_client import ExecutionClient
 
 logger = get_logger(__name__)
+
+
+def clean_discovery_error(exc: Exception) -> str:
+    """Map a discovery failure to a short, DBA-facing message.
+
+    The DBA never sees a stack trace or raw exception text (same invariant
+    already enforced for `ToolCallResponse` denials, adapter `FAILED`
+    messages, and the Agent's own timeout/self-correction messaging — see
+    `ExecutionService.execute`'s `except Exception` branch for the
+    established style: log the real exception, return a clean fallback).
+    An `httpx.HTTPStatusError`'s own `__str__` bakes in the raw request URL
+    and an MDN documentation link, which must never reach a channel.
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"execution service returned an error (status {exc.response.status_code})"
+    if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout)):
+        return "could not reach the execution service"
+    if isinstance(exc, (httpx.ReadTimeout, httpx.TimeoutException)):
+        return "discovery timed out"
+    return f"discovery failed ({type(exc).__name__})"
 
 
 class DiscoveryOrchestrator:
@@ -64,8 +86,15 @@ class DiscoveryOrchestrator:
                 cat = await self.refresh_server(server.id)
                 results[server.id] = f"ok ({len(cat.databases)} databases)"
             except Exception as exc:  # noqa: BLE001 — one bad server never blocks the rest
-                results[server.id] = f"failed: {exc}"
-                logger.warning("catalog_refresh_failed", server_id=server.id, error=str(exc))
+                results[server.id] = f"failed: {clean_discovery_error(exc)}"
+                # Real exception goes to the log only — never to the DBA
+                # (matches ExecutionService.execute's precedent).
+                logger.warning(
+                    "catalog_refresh_failed",
+                    server_id=server.id,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
         return results
 
     async def ensure_fresh(self, server_id: str) -> None:

@@ -74,6 +74,24 @@ not a class boundary a bug could accidentally erase.
 6. Agent relays the result (or an approval card) back through the Channel
    Adapter to the human.
 
+## The no-raw-error invariant also covers discovery, not just tool calls
+
+The "never a stack trace, never raw DB error text" rule above is about the
+tool-call pipeline specifically; `/discover` (`gateway/domain/discovery.py`'s
+`DiscoveryOrchestrator.refresh_all`/`refresh_server`, and the single-server
+`POST /v1/catalog/refresh/{id}` route in `gateway/api/routers/catalog.py`)
+is a separate path that talks to the Execution Service and can fail the same
+way (an unreachable Execution Service, a 500, a timeout) — it needs the same
+invariant applied on purpose, not inherited for free. A raw `httpx` exception
+bakes in the request URL and, for an `HTTPStatusError`, an MDN documentation
+link; `discovery.py`'s `clean_discovery_error()` maps the exception types
+that matter to short DBA-facing text (status/unreachable/timeout/generic
+fallback) and is the one place both call sites go through, mirroring how
+`ExecutionService.execute`'s `except Exception` branch already logs the real
+exception and returns a clean, generic message. The raw exception is always
+still logged server-side (structlog `error_type` + `error`) — only the
+DBA-facing text is generic.
+
 ## Investigation loop: freeform vs. playbook-driven
 
 `orchestrator.py::_run_investigation_loop` bounds every investigation to
