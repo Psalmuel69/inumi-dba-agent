@@ -21,6 +21,7 @@ from inumi.agent.llm.registry import LLMRegistry
 from inumi.agent.planner.actions import (
     AskClarification,
     Conclude,
+    IntentExtraction,
     ProposeToolCall,
     RecordObservation,
 )
@@ -350,6 +351,37 @@ class AgentOrchestrator:
                         ),
                         status="clarification",
                     )
+
+            # A narrow exception to "always resume" above, added after a
+            # separate live finding: an investigation stuck in
+            # AWAITING_CLARIFICATION (an unanswered freeform question — the
+            # DBA never has to answer it; there's no timeout) silently
+            # swallowed every message that arrived afterward, forever,
+            # framing each one to decide_next_action as "the DBA just
+            # replied" to that old, unrelated question. Reproduced live:
+            # "check blah on the thing pls fix asap!!!" (a deliberate
+            # gibberish test) asked what "blah"/"the thing" meant; 32
+            # minutes and several unrelated exchanges later, "Drop the test
+            # database on postgres-local, it's no longer needed" got a
+            # reply that rambled about "blah" and "the thing" instead of
+            # addressing the actual request — the old, stale problem text
+            # was still being prepended verbatim (see
+            # `_problem_statement_for_llm`). Scoped as tightly as possible
+            # to avoid resurrecting either of the two bugs already fixed
+            # above (a bare "development" or a bare server name silently
+            # dropping the investigation): only checked in this one status,
+            # never when an approval is outstanding, and
+            # `_classify_potential_topic_shift` itself demands multiple
+            # positive signals, not just `is_dba_task`, before treating
+            # anything as a topic shift.
+            if investigation.status == "AWAITING_CLARIFICATION" and state.pending_approval is None:
+                fresh_intent = await self._classify_potential_topic_shift(state, message)
+                if fresh_intent is not None:
+                    investigation.status = "CONCLUDED_UNRESOLVED"
+                    return await self._start_fresh_investigation(
+                        state, fresh_intent, message, channel, channel_account_id
+                    )
+
             investigation.last_message = message
             return await self._continue_investigation(state, investigation, channel, channel_account_id)
 
@@ -359,6 +391,71 @@ class AgentOrchestrator:
             known_database_names=await self._known_database_names(),
             known_server_hints=await self._known_server_hints(),
         )
+        return await self._start_fresh_investigation(state, intent, message, channel, channel_account_id)
+
+    async def _classify_potential_topic_shift(
+        self, state: ConversationState, message: str
+    ) -> IntentExtraction | None:
+        """Called only from the one narrow spot in `handle_message` above —
+        an investigation is stuck in AWAITING_CLARIFICATION and a new
+        message just arrived. Returns the classified intent when this reads
+        as a genuinely fresh, self-contained instruction worth abandoning
+        the stale investigation for; `None` when it's more likely a reply
+        to the pending question (or anything else too ambiguous to act on),
+        in which case the caller falls through to the existing resume path
+        unchanged.
+
+        Deliberately NOT the same trust level the pre-fix code gave
+        `extract_intent` (see `handle_message`'s own docstring on the
+        resume branch): `is_dba_task`/`is_greeting_or_chitchat` alone were
+        exactly what silently dropped a bare, legitimate clarification
+        answer before ("development", a bare server name). Both of those
+        name no target of their own and are one or two words — so this
+        additionally requires the message to name its own concrete target
+        (instance, database, or environment) AND run longer than a bare
+        answer plausibly would. A short reply to "which server did you
+        mean?" can trivially set `instance_hint` too, so the word-count
+        floor is doing real work here, not padding: a real fresh
+        instruction ("restart the postgres-local instance", "drop the test
+        database on postgres-local") always reads as a full sentence, never
+        as a single named entity on its own.
+
+        Checks the free word-count floor FIRST, before ever calling
+        `extract_intent` — every legitimate short clarification answer
+        ("development", a bare server name, "yes") fails it immediately, at
+        zero LLM-call cost, so the added latency/API spend this whole check
+        introduces only ever lands on messages already long enough to
+        plausibly be a fresh instruction, not on the common case."""
+        if len(message.split()) < 4:
+            return None
+        llm = self._llm_for(state)
+        intent = await llm.extract_intent(
+            message,
+            known_database_names=await self._known_database_names(),
+            known_server_hints=await self._known_server_hints(),
+        )
+        if not intent.is_dba_task or intent.is_greeting_or_chitchat:
+            return None
+        names_own_target = bool(intent.instance_hint or intent.database_hint or intent.environment_hint)
+        if not names_own_target:
+            return None
+        return intent
+
+    async def _start_fresh_investigation(
+        self,
+        state: ConversationState,
+        intent: IntentExtraction,
+        message: str,
+        channel: str,
+        channel_account_id: str,
+    ) -> AgentReply:
+        """Everything `handle_message` does with a classified `intent` for a
+        brand-new investigation — extracted so
+        `_classify_potential_topic_shift`'s pivot case (an old,
+        AWAITING_CLARIFICATION investigation abandoned for a fresh one) and
+        the normal "no active investigation" case share the exact same
+        meta-command/chitchat/target-resolution handling, instead of a
+        second, independent copy that could quietly drift out of sync."""
         if intent.meta_command and not (
             intent.meta_command in ("approve", "reject") and state.pending_approval is None
         ):

@@ -443,3 +443,134 @@ async def test_the_live_three_turn_sequence_is_handled_correctly_given_one_stabl
     assert turn3.status == "ok"
     assert "tell me more" not in turn3.text
     assert llm.extract_intent_calls == 2  # turn 3 resumed rather than reclassifying
+
+
+class _StaleClarificationThenFreshInstructionLLM:
+    """Live-reproduced regression: `extract_intent` returns each of
+    `intents` in order (turn 1's fresh investigation, then turn 3's
+    would-be topic shift); `decide_next_action` asks a freeform
+    clarification on its first call (turn 1's investigation, never
+    answered) and concludes on its second (turn 3's brand-new
+    investigation, once the stale one has been abandoned)."""
+
+    def __init__(self, intents: list[IntentExtraction]):
+        self._intents = list(intents)
+        self.extract_intent_calls = 0
+        self._decide_calls = 0
+
+    async def extract_intent(self, *args, **kwargs):
+        self.extract_intent_calls += 1
+        return self._intents.pop(0)
+
+    async def decide_next_action(self, **kwargs):
+        self._decide_calls += 1
+        if self._decide_calls == 1:
+            return AskClarification(question="What do you mean by 'blah' / 'the thing'?")
+        return Conclude(summary="Dropped the test database on postgres-local as requested.")
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_fully_specified_instruction_abandons_a_stale_unanswered_clarification():
+    """Live-reproduced regression: "check blah on the thing pls fix
+    asap!!!" (deliberate gibberish) started an investigation that asked
+    what "blah"/"the thing" meant and was never answered. 32 minutes and
+    several unrelated exchanges later, "Drop the test database on
+    postgres-local, it's no longer needed" — a fully-specified, unrelated
+    instruction — got a reply that rambled about "blah" and "the thing"
+    instead of addressing the actual request, because `handle_message`
+    unconditionally treated it as a reply to the old, stale question (see
+    `_problem_statement_for_llm`, which still prepends the original,
+    never-updated `investigation.problem` verbatim).
+
+    This must now: (1) recognize the second message as its own,
+    self-contained instruction rather than an answer to "what do you mean
+    by 'blah'", (2) mark the stale investigation CONCLUDED_UNRESOLVED
+    rather than silently discard it, (3) start a genuinely fresh
+    investigation whose `problem` text contains NONE of the old, unrelated
+    wording, and (4) never re-ask for the environment — already known from
+    turn 1's own instance_hint, exactly like `_start_fresh_investigation`
+    already guarantees for any other fresh investigation in this same
+    conversation."""
+    servers = [{"id": "postgres-local", "aliases": [], "environment": "development"}]
+    llm = _StaleClarificationThenFreshInstructionLLM(
+        [
+            IntentExtraction(
+                is_dba_task=True,
+                instance_hint="postgres-local",
+                problem_summary="check blah on the thing pls fix asap!!!",
+            ),
+            IntentExtraction(
+                is_dba_task=True,
+                instance_hint="postgres-local",
+                problem_summary="Drop the test database on postgres-local, it's no longer needed.",
+            ),
+        ]
+    )
+    orchestrator, context = _orchestrator(llm, servers=servers)
+    state = context.get_or_create("conv_stale", "slack", "", "U123")
+
+    turn1 = await orchestrator.handle_message(
+        channel="slack", channel_account_id="U123", conversation_id="conv_stale",
+        channel_thread_id="", message="check blah on the thing pls fix asap!!!",
+    )
+    assert turn1.status == "clarification"
+    assert state.investigation.status == "AWAITING_CLARIFICATION"
+    assert state.database_context["environment"] == "development"
+    stale_investigation_id = state.investigation.investigation_id
+
+    turn2 = await orchestrator.handle_message(
+        channel="slack", channel_account_id="U123", conversation_id="conv_stale",
+        channel_thread_id="", message="Drop the test database on postgres-local, it's no longer needed.",
+    )
+    # A brand-new investigation, not the old one silently resumed.
+    assert state.investigation.investigation_id != stale_investigation_id
+    assert "blah" not in state.investigation.problem
+    assert "the thing" not in state.investigation.problem
+    assert turn2.status == "ok"
+    assert "blah" not in turn2.text
+    assert "the thing" not in turn2.text
+    # The environment gate must not re-ask — already known from turn 1.
+    assert "Which environment" not in turn2.text
+    assert llm.extract_intent_calls == 2  # turn 1's, plus turn 2's topic-shift check
+
+
+@pytest.mark.asyncio
+async def test_a_longer_reply_naming_no_target_of_its_own_still_resumes_the_stale_clarification():
+    """The word-count floor alone must not be the whole gate — a longer
+    reply that still doesn't name its own instance/database/environment
+    (unlike the fresh-instruction case above) reads far more like an
+    attempt to answer the pending question than a topic shift, so it must
+    still resume the SAME investigation via `investigation.last_message`,
+    not start a new one. Guards `_classify_potential_topic_shift`'s
+    `names_own_target` check specifically, independent of the word-count
+    floor `test_the_live_three_turn_sequence...` already covers."""
+    llm = _StaleClarificationThenFreshInstructionLLM(
+        [
+            IntentExtraction(
+                is_dba_task=True,
+                instance_hint="postgres-local",
+                problem_summary="check blah on the thing pls fix asap!!!",
+            ),
+            # Names no instance/database/environment of its own.
+            IntentExtraction(is_dba_task=True, problem_summary="it's the one from this morning"),
+        ]
+    )
+    orchestrator, context = _orchestrator(
+        llm, servers=[{"id": "postgres-local", "aliases": [], "environment": "development"}]
+    )
+    state = context.get_or_create("conv_stale2", "slack", "", "U123")
+
+    await orchestrator.handle_message(
+        channel="slack", channel_account_id="U123", conversation_id="conv_stale2",
+        channel_thread_id="", message="check blah on the thing pls fix asap!!!",
+    )
+    assert state.investigation.status == "AWAITING_CLARIFICATION"
+    stale_investigation_id = state.investigation.investigation_id
+
+    turn2 = await orchestrator.handle_message(
+        channel="slack", channel_account_id="U123", conversation_id="conv_stale2",
+        channel_thread_id="", message="it's the one from this morning",
+    )
+    # SAME investigation — resumed, not abandoned, despite being 6 words long.
+    assert state.investigation.investigation_id == stale_investigation_id
+    assert turn2.status == "ok"

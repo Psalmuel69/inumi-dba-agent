@@ -938,3 +938,61 @@ never a terminal investigation stage of its own); `RESOLVED`/`CLOSED`
 stages already are the terminal state, and reopening happens by simply
 starting a fresh investigation in the same conversation, not by
 transitioning a closed one).
+
+## A fresh, self-contained instruction must not be swallowed by a stale, unanswered clarification
+
+`handle_message`'s resume rule ("any message while `state.investigation` is
+not concluded is a reply to it") is itself the fix for two earlier live
+bugs (see `_ENVIRONMENT_ANSWER_RE`'s own comment and the
+`_Turn2AsksThenConcludesLLM` test above) — a bare "development" or a bare
+server name answering a clarification must never be reclassified by
+`extract_intent` and silently dropped. But that same unconditional rule
+has a failure mode of its own once a clarification is never answered:
+`AWAITING_CLARIFICATION` has no timeout, so an old, abandoned investigation
+sits there indefinitely, and *every* later message — no matter how
+obviously it's a brand-new, unrelated, fully-specified instruction — keeps
+getting framed to `decide_next_action` as "the DBA just replied" to
+whatever that stale investigation last asked (`_problem_statement_for_llm`
+still prepends the original, never-updated `investigation.problem`
+verbatim).
+
+Reproduced live: a deliberate gibberish test ("check blah on the thing pls
+fix asap!!!") asked what "blah"/"the thing" meant and was never answered.
+32 minutes and several unrelated exchanges later, "Drop the test database
+on postgres-local, it's no longer needed" — a real request — got a reply
+that rambled about "blah" and "the thing" instead of addressing it.
+Reproduced again independently the same session with a different pair of
+messages ("rebuild all indexes ... in sql server dev 01" got contaminated
+into a proposal to restart an unrelated `postgres-local` instance).
+
+The fix is a narrow, additional check — `_classify_potential_topic_shift`
+— inserted only in the one specific situation where staleness risk is
+real: `investigation.status == "AWAITING_CLARIFICATION"` (not the other
+non-concluded stages — `AWAITING_VERIFICATION` in particular is a live,
+recently-created state, not a plausibly-stale one) and no approval is
+outstanding (an outstanding approval is real and actionable; never
+abandon it for something that merely looks like a new request). Even
+there, it deliberately does NOT give `extract_intent`'s classification the
+same trust the pre-fix code already learned not to (see above) —
+`is_dba_task`/`is_greeting_or_chitchat` alone were exactly what silently
+dropped a bare, legitimate answer before. It requires the message to (a)
+run to 4+ words — checked first, at zero LLM-call cost, so this added
+latency/API spend never lands on the common case of a short, legitimate
+answer — and (b) name its own concrete target (`instance_hint`,
+`database_hint`, or `environment_hint`) once classified. A bare
+"development" or bare server name fails (a); a longer reply that still
+names no target of its own ("it's the one from this morning") fails (b)
+and correctly still resumes. Only when both hold does the stale
+investigation get marked `CONCLUDED_UNRESOLVED` (see the stage vocabulary
+above — it was genuinely never resolved) and the message routed through
+`_start_fresh_investigation` — extracted out of the tail of
+`handle_message` specifically so this pivot case and the ordinary
+"no active investigation" case share one meta-command/chitchat/target-
+resolution implementation rather than a second copy that could drift.
+See `tests/unit/test_environment_clarification.py`'s
+`test_a_fresh_fully_specified_instruction_abandons_a_stale_unanswered_clarification`
+(the live-reproduced positive case) and
+`test_a_longer_reply_naming_no_target_of_its_own_still_resumes_the_stale_clarification`
+(the negative case guarding the target-naming check specifically,
+independent of the word-count floor the three-turn test above already
+covers).
