@@ -46,6 +46,46 @@ class IdentityProvider(ABC):
         cached identity indefinitely)."""
 
 
+class GroupRoleMapping:
+    """Enterprise group -> `DBARole` mapping, loaded from configuration.
+
+    Extracted so the mock and the real OIDC provider derive roles through
+    *the same* code from *the same* config section: which enterprise group
+    grants which DBA role is a security-relevant decision that must live
+    entirely in `config/identity.yaml` (see SECURITY.md, "Identity"), never
+    in a provider's own logic, and certainly never in two divergent copies
+    of it.
+
+    Two independent gates, both required: membership of a `dba_team` group
+    makes someone a DBA at all, and a role's own group list grants that
+    specific role. Someone in `Enterprise-DBA-L3` but *not* in any
+    `dba_team` group gets no roles — so removing a leaver from one group
+    revokes everything.
+    """
+
+    def __init__(self, identity_cfg: dict[str, Any]) -> None:
+        self._dba_team_groups: set[str] = set(identity_cfg["groups"]["dba_team"])
+        self._role_group_map: dict[DBARole, set[str]] = {
+            DBARole(role_name): set(role_cfg["groups"])
+            for role_name, role_cfg in identity_cfg["roles"].items()
+        }
+
+    @classmethod
+    def from_config_file(cls, config_path: str | Path) -> GroupRoleMapping:
+        raw = yaml.safe_load(Path(config_path).read_text(encoding="utf-8"))
+        return cls(raw["identity"])
+
+    def derive_roles(self, groups: list[str]) -> list[DBARole]:
+        group_set = set(groups)
+        if not (group_set & self._dba_team_groups):
+            return []
+        return [
+            role
+            for role, required_groups in self._role_group_map.items()
+            if group_set & required_groups
+        ]
+
+
 class _DirectoryEntry:
     __slots__ = ("subject_id", "email", "display_name", "channel_accounts", "groups", "mfa")
 
@@ -70,12 +110,7 @@ class MockIdentityProvider(IdentityProvider):
     def __init__(self, config_path: str | Path):
         config_path = Path(config_path)
         raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-        identity_cfg = raw["identity"]
-        self._dba_team_groups: set[str] = set(identity_cfg["groups"]["dba_team"])
-        self._role_group_map: dict[DBARole, set[str]] = {
-            DBARole(role_name): set(role_cfg["groups"])
-            for role_name, role_cfg in identity_cfg["roles"].items()
-        }
+        self._roles = GroupRoleMapping(raw["identity"])
         directory_entries = list(raw.get("mock_directory", []))
 
         # Optional local-only overlay (gitignored — see config/
@@ -96,23 +131,13 @@ class MockIdentityProvider(IdentityProvider):
             _DirectoryEntry(entry) for entry in directory_entries
         ]
 
-    def _derive_roles(self, groups: list[str]) -> list[DBARole]:
-        group_set = set(groups)
-        if not (group_set & self._dba_team_groups):
-            return []
-        return [
-            role
-            for role, required_groups in self._role_group_map.items()
-            if group_set & required_groups
-        ]
-
     def _to_identity(self, entry: _DirectoryEntry) -> VerifiedIdentity:
         return VerifiedIdentity(
             subject_id=entry.subject_id,
             email=entry.email,
             display_name=entry.display_name,
             enterprise_groups=list(entry.groups),
-            dba_roles=self._derive_roles(entry.groups),
+            dba_roles=self._roles.derive_roles(entry.groups),
             mfa_satisfied=entry.mfa,
             authenticated_at=dt.datetime.now(dt.UTC).isoformat(),
         )

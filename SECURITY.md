@@ -15,7 +15,7 @@
 | 9 | Privileged operations fail closed | `PolicyEngine.default_decision = DENY`; `CredentialProvider` adapters raise rather than fall back (`_UnconfiguredSecretsManagerProvider`) |
 | 10 | Approval bound to exact action parameters | `ApprovalContext.action_hash()` — actor, tool, tool version, target, normalized arguments, environment, database, risk level, all hashed together |
 | 11 | Approval expires | `ApprovalEngine` always sets `expires_at`; `_expire_if_needed` is checked on every decide/verify call, including after an approval has already been granted (an *unused* approved action still lapses) |
-| 12 | Database credentials managed outside the agent | `CredentialProvider` abstraction with pluggable Vault/AWS/Azure/GCP backends |
+| 12 | Database credentials managed outside the agent | `CredentialProvider` abstraction with implemented Vault/AWS/Azure/GCP backends (`execution/credentials/provider.py`), each fetching just-in-time from the real secrets manager |
 | 13 | Database output treated as untrusted data | Agent planners inspect only structural fields (row counts, named ids); the system prompt for the real LLM provider explicitly instructs it never to treat tool-result text as instructions (defense in depth on top of the structural design) |
 | 14 | Audit records cannot be modified by the agent | `gateway/domain/audit.py::AuditLog` exposes only `record`/`record_security_event` — no update/delete method exists anywhere in the codebase |
 | 15 | Production/non-production explicitly separated | `Environment` enum; every policy table, every registered server, every risk assessment is environment-scoped |
@@ -47,13 +47,36 @@ coin flip, the security properties above would be unchanged, because:
 
 ## Identity
 
-- Real deployments implement `common.identity.IdentityProvider` against a
-  real OIDC/AAD/Okta backend (never against Slack/Teams display names).
+- `IDENTITY_PROVIDER=oidc` selects `OIDCIdentityProvider`
+  (`common/identity/oidc_provider.py`), a real implementation against a
+  standards-based IdP — OIDC Discovery for endpoint metadata, OAuth 2.0
+  client credentials for Inumi's own directory access, SCIM 2.0 for the
+  lookup itself (Okta / Entra ID / Ping / generic, no vendor branches).
+  Never against Slack/Teams display names.
+- A chat webhook carries no token, so resolution is a *directory query*,
+  not token validation: `GET /Users?filter=<attr> eq "<channel account
+  id>"`, where `<attr>` is the per-channel attribute declared in
+  `config/identity.yaml`'s `oidc.channel_attributes`. A channel with no
+  attribute configured resolves to `None` rather than guessing one. The
+  account id is escaped before it enters the SCIM filter — an unescaped
+  quote there would be an authentication bypass, not merely a bad query.
+- `refresh(subject_id)` always issues its own directory call; no resolved
+  identity is ever cached, so a revoked group takes effect on the next tool
+  call. (Inumi's own client-credentials token *is* cached — that
+  authenticates the service, not the user.)
+- Every failure mode — network, auth, 5xx, inactive account, ambiguous
+  match, malformed resource — returns `None`, which every call site already
+  treats as "not a recognized DBA". Nothing is raised past the provider.
 - `MockIdentityProvider` (`common/identity/provider.py`) is a config-driven
   stand-in for local dev/tests, loading `config/identity.yaml` — a file that
-  intentionally contains zero real employees.
+  intentionally contains zero real employees. It remains the default.
 - Group → role mapping lives entirely in configuration
-  (`config/identity.yaml`'s `identity.roles` section), never in code.
+  (`config/identity.yaml`'s `identity.roles` section), never in code — and
+  both providers derive roles through the same `GroupRoleMapping`, so the
+  mapping cannot drift between dev and production.
+- `common/identity/factory.py::build_identity_provider` is the single
+  selection point; an unrecognized `IDENTITY_PROVIDER` is an error, never a
+  silent fallback to the mock directory.
 
 ## Secrets
 
@@ -62,9 +85,20 @@ coin flip, the security properties above would be unchanged, because:
   `config/dev_credentials.yaml`.
 - `SECRETS_PROVIDER=local_dev` is the only mode that reads a plaintext
   YAML file (`config/dev_credentials.yaml`, git-ignored, created from
-  `config/dev_credentials.example.yaml`) — every other provider fails
-  closed until wired to a real secrets manager
-  (`execution/credentials/provider.py`).
+  `config/dev_credentials.example.yaml`). The four real backends —
+  `vault`, `aws_secrets_manager`, `azure_key_vault`, `gcp_secret_manager`
+  (`execution/credentials/provider.py`) — fetch the credential
+  just-in-time from the real secrets manager per execution, and still fail
+  closed whenever their connection details are unset.
+- Every real backend maps *any* SDK/network/auth failure, and any secret
+  that isn't a complete credential (missing `password`, non-integer
+  `port`, non-JSON payload), onto
+  `InumiError(DEPENDENCY_UNAVAILABLE)`. A raw vendor exception never
+  escapes that module — it would carry secret paths/ARNs, vendor stack
+  traces, and sometimes the secret material itself past the failure
+  boundary — and a partial credential is never returned.
+- Error text naming a bad secret names *fields*, never values; vendor
+  detail is confined to `InumiError.internal_detail` (logs/audit only).
 - Structured logging (`common/observability.py`) redacts any field whose
   *name* matches a secret-shaped pattern (`password`, `token`, `secret`,
   `api_key`, `connection_string`, ...) as a defense-in-depth backstop — the

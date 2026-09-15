@@ -36,6 +36,47 @@ identity:
       groups:
         - "Enterprise-DBA-Managers"
 
+# =============================================================================
+# Real OIDC provider (IDENTITY_PROVIDER=oidc) — ignored entirely when
+# IDENTITY_PROVIDER=mock, which is the default.
+#
+# A Slack/Teams webhook only ever hands us a channel-native account id (a
+# Slack user id, an AAD object id) — there is no token to validate, so
+# OIDCIdentityProvider resolves it with a SCIM 2.0 directory query:
+#
+#     GET <directory_endpoint>?filter=<attribute> eq "<account id>"
+#
+# `channel_attributes` is the real-directory analogue of each mock user's
+# `channel_accounts` block below: instead of listing the ids per user, it
+# says WHICH DIRECTORY ATTRIBUTE holds that channel's id, and asks the IdP.
+# Populating that attribute is a directory-sync concern (SCIM provisioning
+# from Slack/Teams, an HR feed, a scripted backfill) — no standard defines
+# it, which is exactly why there is no built-in default: a channel with no
+# attribute configured here resolves to None (fail closed) rather than
+# guessing an attribute name and risking a wrong match.
+#
+# The `identity.groups` / `identity.roles` mapping above is shared verbatim
+# with the mock — group -> role is always configuration, never code.
+# -----------------------------------------------------------------------------
+oidc:
+  # SCIM 2.0 /Users endpoint of your IdP (Okta, Entra ID, Ping, ...).
+  # Endpoint metadata for auth comes from OIDC discovery at OIDC_ISSUER;
+  # SCIM's base URL is not published there, so it is set explicitly.
+  directory_endpoint: ""
+  channel_attributes: {}
+  #   slack: "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:slackUserId"
+  #   teams: "externalId"      # AAD object id
+  #
+  # Attribute holding the user's group memberships (SCIM's own multi-valued
+  # `groups`, or a flat list of names some IdPs project instead).
+  groups_attribute: "groups"
+  # Directory-asserted MFA enrollment. A chat message is not an
+  # authentication event, so this reflects directory state, not a login;
+  # anything other than an explicit affirmative reads as false.
+  mfa_attribute: "mfaEnrolled"
+  # OAuth scope requested for Inumi's own client-credentials token.
+  scopes: ""
+
 # -----------------------------------------------------------------------------
 # Mock directory — DEVELOPMENT / TEST ONLY.
 #

@@ -128,7 +128,13 @@ it to a destructive tool. Never wired into `make test` / CI.
   plumbing is covered by the opt-in `tests/e2e/test_live_llm.py`; the
   registry / selection logic is fully covered offline in
   `tests/unit/test_llm_registry.py`.
-- Real Vault/AWS/Azure/GCP secret retrieval — each provider's "not
-  configured" fail-closed path is tested
-  (`tests/unit/test_execution_service.py::test_without_configured_credentials_execution_fails_closed`);
-  the actual SDK calls are a deployment-time integration concern.
+- Real network calls to Vault/AWS/Azure/GCP or an OIDC IdP. The providers
+  themselves *are* covered, via their injectable-client seam: a fake SDK
+  client is passed to `client=` / `http_client=` and the tests assert on
+  request shape, response parsing, error mapping and fail-closed behavior
+  (`tests/unit/test_secrets_providers.py`,
+  `tests/unit/test_oidc_identity_provider.py`, plus
+  `tests/unit/test_execution_service.py::test_without_configured_credentials_execution_fails_closed`).
+  What remains a deployment-time concern is only whether a given tenant's
+  real endpoint, credentials and secret layout are correct — see
+  [ARCHITECTURE.md](ARCHITECTURE.md#real-identity-and-credential-providers-configuration-and-the-injectable-client-pattern).
