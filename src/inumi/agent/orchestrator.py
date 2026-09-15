@@ -29,6 +29,7 @@ from inumi.agent.playbooks.library import PLAYBOOKS, get_playbook, match_playboo
 from inumi.agent.reply import AgentReply, ApprovalCard
 from inumi.agent.tool_client import ToolClient
 from inumi.common.ids import new_id
+from inumi.common.models.catalog import LeastPrivilegeFinding
 from inumi.common.models.tool import OperationType, ToolCallRequest, ToolCallResponse, ToolCallStatus
 from inumi.common.observability import get_logger
 from inumi.common.server_reference import normalize_server_reference
@@ -1573,6 +1574,20 @@ class AgentOrchestrator:
             lines.append(f"  {db['name']} ({db['state']}, {size}) — {dict(kinds)}{exts}")
         if cat.get("warnings"):
             lines.append(f"  warnings: {cat['warnings'][:3]}")
+        # Least-privilege finding (see common/models/catalog.py's
+        # LeastPrivilegeFinding): a diagnostic login that can SELECT user
+        # data contradicts this system's core premise, so it is surfaced
+        # plainly here rather than buried in the catalog JSON. Rendered from
+        # `warning_text()` — the same single source the Gateway's own
+        # WARNING log uses, so the two can never drift apart. `.get` rather
+        # than `[...]` throughout: a catalog discovered before this field
+        # existed round-trips as `None` and must still render.
+        finding = cat.get("least_privilege") or {}
+        warning = LeastPrivilegeFinding.model_validate(finding).warning_text() if finding else None
+        if warning:
+            lines.append(f"  {warning}")
+            if finding.get("scope_note"):
+                lines.append(f"    scope: {finding['scope_note']}")
         return AgentReply(text="\n".join(lines))
 
     async def _handle_discover_command(

@@ -1111,3 +1111,100 @@ tool result, kept distinct because the two mean different things: a masked
 field is gone, a scrubbed field is still there and still readable and only
 its values were replaced. See `tests/unit/test_query_scrubber.py` and the
 no-regression guards in `tests/unit/test_data_policy.py`.
+
+## The least-privilege premise was documented, never verified
+
+`execution/discovery/base.py`'s module docstring has always stated the
+premise this whole architecture rests on: "The diagnostic login only needs
+read access to catalog / DMV / stats views ... It should NOT have SELECT on
+user tables — Inumi never reads table contents." Nothing ever checked it.
+That made it a statement of intent rather than a control: a login
+provisioned with `db_datareader`, a Postgres superuser, or a MySQL account
+carrying a stray `GRANT SELECT ON *.*` all work perfectly and silently hold
+far more authority than the design calls for. Every other control in
+SECURITY.md is enforced in code; this one was enforced by hoping whoever
+provisioned the account read the docs.
+
+Each `ServerDiscoverer` now implements `_check_least_privilege`, run once
+per discovery run on the connection the crawl already holds — not per
+database, and never per tool call. Discovery is already lazy-on-first-use
+and re-run by `/discover`, so this rides along on an existing trip rather
+than adding one. The result is a structured `LeastPrivilegeFinding` on
+`ServerCatalog`.
+
+**Effective permissions, not grant tables, wherever the engine offers them.**
+This is the difference between a check that works and one that misses its
+own main cases:
+
+- **PostgreSQL**: `pg_catalog.has_table_privilege(current_user, oid,
+  'SELECT')` over `pg_class`, excluding `pg_catalog`/`information_schema`
+  and the TOAST/temp schemas. Reading
+  `information_schema.table_privileges` instead — the obvious first
+  instinct — would miss a superuser entirely: a superuser holds SELECT on
+  everything while being listed as grantee of nothing, and that is the
+  worst login this check exists to find.
+- **SQL Server**: `HAS_PERMS_BY_NAME(..., 'OBJECT', 'SELECT')` over
+  `sys.objects` (`type IN ('U','V')`, `is_ms_shipped = 0`, system schemas
+  excluded). `sys.database_permissions` records only *explicit* grants, so
+  it returns nothing for a login whose SELECT arrives via `db_datareader`
+  membership — by far the most common way a diagnostic account ends up able
+  to read user data, and likewise nothing for a `sysadmin`.
+- **MySQL/MariaDB**: no per-object effective-permission function exists, so
+  the grant tables are the only source and all three levels are unioned —
+  `USER_PRIVILEGES`, `SCHEMA_PRIVILEGES`, `TABLE_PRIVILEGES`. Reading only
+  `TABLE_PRIVILEGES` would miss both broader cases: `GRANT SELECT ON *.*`
+  and `GRANT SELECT ON appdb.*` leave no row there at all despite granting
+  strictly more access than any per-table grant.
+
+**Read-only, always.** This is introspection of the engine's own privilege
+views and nothing else — Inumi reports, a human DBA revokes. No code path
+here attempts a REVOKE or any other change, pinned per engine by
+`test_no_statement_ever_attempts_to_change_a_privilege`.
+
+**A finding is never fatal, and a failed check is never a clean bill of
+health.** A privilege view the login can't read is a normal outcome on a
+locked-down server, and the catalog is perfectly usable without this field,
+so `run_least_privilege_check` converts any failure into
+`checked=False` — the same best-effort posture discovery already takes for
+a database it can't enumerate. That is deliberately distinct from
+`checked=True, has_user_table_select=False`: a check that never ran must
+not be reported as clean. Neither renders a warning, but only the latter
+means anything.
+
+**Honest about scope.** A positive finding is conclusive. A negative one is
+scoped, and says so: PostgreSQL and SQL Server both scope relation
+visibility per database, so the check covers the database the discovery
+connection is bound to, and `scope_note` carries that caveat to the DBA
+rather than implying instance-wide coverage. MySQL's privilege views are
+genuinely instance-wide, so there a clean result really is clean
+everywhere. The scan is row-capped at 200; hitting the cap sets
+`count_is_lower_bound` so the reported number reads "at least N" instead of
+being silently wrong.
+
+**Surfacing.** The finding gets its own WARNING-level structlog record in
+`gateway/domain/discovery.py::refresh_server` (`least_privilege_violation`)
+so it reaches log-based alerting without anyone reading a catalog, and the
+DBA-facing copy renders in `/catalog <server>`
+(`orchestrator.py::_handle_catalog_command`): "⚠️ This server's diagnostic
+login (inumi_diag) has SELECT on 12 user table/views (e.g. dbo.Accounts,
+dbo.Customers) — should be revoked for least-privilege". Both surfaces
+render `LeastPrivilegeFinding.warning_text()` rather than deriving their
+own wording, the same single-source-of-truth reasoning `_verification_note`
+follows for verification outcomes, so the log and the chat reply can never
+disagree.
+
+`least_privilege` is a dedicated optional field rather than another entry
+in `ServerCatalog.warnings`: that list is free text about what one crawl
+couldn't read, whereas this is a structured, durable security finding about
+the login itself that the renderer needs the count, sample and login name
+from. Optional so a catalog discovered before this check existed round-trips
+unchanged through the catalog store and still renders — pinned by
+`test_a_catalog_predating_this_feature_still_renders`. The sample carries
+object *names* only, never row data, which would rather defeat the point.
+
+See `tests/unit/test_least_privilege_check.py` (per engine, both the
+over-privileged and clean cases, via `FakeQueryExecutor` — no real
+connection) and `tests/integration/test_least_privilege_surfacing.py`,
+which drives the real `/catalog` command through the real orchestrator and
+Gateway to prove the warning actually reaches the DBA, since a finding
+nobody ever sees is the same as no finding.

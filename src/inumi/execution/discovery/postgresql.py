@@ -11,9 +11,45 @@ from inumi.common.models.catalog import (
     DiscoveredDatabase,
     DiscoveredExtension,
     DiscoveredObject,
+    LeastPrivilegeFinding,
     ServerCatalog,
 )
-from inumi.execution.discovery.base import ServerDiscoverer, _fetch, _now
+from inumi.execution.adapters.base import QueryExecutor
+from inumi.execution.discovery.base import (
+    LEAST_PRIVILEGE_SCAN_LIMIT,
+    ServerDiscoverer,
+    _fetch,
+    _now,
+    build_least_privilege_finding,
+    run_least_privilege_check,
+)
+
+#: Effective SELECT on user relations, for the connected login.
+#:
+#: `has_table_privilege(current_user, oid, 'SELECT')` is the *effective*
+#: answer, which is what matters here — it already accounts for direct
+#: grants, grants inherited through role membership, grants to PUBLIC, and
+#: superuser status. Reading `information_schema.table_privileges` instead
+#: would miss the superuser case entirely (a Postgres superuser holds SELECT
+#: on everything while being listed as grantee of nothing), and that is one
+#: of the worst logins this check exists to find.
+#:
+#: `relkind` covers ordinary and partitioned tables, plain and materialized
+#: views, and foreign tables — every relation kind that can hold user rows.
+#: System and TOAST/temp schemas are excluded: Inumi's login is *supposed*
+#: to read pg_catalog, so counting it would make every server look guilty.
+_LEAST_PRIVILEGE_SQL = """
+    select n.nspname as schema_name, c.relname as object_name
+    from pg_catalog.pg_class c
+    join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+    where c.relkind in ('r', 'p', 'v', 'm', 'f')
+      and n.nspname not in ('pg_catalog', 'information_schema')
+      and n.nspname not like 'pg_toast%%'
+      and n.nspname not like 'pg_temp%%'
+      and pg_catalog.has_table_privilege(current_user, c.oid, 'SELECT')
+    order by n.nspname, c.relname
+    limit %(limit)s
+"""
 
 
 class PostgreSQLDiscoverer(ServerDiscoverer):
@@ -40,6 +76,12 @@ class PostgreSQLDiscoverer(ServerDiscoverer):
                 "pg_encoding_to_char(encoding) AS encoding, datcollate "
                 "FROM pg_database WHERE datistemplate = false AND datallowconn ORDER BY datname",
             )
+            # Once per discovery run, on the bootstrap connection — not once
+            # per database and never per tool call. Postgres scopes relation
+            # visibility to the connected database, so this reports on the
+            # bootstrap database; `scope_note` says so rather than implying
+            # instance-wide coverage.
+            least_privilege = await run_least_privilege_check(self, boot, server_id=server_id)
         finally:
             await boot.close()
 
@@ -69,6 +111,18 @@ class PostgreSQLDiscoverer(ServerDiscoverer):
             instance_properties=instance_properties,
             databases=databases,
             warnings=warnings,
+            least_privilege=least_privilege,
+        )
+
+    async def _check_least_privilege(self, executor: QueryExecutor) -> LeastPrivilegeFinding:
+        rows = await _fetch(executor, _LEAST_PRIVILEGE_SQL, {"limit": LEAST_PRIVILEGE_SCAN_LIMIT})
+        return build_least_privilege_finding(
+            rows,
+            login=self._credentials.username,
+            scope_note=(
+                f"checked against the '{self._credentials.database}' database "
+                "(PostgreSQL scopes relation visibility per connection)"
+            ),
         )
 
     async def _fill_database(self, db: DiscoveredDatabase, db_name: str) -> None:

@@ -12,11 +12,62 @@ from __future__ import annotations
 from inumi.common.models.catalog import (
     DiscoveredDatabase,
     DiscoveredObject,
+    LeastPrivilegeFinding,
     ServerCatalog,
 )
-from inumi.execution.discovery.base import ServerDiscoverer, _fetch, _now
+from inumi.execution.adapters.base import QueryExecutor
+from inumi.execution.discovery.base import (
+    LEAST_PRIVILEGE_SCAN_LIMIT,
+    ServerDiscoverer,
+    _fetch,
+    _now,
+    build_least_privilege_finding,
+    run_least_privilege_check,
+)
 
 _SYSTEM_SCHEMAS = ("information_schema", "performance_schema", "mysql", "sys")
+
+#: SELECT grants held by the connected login, at all three levels.
+#:
+#: MySQL/MariaDB have no per-object effective-permission function (no
+#: equivalent of PostgreSQL's `has_table_privilege` or SQL Server's
+#: `HAS_PERMS_BY_NAME`), so the grant tables themselves are the only source
+#: and all three levels must be unioned. Reading only
+#: `TABLE_PRIVILEGES` — the obvious single view, and the one the feature
+#: request named first — would miss both broader cases entirely:
+#: `GRANT SELECT ON *.*` (recorded in USER_PRIVILEGES) and
+#: `GRANT SELECT ON appdb.*` (recorded in SCHEMA_PRIVILEGES) leave no row
+#: there at all, despite granting strictly MORE access than any per-table
+#: grant. A global grant is reported as the single object `*.*`.
+#:
+#: GRANTEE is stored as `'user'@'host'`, while `CURRENT_USER()` returns
+#: `user@host` — hence the REPLACE/CONCAT reshaping rather than a plain
+#: equality test. These are the engine's own read-only metadata views;
+#: nothing here alters a grant.
+_LEAST_PRIVILEGE_SQL = """
+    SELECT schema_name, object_name FROM (
+        SELECT '*' AS schema_name, '*' AS object_name
+          FROM information_schema.USER_PRIVILEGES
+         WHERE PRIVILEGE_TYPE = 'SELECT'
+           AND GRANTEE = CONCAT("'", REPLACE(CURRENT_USER(), '@', "'@'"), "'")
+        UNION ALL
+        SELECT TABLE_SCHEMA AS schema_name, '*' AS object_name
+          FROM information_schema.SCHEMA_PRIVILEGES
+         WHERE PRIVILEGE_TYPE = 'SELECT'
+           AND GRANTEE = CONCAT("'", REPLACE(CURRENT_USER(), '@', "'@'"), "'")
+           AND TABLE_SCHEMA NOT IN
+               ('information_schema', 'performance_schema', 'mysql', 'sys')
+        UNION ALL
+        SELECT TABLE_SCHEMA AS schema_name, TABLE_NAME AS object_name
+          FROM information_schema.TABLE_PRIVILEGES
+         WHERE PRIVILEGE_TYPE = 'SELECT'
+           AND GRANTEE = CONCAT("'", REPLACE(CURRENT_USER(), '@', "'@'"), "'")
+           AND TABLE_SCHEMA NOT IN
+               ('information_schema', 'performance_schema', 'mysql', 'sys')
+    ) g
+    ORDER BY schema_name, object_name
+    LIMIT %(limit)s
+"""
 
 
 class MySQLDiscoverer(ServerDiscoverer):
@@ -62,7 +113,10 @@ class MySQLDiscoverer(ServerDiscoverer):
             raise
 
         databases: list[DiscoveredDatabase] = []
+        least_privilege = None
         try:
+            # Once per discovery run, on the connection already open.
+            least_privilege = await run_least_privilege_check(self, ex, server_id=server_id)
             for row in schema_rows:
                 name = row["name"]
                 if name in _SYSTEM_SCHEMAS:
@@ -88,6 +142,18 @@ class MySQLDiscoverer(ServerDiscoverer):
             instance_properties=instance_properties,
             databases=databases,
             warnings=warnings,
+            least_privilege=least_privilege,
+        )
+
+    async def _check_least_privilege(self, executor: QueryExecutor) -> LeastPrivilegeFinding:
+        rows = await _fetch(executor, _LEAST_PRIVILEGE_SQL, {"limit": LEAST_PRIVILEGE_SCAN_LIMIT})
+        return build_least_privilege_finding(
+            rows,
+            login=self._credentials.username,
+            # Unlike PostgreSQL/SQL Server, MySQL's privilege views are
+            # genuinely instance-wide, so a clean result here really does
+            # mean clean everywhere on this server.
+            scope_note="checked instance-wide (MySQL privilege views span every schema)",
         )
 
     async def _fill_database(self, ex, db: DiscoveredDatabase, schema: str) -> None:
