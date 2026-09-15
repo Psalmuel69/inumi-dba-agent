@@ -5,9 +5,44 @@ from __future__ import annotations
 from inumi.common.models.catalog import (
     DiscoveredDatabase,
     DiscoveredObject,
+    LeastPrivilegeFinding,
     ServerCatalog,
 )
-from inumi.execution.discovery.base import ServerDiscoverer, _fetch, _now
+from inumi.execution.adapters.base import QueryExecutor
+from inumi.execution.discovery.base import (
+    LEAST_PRIVILEGE_SCAN_LIMIT,
+    ServerDiscoverer,
+    _fetch,
+    _now,
+    build_least_privilege_finding,
+    run_least_privilege_check,
+)
+
+#: Effective SELECT on user tables/views, for the connected login.
+#:
+#: `HAS_PERMS_BY_NAME` is the engine's own effective-permission function and
+#: is deliberately chosen over reading `sys.database_permissions` directly.
+#: That catalog view only records *explicit* grants, so it returns nothing
+#: for a login whose SELECT arrives via `db_datareader` membership — by far
+#: the most common way a diagnostic account ends up able to read user data,
+#: and precisely the case this check exists to surface. `HAS_PERMS_BY_NAME`
+#: also correctly returns 1 for a `sysadmin`, which `sys.database_permissions`
+#: likewise would not show.
+#:
+#: `is_ms_shipped = 0` plus the schema exclusion keeps the engine's own
+#: catalog objects out — Inumi's login is *supposed* to read those.
+#: This is pure introspection: no REVOKE, no ALTER, nothing but a SELECT.
+_LEAST_PRIVILEGE_SQL = """
+    SELECT TOP (%(limit)s) s.name AS schema_name, o.name AS object_name
+    FROM sys.objects o
+    JOIN sys.schemas s ON s.schema_id = o.schema_id
+    WHERE o.type IN ('U', 'V')
+      AND o.is_ms_shipped = 0
+      AND s.name NOT IN ('sys', 'INFORMATION_SCHEMA')
+      AND HAS_PERMS_BY_NAME(
+            QUOTENAME(s.name) + '.' + QUOTENAME(o.name), 'OBJECT', 'SELECT') = 1
+    ORDER BY s.name, o.name
+"""
 
 
 def _quote(identifier: str) -> str:
@@ -76,6 +111,10 @@ class SQLServerDiscoverer(ServerDiscoverer):
                         warnings.append(f"could not read objects in {db_name}: {exc}")
                 databases.append(db)
 
+            # Once per discovery run, on the connection already open — not
+            # once per database and never per tool call.
+            least_privilege = await run_least_privilege_check(self, ex, server_id=server_id)
+
             return ServerCatalog(
                 server_id=server_id,
                 discovered_at=_now(),
@@ -84,9 +123,21 @@ class SQLServerDiscoverer(ServerDiscoverer):
                 instance_properties=instance_properties,
                 databases=databases,
                 warnings=warnings,
+                least_privilege=least_privilege,
             )
         finally:
             await ex.close()
+
+    async def _check_least_privilege(self, executor: QueryExecutor) -> LeastPrivilegeFinding:
+        rows = await _fetch(executor, _LEAST_PRIVILEGE_SQL, {"limit": LEAST_PRIVILEGE_SCAN_LIMIT})
+        return build_least_privilege_finding(
+            rows,
+            login=self._credentials.username,
+            scope_note=(
+                f"checked against the '{self._credentials.database}' database "
+                "(SQL Server scopes object permissions per database)"
+            ),
+        )
 
     async def _objects(self, ex, db_name: str) -> list[DiscoveredObject]:
         q = _quote(db_name)

@@ -75,6 +75,22 @@ class DiscoveryOrchestrator:
             databases=len(catalog.databases),
             warnings=len(catalog.warnings),
         )
+        # A login that can read user data is a real, actionable security
+        # finding, not a routine discovery detail — it gets its own
+        # WARNING-level record so it shows up in log-based alerting without
+        # anyone having to read a catalog. The DBA-facing copy of the same
+        # finding goes out through `/catalog <server>`; both render
+        # `warning_text()` so they can never disagree.
+        finding = catalog.least_privilege
+        if finding is not None and finding.warning_text():
+            logger.warning(
+                "least_privilege_violation",
+                server_id=server_id,
+                login=finding.login,
+                granted_object_count=finding.granted_object_count,
+                count_is_lower_bound=finding.count_is_lower_bound,
+                scope=finding.scope_note,
+            )
         return catalog
 
     async def refresh_all(self) -> dict[str, str]:

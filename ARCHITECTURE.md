@@ -1323,3 +1323,215 @@ See `tests/unit/test_environment_clarification.py`'s
 (the negative case guarding the target-naming check specifically,
 independent of the word-count floor the three-turn test above already
 covers).
+
+## Masking a sensitive FIELD says nothing about a sensitive VALUE
+
+`DataMinimizer` (`gateway/domain/data_policy.py`) has always masked a field
+whose NAME matches a sensitive pattern — `password`, `ssn`,
+`account_number`. That is the right treatment for a column that is nothing
+but a secret, and it is blind to the case that actually leaks: a field whose
+name is entirely innocuous and whose CONTENTS are a verbatim statement a
+user ran. `database.get_running_queries` returns a `query_text` column
+straight out of `pg_stat_activity` (`execution/adapters/postgresql.py::
+running_queries`; SQL Server's `sys.dm_exec_sql_text` and MySQL's
+`information_schema.PROCESSLIST` return the same shape), and
+
+```
+SELECT * FROM accounts WHERE account_number = '1234567890'
+                         AND customer_name = 'Jane Doe'
+```
+
+passed through untouched — the field name "query_text" is not sensitive, so
+nothing masked it — into the LLM and from there into a Slack channel. That
+is real customer data leaving the database through the one component whose
+entire premise (SECURITY.md control 13) is that Inumi reads diagnostics and
+never table contents.
+
+The fix has to keep the statement *useful*. A DBA diagnosing a slow or
+deadlocked query needs the shape — which tables, which columns, which
+joins, whether there's a leading-wildcard LIKE, whether the ORDER BY is
+unindexed. None of that is the literal values, and the literal values are
+exactly what must never leave. So `gateway/domain/query_scrubber.py`
+parses the text with `sqlglot` — the same real parser `sql_validator.py`
+already uses for the read-only SQL tool, and the house pattern this follows
+— and replaces every literal node with a placeholder, leaving table names,
+column names, keywords and structure intact.
+
+**Where it lives: inside `DataMinimizer`, keyed on field name.** The
+alternative considered was a second, separate minimization pass applied only
+to the four tool results that obviously return raw text
+(`running_queries`, `top_queries`, `deadlocks`, `error_logs`). Rejected,
+for two reasons. First, it has a hole on day one:
+`database.get_blocking_sessions` is not in that list, and all three
+adapters return `blocked_query`/`blocking_query`/`blocked_query_text` from
+it (`execution/adapters/*.py::blocking`) — full statement text carrying
+exactly the literals this exists to catch; `get_sessions` returns
+`query_text` too. A tool-id-keyed list is a list someone must remember to
+extend every time an adapter grows a column; a field-name-keyed rule covers
+them the moment they appear. Second, `DataMinimizer.apply()` is already the
+one mandatory seam — every tool result passes through it, unconditionally,
+at step 10 of `tool_call_handler.py::_handle_inner`, with no code path
+around it. A second pass would be a second thing to remember to call.
+`DataPolicyConfig` therefore grows a `free_text_sql_field_patterns` set
+*separate from* `sensitive_field_patterns`, because the treatment differs:
+sensitive fields are fully masked, these are literal-scrubbed and keep
+their shape. Sensitive-by-name is checked first and wins, which is what
+makes the change strictly additive — every field masked before is still
+masked, byte for byte (`test_existing_field_name_masking_is_completely_
+unchanged`).
+
+**The placeholder is `<redacted>`, not `?`.** `?` is the obvious first
+instinct and is wrong: `?` is itself a real bind-parameter marker in the
+ODBC/MySQL dialects this system talks to, so `... WHERE account_number = ?`
+is indistinguishable from a statement the application genuinely sent
+parameterized. A DBA (and the LLM) could not tell "Inumi removed a value
+here" from "the app used a bind parameter here" — and those call for
+different diagnoses. `<redacted>` can never be mistaken for something the
+application wrote, and it matches the existing `***MASKED***` convention:
+say plainly that something was deliberately removed. It is emitted as a
+string literal in every position, numbers included, so the scrubbed
+statement still parses as valid SQL. Every literal goes, including ones
+harmless in isolation (a `LIMIT 100`, a `WHERE status = 1`): the
+alternative is a per-literal judgment about whether a value is sensitive,
+which is the kind of guess this codebase refuses to make elsewhere and the
+one that fails silently and unrecoverably when it guesses wrong.
+
+**The fallback path is deliberately less precise, and deliberately not a
+crash.** A Postgres error-log line, SQL Server's `deadlock_graph` XML,
+MySQL's `SHOW ENGINE INNODB STATUS` blob, a plan's text representation, or
+a valid statement chopped mid-literal (the adapters themselves truncate at
+`left(query, 200)` / `LEFT(INFO, 500)`) are all normal inputs here.
+Dropping the row or raising would blind the DBA to exactly the diagnostic
+they asked for and turn a successful tool call into a FAILED one, so
+`scrub_sql_literals` falls back to a regex scrub of obvious literal shapes
+— single-quoted runs and bare numeric runs — instead of the AST. With no
+structure there is no way to tell a value from an identifier, so that path
+over-redacts on purpose (timestamps and PIDs in a log line go too). Two
+deliberate carve-outs: double-quoted text is preserved, because in standard
+SQL it is an *identifier* and in Postgres log text it is almost always the
+object name the DBA needs (`violates unique constraint "accounts_pkey"`);
+and sqlglot is always tried first, so anything that really is SQL gets the
+precise treatment.
+
+**Why a successful parse is not enough on its own.** sqlglot is permissive
+by design and `ErrorLevel.RAISE` does not cover this. Verified against
+sqlglot 30.17: `"Jane Doe"` parses cleanly as an `exp.Alias` and
+round-trips as `Jane AS Doe` — the value survives unredacted *and* the text
+is mangled; `"1234567890"` parses as a bare `exp.Literal`. Accepting those
+would be strictly worse than the fallback. So a parse counts only when the
+root node is an actual statement (`_SQL_STATEMENT_TYPES`); a bare
+expression or fragment is treated as unparseable and handed to the regex
+path, which redacts both of those examples correctly.
+
+Cost, measured on the worst realistic case (a full 100-row result — the
+`max_rows` cap — every row carrying a complete statement): ~142ms, about
+1.4ms per statement. A result of plain metric columns costs ~0.9ms total,
+since no field name matches and no parse is attempted. Both are immaterial
+against the database round trip and the 20s per-decision LLM deadline.
+
+Only `str` values are scrubbed. That is not incidental: PostgreSQL's
+`deadlocks()` returns a numeric `deadlocks` COUNTER, and several engines
+return NULL query text for an idle session — running a text scrubber over
+an int would destroy a metric while protecting nothing. The Gateway reports
+`literal_scrubbed_fields` alongside the existing `masked_fields` in the
+tool result, kept distinct because the two mean different things: a masked
+field is gone, a scrubbed field is still there and still readable and only
+its values were replaced. See `tests/unit/test_query_scrubber.py` and the
+no-regression guards in `tests/unit/test_data_policy.py`.
+
+## The least-privilege premise was documented, never verified
+
+`execution/discovery/base.py`'s module docstring has always stated the
+premise this whole architecture rests on: "The diagnostic login only needs
+read access to catalog / DMV / stats views ... It should NOT have SELECT on
+user tables — Inumi never reads table contents." Nothing ever checked it.
+That made it a statement of intent rather than a control: a login
+provisioned with `db_datareader`, a Postgres superuser, or a MySQL account
+carrying a stray `GRANT SELECT ON *.*` all work perfectly and silently hold
+far more authority than the design calls for. Every other control in
+SECURITY.md is enforced in code; this one was enforced by hoping whoever
+provisioned the account read the docs.
+
+Each `ServerDiscoverer` now implements `_check_least_privilege`, run once
+per discovery run on the connection the crawl already holds — not per
+database, and never per tool call. Discovery is already lazy-on-first-use
+and re-run by `/discover`, so this rides along on an existing trip rather
+than adding one. The result is a structured `LeastPrivilegeFinding` on
+`ServerCatalog`.
+
+**Effective permissions, not grant tables, wherever the engine offers them.**
+This is the difference between a check that works and one that misses its
+own main cases:
+
+- **PostgreSQL**: `pg_catalog.has_table_privilege(current_user, oid,
+  'SELECT')` over `pg_class`, excluding `pg_catalog`/`information_schema`
+  and the TOAST/temp schemas. Reading
+  `information_schema.table_privileges` instead — the obvious first
+  instinct — would miss a superuser entirely: a superuser holds SELECT on
+  everything while being listed as grantee of nothing, and that is the
+  worst login this check exists to find.
+- **SQL Server**: `HAS_PERMS_BY_NAME(..., 'OBJECT', 'SELECT')` over
+  `sys.objects` (`type IN ('U','V')`, `is_ms_shipped = 0`, system schemas
+  excluded). `sys.database_permissions` records only *explicit* grants, so
+  it returns nothing for a login whose SELECT arrives via `db_datareader`
+  membership — by far the most common way a diagnostic account ends up able
+  to read user data, and likewise nothing for a `sysadmin`.
+- **MySQL/MariaDB**: no per-object effective-permission function exists, so
+  the grant tables are the only source and all three levels are unioned —
+  `USER_PRIVILEGES`, `SCHEMA_PRIVILEGES`, `TABLE_PRIVILEGES`. Reading only
+  `TABLE_PRIVILEGES` would miss both broader cases: `GRANT SELECT ON *.*`
+  and `GRANT SELECT ON appdb.*` leave no row there at all despite granting
+  strictly more access than any per-table grant.
+
+**Read-only, always.** This is introspection of the engine's own privilege
+views and nothing else — Inumi reports, a human DBA revokes. No code path
+here attempts a REVOKE or any other change, pinned per engine by
+`test_no_statement_ever_attempts_to_change_a_privilege`.
+
+**A finding is never fatal, and a failed check is never a clean bill of
+health.** A privilege view the login can't read is a normal outcome on a
+locked-down server, and the catalog is perfectly usable without this field,
+so `run_least_privilege_check` converts any failure into
+`checked=False` — the same best-effort posture discovery already takes for
+a database it can't enumerate. That is deliberately distinct from
+`checked=True, has_user_table_select=False`: a check that never ran must
+not be reported as clean. Neither renders a warning, but only the latter
+means anything.
+
+**Honest about scope.** A positive finding is conclusive. A negative one is
+scoped, and says so: PostgreSQL and SQL Server both scope relation
+visibility per database, so the check covers the database the discovery
+connection is bound to, and `scope_note` carries that caveat to the DBA
+rather than implying instance-wide coverage. MySQL's privilege views are
+genuinely instance-wide, so there a clean result really is clean
+everywhere. The scan is row-capped at 200; hitting the cap sets
+`count_is_lower_bound` so the reported number reads "at least N" instead of
+being silently wrong.
+
+**Surfacing.** The finding gets its own WARNING-level structlog record in
+`gateway/domain/discovery.py::refresh_server` (`least_privilege_violation`)
+so it reaches log-based alerting without anyone reading a catalog, and the
+DBA-facing copy renders in `/catalog <server>`
+(`orchestrator.py::_handle_catalog_command`): "⚠️ This server's diagnostic
+login (inumi_diag) has SELECT on 12 user table/views (e.g. dbo.Accounts,
+dbo.Customers) — should be revoked for least-privilege". Both surfaces
+render `LeastPrivilegeFinding.warning_text()` rather than deriving their
+own wording, the same single-source-of-truth reasoning `_verification_note`
+follows for verification outcomes, so the log and the chat reply can never
+disagree.
+
+`least_privilege` is a dedicated optional field rather than another entry
+in `ServerCatalog.warnings`: that list is free text about what one crawl
+couldn't read, whereas this is a structured, durable security finding about
+the login itself that the renderer needs the count, sample and login name
+from. Optional so a catalog discovered before this check existed round-trips
+unchanged through the catalog store and still renders — pinned by
+`test_a_catalog_predating_this_feature_still_renders`. The sample carries
+object *names* only, never row data, which would rather defeat the point.
+
+See `tests/unit/test_least_privilege_check.py` (per engine, both the
+over-privileged and clean cases, via `FakeQueryExecutor` — no real
+connection) and `tests/integration/test_least_privilege_surfacing.py`,
+which drives the real `/catalog` command through the real orchestrator and
+Gateway to prove the warning actually reaches the DBA, since a finding
+nobody ever sees is the same as no finding.

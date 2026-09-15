@@ -24,6 +24,8 @@
 | 18 | All privileged actions are auditable | Every branch of `tool_call_handler.py` (success and denial) calls `AuditLog.record` |
 | 19 | All writes require explicit policy evaluation | No code path reaches `execution.execute()` without first passing `PolicyEngine.evaluate` |
 | 20 | LLM never part of the security boundary | See "No security by prompt" below |
+| 21 | Literal values never leave a database inside free-text SQL | `gateway/domain/query_scrubber.py::scrub_sql_literals`, applied by `DataMinimizer` to every field matching `DataPolicyConfig.free_text_sql_field_patterns` (`query_text`, `blocked_query`, `deadlock_graph`, `message`, ...) at step 10 of `tool_call_handler.py` — sqlglot replaces every literal with `<redacted>` while table/column names and SQL structure survive; unparseable text (log lines, plan XML) falls back to a deliberately blunt regex scrub rather than passing through |
+| 22 | The diagnostic login's least privilege is verified, not assumed | `ServerDiscoverer._check_least_privilege` per engine (`has_table_privilege` / `HAS_PERMS_BY_NAME` / the three `information_schema` privilege views), run once per discovery run — a login holding SELECT on any user table/view produces a `LeastPrivilegeFinding` on `ServerCatalog`, a WARNING-level `least_privilege_violation` log record, and a visible warning in `/catalog <server>`. Read-only introspection: Inumi reports, a human DBA revokes — nothing here attempts a REVOKE |
 
 ## No security by prompt
 

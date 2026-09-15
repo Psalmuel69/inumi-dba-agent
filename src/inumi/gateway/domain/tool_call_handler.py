@@ -29,7 +29,7 @@ from inumi.common.models.tool import ToolCallRequest, ToolCallResponse, ToolCall
 from inumi.gateway.domain.approval import ApprovalContext, ApprovalEngine
 from inumi.gateway.domain.audit import AuditLog
 from inumi.gateway.domain.authorization import authorize
-from inumi.gateway.domain.data_policy import DataMinimizer
+from inumi.gateway.domain.data_policy import DataMinimizer, sqlglot_dialect_for_platform
 from inumi.gateway.domain.policy_engine import PolicyDecision, PolicyEngine
 from inumi.gateway.domain.rate_limiter import RateLimiter
 from inumi.gateway.domain.risk_engine import RiskEngine
@@ -337,9 +337,20 @@ class ToolCallHandler:
             await self._approvals.mark_executed(request.approval_id)
 
         # 10. Data Minimization (applied here, once, before anything reaches the Agent)
-        masked_rows, masked_fields, truncated = self._minimizer.apply(
-            result.rows, max_rows=tool.max_result_rows
+        # `minimize` rather than `apply` so the literal-scrubbing outcome is
+        # reported too (see data_policy.py's MinimizedResult). The platform's
+        # sqlglot dialect is passed through so `query_text`-style fields are
+        # parsed with the engine's own syntax rather than the generic
+        # fallback — same mapping idea as the `validate_readonly_sql` call in
+        # step 3.5 above, now shared via `sqlglot_dialect_for_platform`.
+        minimized = self._minimizer.minimize(
+            result.rows,
+            max_rows=tool.max_result_rows,
+            dialect=sqlglot_dialect_for_platform(ctx.platform.value),
         )
+        masked_rows = minimized.rows
+        masked_fields = minimized.masked_fields
+        truncated = minimized.truncated
 
         # 11. Audit (success)
         await self._audit.record(
@@ -368,6 +379,12 @@ class ToolCallHandler:
                 "row_count": len(masked_rows),
                 "truncated": truncated or result.truncated,
                 "masked_fields": masked_fields,
+                # Distinct from `masked_fields`: these fields are still
+                # present and still readable — only their literal VALUES
+                # were replaced. Reported separately so a DBA can tell a
+                # scrubbed statement from one that genuinely had no
+                # literals (see data_policy.py's MinimizedResult).
+                "literal_scrubbed_fields": minimized.literal_scrubbed_fields,
                 "affected": result.affected,
             },
             risk=risk.model_dump(mode="json"),
