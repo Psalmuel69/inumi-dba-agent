@@ -1090,6 +1090,24 @@ class AgentOrchestrator:
         investigation.status = self._conclusion_stage(investigation)
         return self._no_root_cause_reply(investigation)
 
+    @staticmethod
+    def _append_evidence_once(investigation, text: str) -> None:
+        """Append to `investigation.evidence` unless it's a byte-identical
+        repeat of the entry already at the end. Found live: a deterministic
+        planner (the mock provider — it has no way to read the freeform
+        guidance appended to `investigation.transcript` on a rejected
+        Conclude, so it proposes the exact same conclusion again every turn)
+        can retry the identical rejected Conclude turn after turn until the
+        budget runs out, and both rejection notes below (ungrounded names,
+        pending verification) are worded identically on every retry — the
+        DBA-facing evidence list ended up with the same sentence repeated
+        3+ times in a row, adding noise, not information. The transcript
+        entry (what a real model actually sees to course-correct) is still
+        appended every time, unchanged — only the human-facing summary
+        de-duplicates consecutive repeats."""
+        if not investigation.evidence or investigation.evidence[-1] != text:
+            investigation.evidence.append(text)
+
     def _finalize_conclude(
         self, investigation, action: Conclude, *, final_chance: bool = False
     ) -> AgentReply | None:
@@ -1132,9 +1150,10 @@ class AgentOrchestrator:
                     "result": {"rejected": ungrounded, "message": note},
                 }
             )
-            investigation.evidence.append(
+            self._append_evidence_once(
+                investigation,
                 f"(a draft conclusion naming {', '.join(ungrounded)} was rejected — "
-                "not found in any evidence gathered)"
+                "not found in any evidence gathered)",
             )
             logger.warning(
                 "conclusion_rejected_ungrounded_identifiers",
@@ -1170,9 +1189,10 @@ class AgentOrchestrator:
                     "result": {"pending_tool_id": pending["tool_id"], "message": note},
                 }
             )
-            investigation.evidence.append(
+            self._append_evidence_once(
+                investigation,
                 f"(a draft conclusion after {pending['tool_id']} was rejected — "
-                "not yet independently verified)"
+                "not yet independently verified)",
             )
             logger.warning(
                 "conclusion_rejected_pending_verification",

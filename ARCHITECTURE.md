@@ -1535,3 +1535,53 @@ connection) and `tests/integration/test_least_privilege_surfacing.py`,
 which drives the real `/catalog` command through the real orchestrator and
 Gateway to prove the warning actually reaches the DBA, since a finding
 nobody ever sees is the same as no finding.
+
+## kill_session requires approval even in development, and a rejected Conclude's evidence note doesn't repeat itself
+
+Two related, live-found issues while testing the deterministic mock
+planner end to end against a real blocking scenario.
+
+**`kill_session` was `ALLOW` for every role in every environment,
+including development.** Every other write tool in `config/policy.yaml`'s
+development tier that actually changes something requires at least an
+approval click (`create_index`/`rebuild_index` for `DBA_L1`,
+`modify_configuration`, `restart_instance`, `failover`) — `kill_session`
+was the one exception, executing with zero human confirmation step at
+all. Confirmed live: a genuine blocking chain (a real `FOR UPDATE` lock
+held by one session, blocking a second) got investigated and the head
+blocker killed automatically, no approval card, no pause. Fixed by making
+`database.kill_session` `REQUIRES_APPROVAL` for every role in development
+too. This is deliberately a *single*-approval gate, not dual —
+`kill_session`'s own `risk_level` is `MEDIUM` (`tool_catalog.py`), so
+`ApprovalEngine.approve` never sets `requires_dual_approval` for it (see
+its own `requires_dual_approval` branch), which means the requester can
+still approve their own request in one extra click — this only adds a
+pause-and-confirm step, not a second-person requirement. (`restart_instance`/
+`failover`, tested separately this same session, *are* dual-approval — the
+self-approval block that test triggered is specific to
+`requires_dual_approval=True` tools, not a blanket rule; the code already
+drew this distinction correctly, this session's own summary just stated
+it too broadly the first time.) See
+`tests/unit/test_policy_engine.py::test_kill_session_requires_approval_even_in_development_for_every_role`.
+
+**A rejected `Conclude`'s evidence note could repeat itself verbatim.**
+`_finalize_conclude` rejects a `Conclude` that would report a write as
+done before an independent re-check has happened
+(`investigation.pending_verification`) — a real model, shown the
+`internal.verification_check` transcript entry this appends, usually
+course-corrects and actually calls the suggested verification tool. The
+*deterministic* mock planner can't: its `decide_next_action` only ever
+reads the `executed` tool-id set from the transcript, never the freeform
+guidance text appended to a rejected turn, so once it has executed
+`kill_session` it keeps proposing the exact same `Conclude` every
+remaining turn — and every rejection appended the identical sentence to
+`investigation.evidence` again. A DBA testing the blocking flow with the
+mock provider saw the same "(a draft conclusion after
+database.kill_session was rejected — not yet independently verified)"
+sentence three times in a row in the final summary. Same problem, same
+fix, for the sibling ungrounded-identifier rejection path. Fixed with
+`AgentOrchestrator._append_evidence_once`: skip appending to
+`investigation.evidence` when the text is a byte-identical repeat of the
+entry already at the end — `investigation.transcript` (what a real model
+actually reads to try to course-correct) still gets the reminder fresh
+every turn, unchanged; only the DBA-facing summary de-duplicates.

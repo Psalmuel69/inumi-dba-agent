@@ -42,6 +42,30 @@ def test_dba_l2_requires_approval_to_kill_session_in_production(
     assert evaluation.decision == PolicyDecision.REQUIRES_APPROVAL
 
 
+def test_kill_session_requires_approval_even_in_development_for_every_role(
+    policy_engine, tool_registry, make_ctx
+):
+    """Found live: kill_session was ALLOW for every role in development, so
+    a real session got silently terminated with zero human confirmation
+    step at all -- not even the requester's own approval click. Development
+    stays low-friction for read tools and non-disruptive writes
+    (update_statistics, cancel_query), but kill_session actually severs a
+    real connection, which is disruptive enough to always warrant a pause.
+    This is deliberately a single-approval gate, not dual -- kill_session's
+    risk_level is MEDIUM (tool_catalog.py), so the requester can still
+    approve their own request in one extra click (see
+    test_approval.py/ApprovalEngine.approve's requires_dual_approval
+    branch) -- this only adds a confirm-before-you-kill-it step, not a
+    second-person requirement."""
+    tool = tool_registry.get("database.kill_session")
+    ctx = make_ctx("postgres-local")
+    for role in DBARole:
+        evaluation = policy_engine.evaluate(
+            environment=Environment.DEVELOPMENT, tool=tool, role=role, ctx=ctx
+        )
+        assert evaluation.decision == PolicyDecision.REQUIRES_APPROVAL
+
+
 def test_read_only_tool_allowed_for_all_roles_in_production(policy_engine, tool_registry, make_ctx):
     tool = tool_registry.get("database.get_blocking_sessions")
     ctx = make_ctx("corebanking-sqlserver-prod")

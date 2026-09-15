@@ -34,7 +34,14 @@ environments:
     database.get_error_logs: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
 
     database.cancel_query: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
-    database.kill_session: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
+    # Requires approval even in development (found live: it was silently
+    # terminating real sessions with zero human confirmation step at all,
+    # in either dev or uat/production). Not dual-approval — kill_session's
+    # own risk_level is MEDIUM (tool_catalog.py), so ApprovalEngine.approve
+    # never sets requires_dual_approval for it, and the requester can still
+    # approve their own request in one extra click; this only adds a
+    # pause-and-confirm step, not a second-person requirement.
+    database.kill_session: { DBA_L1: REQUIRES_APPROVAL, DBA_L2: REQUIRES_APPROVAL, DBA_L3: REQUIRES_APPROVAL, DBA_MANAGER: REQUIRES_APPROVAL }
     database.update_statistics: { DBA_L1: ALLOW, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
     database.create_index: { DBA_L1: REQUIRES_APPROVAL, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }
     database.rebuild_index: { DBA_L1: REQUIRES_APPROVAL, DBA_L2: ALLOW, DBA_L3: ALLOW, DBA_MANAGER: ALLOW }

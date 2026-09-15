@@ -216,6 +216,23 @@ async def test_repeated_conclude_without_ever_rechecking_falls_through_to_unveri
     assert "NOT independently verified" in reply.text
     assert investigation.pending_verification is not None  # still pending — never silently cleared
     assert investigation.status == "CONCLUDED_UNVERIFIED"
+    # Found live: the identical bad_conclude was rejected 5 times mid-loop
+    # (same reason, every time, since nothing in this scenario ever changes
+    # between attempts), and each rejection used to append the same
+    # sentence to investigation.evidence verbatim — a DBA reading the final
+    # summary saw "(a draft conclusion after database.kill_session was
+    # rejected...)" repeated 5 times in a row. The evidence list (DBA-
+    # facing) must collapse consecutive identical rejections to one entry;
+    # only the transcript (what the model itself sees to try to
+    # course-correct) repeats it every turn.
+    rejection_note = (
+        "(a draft conclusion after database.kill_session was rejected — "
+        "not yet independently verified)"
+    )
+    assert investigation.evidence.count(rejection_note) == 1
+    assert (
+        len([t for t in investigation.transcript if t.get("tool_id") == "internal.verification_check"]) == 5
+    )
 
 
 # --- Scoping: only the mapped writes trigger this, and only real writes --
