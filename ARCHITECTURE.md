@@ -771,13 +771,118 @@ Agent were fully compromised and claimed "this user is DBA_MANAGER", it
 would have no channel to make that claim in the first place — there is no
 such field.
 
+## Real identity and credential providers: configuration, and the injectable-client pattern
+
+Two abstractions in this system front a real external dependency that
+cannot exist in dev or CI: `IdentityProvider` (who is this DBA?) and
+`CredentialProvider` (what credential opens this database?). Both now have
+real implementations alongside their dev-safe defaults, and both are built
+the same way — worth reading once before touching either.
+
+### Selecting one
+
+| Env var | Values | Factory |
+|---|---|---|
+| `IDENTITY_PROVIDER` | `mock` (default), `oidc` | `common/identity/factory.py::build_identity_provider` |
+| `SECRETS_PROVIDER` | `local_dev` (default), `vault`, `aws_secrets_manager`, `azure_key_vault`, `gcp_secret_manager` | `execution/credentials/provider.py::build_credential_provider` |
+
+Each factory is the *single* place that maps a config string to a class;
+no service has its own `if settings.identity_provider == ...` ladder. An
+unrecognized value raises rather than falling back to the dev-safe option —
+a typo in `IDENTITY_PROVIDER` must never quietly hand production a
+fictitious directory. `Settings.validate_for_production` separately refuses
+to start a production process on `mock`/`local_dev` at all.
+
+### What each real backend needs
+
+**OIDC** (`common/identity/oidc_provider.py`) — `OIDC_ISSUER`,
+`OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, plus an `oidc:` section in
+`config/identity.yaml` giving the SCIM `directory_endpoint` and, per
+channel, which directory attribute holds that channel's account id
+(`channel_attributes`). Endpoint metadata comes from OIDC Discovery; the
+directory query is SCIM 2.0. The group → role mapping is the *same*
+`identity:` section the mock reads, through the same `GroupRoleMapping`
+class, so roles cannot drift between dev and production.
+
+The design decision worth knowing: a Slack/Teams webhook hands you a
+channel-native account id and no token, so there is nothing to validate —
+resolution is necessarily a directory *lookup*
+(`?filter=<attr> eq "<id>"`). `oidc.channel_attributes` is the real-directory
+analogue of each mock user's `channel_accounts` block: instead of listing
+ids per user, it says which attribute holds them and asks the IdP.
+Populating that attribute is a directory-sync concern. There is no default
+mapping — an unconfigured channel fails closed instead of guessing an
+attribute name and risking a wrong match.
+
+**Secrets managers** (`execution/credentials/provider.py`) — one env var
+each (`VAULT_ADDR`+`VAULT_TOKEN`, `AWS_REGION`, `AZURE_KEY_VAULT_URL`,
+`GCP_PROJECT_ID`); cloud auth is the platform's own ambient chain
+(instance/task role, managed identity, ADC), never a key in Inumi's
+config. All four read the *same* JSON object — the keys
+`LocalDevCredentialProvider` already reads from
+`config/dev_credentials.yaml` — under a documented per-backend naming
+convention (`secret/inumi/db/<id>`, `inumi/db/<id>`, `inumi-db-<id>`).
+Moving from dev to a real manager is a transport change, not a re-modelling.
+
+Each SDK is an optional extra (`secrets-vault`, `secrets-aws`,
+`secrets-azure`, `secrets-gcp`), imported lazily inside the provider that
+needs it — the same treatment the LLM SDKs and database drivers get. A
+Vault deployment never needs boto3 installed, and a missing package
+surfaces as a `DEPENDENCY_UNAVAILABLE` naming the package and the extra,
+not an import crash at startup. The OIDC provider needs no new dependency
+at all: `httpx` is already a base dependency.
+
+### The injectable-client pattern (how any of this is testable)
+
+There is no Vault server, OIDC tenant, or cloud account in dev or CI, and
+none is faked into existence. Instead every real provider takes an optional
+client on the constructor — `client=` on the four credential providers,
+`http_client=` on the OIDC provider:
+
+- **`None` (production):** the provider builds the real SDK client lazily,
+  on first use, from its own configuration.
+- **Injected (tests):** that object is used verbatim. No SDK is imported,
+  no network call is made, and the test asserts on *this codebase's*
+  behavior — request shape, response parsing, error mapping, fail-closed
+  defaults.
+
+This is the established seam for "real thing unavailable in dev/test" here:
+see `tests/canned_adapter.py`, `FakeQueryExecutor` in
+`tests/unit/test_adapters.py`, and the LLM provider tests. Fakes for these
+two live in `tests/unit/test_secrets_providers.py` and
+`tests/unit/test_oidc_identity_provider.py`; each mimics only the one or
+two calls its provider actually makes.
+
+Type hints for injected clients are `Any`, not the real SDK type — the same
+choice `execution/adapters/connections.py` makes for `pyodbc`/`psycopg`
+handles — so `mypy src` type-checks cleanly on a machine where none of the
+four optional SDKs is installed.
+
+### Fail closed, in each one's own idiom
+
+The two abstractions fail closed *differently*, because their call sites
+do:
+
+- A `CredentialProvider` **raises**
+  `InumiError(DEPENDENCY_UNAVAILABLE)` — the execution must stop, and a
+  raw SDK exception must never escape (it would carry secret paths, vendor
+  stack traces, sometimes the secret itself). A secret that exists but is
+  incomplete is treated identically to an unreachable manager: never a
+  partial credential.
+- An `IdentityProvider` **returns `None`** — matching
+  `MockIdentityProvider`'s contract, which `gateway/api/deps.py` and
+  `channels/api/app.py` are already written against, and which denies the
+  request. An identity that cannot be proven is an identity that does not
+  exist. Nothing is raised past those two methods.
+
 ## Package layout
 
 ```
 src/inumi/
   common/            # shared vocabulary — no service-specific logic
     models/           # failures, target, tool, risk, identity, execution contracts
-    identity/         # IdentityProvider + MockIdentityProvider
+    identity/         # IdentityProvider, MockIdentityProvider,
+                      #   OIDCIdentityProvider (real OIDC/SCIM), factory
     config.py          # Settings (pydantic-settings)
     service_auth.py    # signed service-to-service tokens
     observability.py   # structured logging + tracing, secret redaction

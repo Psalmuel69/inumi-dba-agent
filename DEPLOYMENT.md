@@ -45,23 +45,49 @@ of that change is contained.
 
 ## Identity provider
 
-Implement `common.identity.IdentityProvider` against your real enterprise
-IdP (Azure AD / Okta / Ping / ...) and set `IDENTITY_PROVIDER` accordingly;
-`gateway/api/state.py::_build_identity_provider` is the single place that
-needs to construct it. Never ship `MockIdentityProvider` to production —
-it is deliberately config-driven and would need a real, secret-bearing
-directory to be dangerous, but it is not an authentication mechanism.
+Set `IDENTITY_PROVIDER=oidc` and provide `OIDC_ISSUER`, `OIDC_CLIENT_ID`,
+`OIDC_CLIENT_SECRET`, plus the `oidc:` section of `config/identity.yaml`
+(SCIM `directory_endpoint`, and the per-channel directory attribute that
+holds each channel's account id). `OIDCIdentityProvider` works against any
+standards-based IdP — Azure AD/Entra ID, Okta, Ping, generic OIDC+SCIM.
+`common/identity/factory.py::build_identity_provider` is the single place
+that constructs it.
+
+A channel whose attribute isn't configured resolves to nobody, by design,
+so populate those attributes at directory-sync time before cutover. Never
+ship `MockIdentityProvider` to production — it is deliberately
+config-driven and is not an authentication mechanism; `INUMI_ENV=production`
+refuses to start on it.
 
 ## Secrets manager
 
 Set `SECRETS_PROVIDER` to `vault`, `aws_secrets_manager`,
-`azure_key_vault`, or `gcp_secret_manager` and fill in the corresponding
-connection details. Each `*CredentialProvider` in
-`execution/credentials/provider.py` currently fails closed with a clear
-error until its SDK integration is completed — intentionally, so a
-misconfiguration cannot silently fall back to a less-secure credential
-source (spec §63). Wiring in the real SDK calls is the last step before a
-production cutover.
+`azure_key_vault`, or `gcp_secret_manager`, fill in the corresponding
+connection detail (`VAULT_ADDR`+`VAULT_TOKEN`, `AWS_REGION`,
+`AZURE_KEY_VAULT_URL`, `GCP_PROJECT_ID`), and install that backend's SDK
+extra — `pip install -e ".[secrets-vault]"` (or `secrets-aws`,
+`secrets-azure`, `secrets-gcp`). Only the selected backend's SDK is needed;
+each is imported lazily by its own provider.
+
+Store one secret per registered server id, containing the same JSON object
+`config/dev_credentials.yaml` holds per entry (`host`, `port`, `username`,
+`password`, `database`, optional `options`), under that backend's naming
+convention — `secret/inumi/db/<id>` (Vault KV v2), `inumi/db/<id>` (AWS),
+`inumi-db-<id>` (Azure, GCP). Each provider's class docstring in
+`execution/credentials/provider.py` carries the exact `vault kv put` /
+`aws secretsmanager create-secret` / `az keyvault secret set` /
+`gcloud secrets create` invocation.
+
+Cloud auth uses the platform's ambient credential chain (instance/task
+role, managed identity, ADC) — Inumi never holds a cloud access key. Scope
+it tightly: `secretsmanager:GetSecretValue` on `inumi/db/*`, the
+`Key Vault Secrets User` role on that one vault, or
+`roles/secretmanager.secretAccessor`.
+
+Every backend still fails closed if its connection detail is unset, and
+maps any SDK/network/auth failure — or a secret that isn't a complete
+credential — to `DEPENDENCY_UNAVAILABLE` rather than falling back to a
+less-secure credential source (spec §63).
 
 ## Database schema migrations
 

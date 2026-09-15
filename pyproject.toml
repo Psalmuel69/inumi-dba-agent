@@ -47,6 +47,19 @@ dependencies = [
 # Kept as an alias so existing `pip install -e ".[db-drivers]"` invocations
 # still work; the drivers are now part of the base install.
 db-drivers = []
+# Secrets-manager SDKs (spec §19). One group per backend, and none of them
+# in the base install: a deployment selects exactly one `SECRETS_PROVIDER`,
+# so making all four unconditional would force every install to carry three
+# unused cloud SDKs (and their transitive auth/crypto stacks). Each is
+# imported lazily, inside the provider that needs it
+# (`execution/credentials/provider.py`), exactly like the LLM provider SDKs
+# above — so a Vault deployment never needs boto3 installed, and a missing
+# package surfaces as a clear DEPENDENCY_UNAVAILABLE naming the extra
+# rather than an import error at service startup.
+secrets-vault = ["hvac>=2.0"]
+secrets-aws = ["boto3>=1.34"]
+secrets-azure = ["azure-keyvault-secrets>=4.8", "azure-identity>=1.17"]
+secrets-gcp = ["google-cloud-secret-manager>=2.20"]
 dev = [
   "pytest>=8.2.0",
   "pytest-asyncio>=0.23.0",

@@ -43,7 +43,7 @@ python -m venv .venv
 ./.venv/Scripts/python.exe -m pip install -e ".[dev]"
 cp .env.example .env
 cp config/dev_credentials.example.yaml config/dev_credentials.yaml
-./.venv/Scripts/python.exe -m pytest        # 413 pass, 24 opt-in skipped
+./.venv/Scripts/python.exe -m pytest        # 472 pass, 24 opt-in skipped
 ```
 
 Run the full stack (bundled sample PostgreSQL target included):
@@ -124,7 +124,7 @@ make docker-up       # full stack via docker compose
 Phases 1–9 of the build (foundation → gateway → execution → read tools →
 agent → channels → approvals → controlled writes → restricted-tool
 framework), server registration + discovery, and MySQL/MariaDB adapters are
-implemented and covered by an automated test suite (413 passing + 24
+implemented and covered by an automated test suite (472 passing + 24
 opt-in: unit, integration, and a dedicated security suite). The Execution
 Service uses real database connections against SQL Server, PostgreSQL,
 MySQL, and MariaDB; the Agent supports Anthropic, OpenAI, Gemini, and
@@ -133,8 +133,12 @@ DeepSeek with per-conversation model selection, bounded-latency resilience
 provider outage degrades to a clear message in seconds, never a multi-minute
 hang), and, for a recognized scenario, playbook-driven investigation (see
 [ARCHITECTURE.md](ARCHITECTURE.md#investigation-loop-freeform-vs-playbook-driven)).
-An Oracle adapter, a real OIDC identity provider, and the real
-Vault/AWS/Azure/GCP secrets-manager SDK calls are structured for but not yet
-implemented — see the "Extending" / "Adding" sections in
+Identity and secrets are production-ready: a real OIDC/SCIM identity
+provider (`IDENTITY_PROVIDER=oidc`) and real Vault/AWS/Azure/GCP
+secrets-manager backends (`SECRETS_PROVIDER=...`), all four SDKs being
+optional extras imported only by the backend actually selected — see
+[ARCHITECTURE.md](ARCHITECTURE.md#real-identity-and-credential-providers-configuration-and-the-injectable-client-pattern).
+An Oracle adapter is structured for but not yet implemented — see the
+"Extending" / "Adding" sections in
 [DATABASE_ADAPTERS.md](DATABASE_ADAPTERS.md), [ARCHITECTURE.md](ARCHITECTURE.md),
 and [DEPLOYMENT.md](DEPLOYMENT.md).

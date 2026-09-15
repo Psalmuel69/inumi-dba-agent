@@ -32,7 +32,7 @@ from inumi.channels.teams.auth import BotFrameworkJWTVerifier, DevTeamsAuthVerif
 from inumi.channels.teams.cards import render_reply_card
 from inumi.channels.teams.sender import TeamsMessageSender
 from inumi.common.config import Settings, get_settings
-from inumi.common.identity import MockIdentityProvider
+from inumi.common.identity import build_identity_provider
 from inumi.common.observability import configure_logging, get_logger
 from inumi.common.service_auth import ServiceTokenIssuer
 
@@ -96,7 +96,7 @@ def create_app(settings: Settings | None = None, *, agent_transport=None) -> Fas
     settings.validate_for_production()
     configure_logging("channels", settings.log_level)
 
-    identity_provider = MockIdentityProvider(settings.identity_config_path)
+    identity_provider = build_identity_provider(settings)
     issuer = ServiceTokenIssuer(settings.service_jwt_secret, settings.service_jwt_issuer)
     slack_sender = SlackMessageSender(settings.slack_bot_token)
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from inumi.common.config import Settings
-from inumi.common.identity import IdentityProvider, MockIdentityProvider
+from inumi.common.identity import IdentityProvider, build_identity_provider
 from inumi.common.service_auth import ServiceTokenIssuer, ServiceTokenVerifier
 from inumi.gateway.domain.catalog import CatalogStore
 from inumi.gateway.domain.data_policy import DataMinimizer
@@ -22,16 +22,6 @@ from inumi.gateway.domain.tool_registry import ToolRegistry
 from inumi.gateway.infrastructure.catalog_store import DbCatalogStore
 from inumi.gateway.infrastructure.db.session import Database
 from inumi.gateway.infrastructure.execution_client import ExecutionClient, HttpExecutionClient
-
-
-def _build_identity_provider(settings: Settings) -> IdentityProvider:
-    if settings.identity_provider == "mock":
-        return MockIdentityProvider(settings.identity_config_path)
-    raise NotImplementedError(
-        f"IDENTITY_PROVIDER='{settings.identity_provider}' is not wired in this build. "
-        "Implement an OIDCIdentityProvider satisfying the IdentityProvider interface "
-        "and register it here — application code above this line never changes."
-    )
 
 
 @dataclass
@@ -64,7 +54,7 @@ class GatewayState:
         return cls(
             settings=settings,
             db=database,
-            identity_provider=_build_identity_provider(settings),
+            identity_provider=build_identity_provider(settings),
             tool_registry=ToolRegistry(settings),
             server_registry=server_registry,
             catalog_store=catalog_store,
