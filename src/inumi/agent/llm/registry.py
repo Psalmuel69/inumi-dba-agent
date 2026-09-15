@@ -14,8 +14,11 @@ interface.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from inumi.agent.llm.anthropic_provider import AnthropicLLMProvider
 from inumi.agent.llm.base import LLMProvider
+from inumi.agent.llm.fallback import CrossProviderFallbackLLM, FallbackEvent
 from inumi.agent.llm.gemini_provider import GeminiLLMProvider
 from inumi.agent.llm.mock import MockLLMProvider
 from inumi.agent.llm.openai_provider import DeepSeekLLMProvider, OpenAILLMProvider
@@ -123,6 +126,60 @@ class LLMRegistry:
             # A stale/invalid selection falls back to the default rather than
             # erroring mid-conversation.
             return self.build(default_provider, default_model)
+
+    def resilient_for_conversation(
+        self,
+        *,
+        provider: str | None,
+        model: str | None,
+        notices: list[FallbackEvent] | None = None,
+    ) -> LLMProvider:
+        """`for_conversation`, wrapped so a total outage of the chosen
+        provider escapes to the next configured one instead of dead-ending
+        in "temporarily unavailable" (see `agent.llm.fallback`).
+
+        Returns the bare provider — byte-identical to `for_conversation` —
+        in the two cases where a fallback chain would be meaningless:
+
+        - the resolved provider is the deterministic offline planner
+          (`llm_provider="mock"`, or no keys configured at all, or
+          `for_testing`). That path must never reach network code or any
+          fallback logic; it is what the entire default test suite runs on.
+        - there is nothing else to fall back TO — a single configured
+          provider, which is today's actual common case. Not wrapping keeps
+          that deployment on exactly the code path (and the single, full
+          `_OVERALL_DEADLINE_SECONDS` budget) it had before this existed.
+
+        A locked `LLM_PROVIDER` or an explicit `/model` choice deliberately
+        does NOT suppress the chain: an answer from another vendor beats
+        telling a DBA the agent is stuck while three usable API keys sit
+        idle. What it does guarantee is disclosure — every substitution is
+        recorded on `notices` and surfaced in the reply text by
+        `AgentOrchestrator.handle_message`.
+        """
+        if self._fixed is not None:
+            # `for_testing` pinned one provider for every conversation —
+            # there is nothing to fall back to by construction, and the
+            # pinned object is frequently a bare duck-typed test double
+            # rather than a real `LLMProvider` subclass. Short-circuited
+            # first, exactly as `for_conversation` does, so this layer can
+            # never impose a new interface requirement on test doubles.
+            return self._fixed
+        primary = self.for_conversation(provider=provider, model=model)
+        if primary.provider_name == "mock":
+            return primary
+        rest = [p for p in self.configured_providers() if p != primary.provider_name]
+        if not rest:
+            return primary
+        # `model` is deliberately NOT carried across: a model id is
+        # provider-specific ("gemini-3.5-flash" means nothing to Anthropic),
+        # so each fallback uses its own default model. Built lazily — a
+        # provider whose SDK constructor rejects its key must not break the
+        # primary path at construction time.
+        fallbacks: list[tuple[str, Callable[[], LLMProvider]]] = [
+            (name, (lambda n=name: self.build(n, None))) for name in rest  # type: ignore[misc]
+        ]
+        return CrossProviderFallbackLLM(primary, fallbacks, notices=notices)
 
     def validate_selection(self, provider: str, model: str | None) -> str | None:
         """Return an error string if (provider, model) can't be selected, else

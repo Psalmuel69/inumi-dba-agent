@@ -33,6 +33,44 @@ from inumi.common.observability import get_logger
 
 logger = get_logger(__name__)
 
+# A hard ceiling on ONE decide_next_action/extract_intent call, no matter
+# how many providers/models/retries it takes internally to get there. Lives
+# at module scope (not only as the class attribute below) because the
+# cross-provider fallback layer — `agent.llm.fallback` — has to divide
+# exactly this same number across the providers it may walk, rather than
+# adding a second, independent ceiling of its own on top of it. See
+# ARCHITECTURE.md's "Latency ceiling on a single LLM decision" and
+# "Cross-provider LLM fallback" sections.
+OVERALL_DEADLINE_SECONDS = 20.0
+
+
+class LLMProviderUnavailableError(RuntimeError):
+    """This provider, as a whole, could not answer this specific call.
+
+    Raised only by the `*_or_raise` variants below, and only for the case
+    where the provider never produced a response at all — every retry hit a
+    transport/API error, or the overall deadline expired. Verified live as
+    the shape of a real outage: Gemini's free tier returning
+    RESOURCE_EXHAUSTED for every one of its own fallback models in turn, so
+    the provider's internal model fallback (`gemini_model_unavailable_
+    switching`) had nothing left to try either.
+
+    Deliberately NOT raised when the provider *did* answer and the answer
+    merely failed validation: a malformed completion is a prompt/schema
+    problem that a different vendor is no more likely to get right, and it
+    already has its own distinct, well-tested degraded reply (see
+    `decide_next_action` below and tests/unit/test_structured_llm_
+    resilience.py). Only a genuinely unreachable provider is worth spending
+    another vendor's latency budget on.
+    """
+
+    def __init__(self, provider_name: str, what: str, cause: Exception):
+        super().__init__(f"{provider_name} could not complete {what}: {cause}")
+        self.provider_name = provider_name
+        self.what = what
+        self.cause = cause
+
+
 _INTENT_SYSTEM = (
     "You classify a message from a verified database administrator. Extract "
     "whether this is a database operations task, a database name hint (only "
@@ -347,6 +385,64 @@ class LLMProvider(ABC):
     async def list_models(self) -> list[str]:
         return [self.model]
 
+    def _unavailable_question(self) -> str:
+        """The exact DBA-facing wording for "this provider is down". One
+        function, on the interface rather than on one implementation, so
+        the cross-provider fallback layer can reproduce it verbatim for
+        whichever provider the conversation actually chose once every
+        configured provider has been tried and failed (see
+        `agent.llm.fallback.CrossProviderFallbackLLM.decide_next_action`) —
+        the DBA gets the same message they always did, naming the provider
+        they picked, never whichever vendor happened to be last in the
+        chain."""
+        return (
+            f"The {self.provider_name} service is temporarily unavailable "
+            "(high demand or a transient error) — please try again in a moment."
+        )
+
+    # --- raising variants, for the cross-provider fallback layer ----------
+    #
+    # The two public methods above never raise: they always degrade to
+    # something the DBA can read, which is exactly right when they are the
+    # last word on a call. `agent.llm.fallback.CrossProviderFallbackLLM`
+    # needs the opposite — it has to know that THIS provider is unreachable
+    # so it can spend the remaining time budget on a different vendor before
+    # the degraded reply becomes the final answer.
+    #
+    # The base implementations simply delegate, so a provider that cannot
+    # fail this way (`MockLLMProvider`, the deterministic offline planner)
+    # needs no special-casing anywhere and can never trigger a fallback
+    # walk. `StructuredLLMProvider` overrides both.
+
+    async def extract_intent_or_raise(
+        self,
+        message: str,
+        known_database_names: list[str],
+        known_server_hints: list[str] | None = None,
+    ) -> IntentExtraction:
+        """As `extract_intent`, but raises `LLMProviderUnavailableError`
+        when this provider could not be reached at all."""
+        return await self.extract_intent(message, known_database_names, known_server_hints)
+
+    async def decide_next_action_or_raise(
+        self,
+        *,
+        problem_statement: str,
+        available_tool_ids: list[str],
+        transcript: list[dict[str, Any]],
+        turn_count: int,
+        tool_requirements: dict[str, list[str]] | None = None,
+    ) -> AgentAction:
+        """As `decide_next_action`, but raises `LLMProviderUnavailableError`
+        when this provider could not be reached at all."""
+        return await self.decide_next_action(
+            problem_statement=problem_statement,
+            available_tool_ids=available_tool_ids,
+            transcript=transcript,
+            turn_count=turn_count,
+            tool_requirements=tool_requirements,
+        )
+
 
 class StructuredLLMProvider(LLMProvider):
     """Shared implementation for every real (API-backed) provider."""
@@ -376,7 +472,12 @@ class StructuredLLMProvider(LLMProvider):
     # on a single decision. This is the actual production guarantee: "the
     # agent is never worse than X seconds late to tell you it's stuck",
     # not any individual component's own timeout.
-    _OVERALL_DEADLINE_SECONDS = 20.0
+    #
+    # Sourced from the module-level `OVERALL_DEADLINE_SECONDS` so that the
+    # cross-provider fallback layer (`agent.llm.fallback`) divides up THIS
+    # number rather than inventing a second ceiling — still overridable per
+    # subclass/instance, which the deadline tests rely on.
+    _OVERALL_DEADLINE_SECONDS = OVERALL_DEADLINE_SECONDS
 
     async def _call_with_retry(self, fn: Callable[[], Awaitable[Any]], *, what: str) -> Any:
         try:
@@ -421,6 +522,29 @@ class StructuredLLMProvider(LLMProvider):
         known_database_names: list[str],
         known_server_hints: list[str] | None = None,
     ) -> IntentExtraction:
+        """Never raises: a provider this call could not reach at all becomes
+        a best-effort "treat the raw message as a DBA task" extraction.
+
+        The real work — and the one place that can tell "unreachable" apart
+        from "answered, but malformed" — is `extract_intent_or_raise` below.
+        Behaviour here is byte-identical to before that split existed."""
+        try:
+            return await self.extract_intent_or_raise(
+                message, known_database_names, known_server_hints
+            )
+        except LLMProviderUnavailableError:
+            # Proceed as a best-effort DBA task on the raw message rather than
+            # stalling here — decide_next_action gets its own chance right
+            # after this to hit the same outage and report it plainly to the
+            # DBA, which is the more useful place to surface "try again".
+            return IntentExtraction(is_dba_task=True, problem_summary=message.strip())
+
+    async def extract_intent_or_raise(
+        self,
+        message: str,
+        known_database_names: list[str],
+        known_server_hints: list[str] | None = None,
+    ) -> IntentExtraction:
         last_raw: dict[str, Any] | None = None
 
         async def attempt() -> IntentExtraction:
@@ -458,20 +582,51 @@ class StructuredLLMProvider(LLMProvider):
                     raw_response=last_raw,
                     error=str(exc),
                 )
-            else:
-                logger.warning(
-                    "extract_intent_call_failed",
-                    provider=self.provider_name,
-                    model=self.model,
-                    error=str(exc),
-                )
-            # Proceed as a best-effort DBA task on the raw message rather than
-            # stalling here — decide_next_action gets its own chance right
-            # after this to hit the same outage and report it plainly to the
-            # DBA, which is the more useful place to surface "try again".
-            return IntentExtraction(is_dba_task=True, problem_summary=message.strip())
+                # The provider answered; only the answer was unusable. Not
+                # worth another vendor's latency budget (see
+                # `LLMProviderUnavailableError`'s docstring) — degrade to
+                # the same best-effort extraction as always.
+                return IntentExtraction(is_dba_task=True, problem_summary=message.strip())
+            logger.warning(
+                "extract_intent_call_failed",
+                provider=self.provider_name,
+                model=self.model,
+                error=str(exc),
+            )
+            raise LLMProviderUnavailableError(self.provider_name, "extract_intent", exc) from exc
 
     async def decide_next_action(
+        self,
+        *,
+        problem_statement: str,
+        available_tool_ids: list[str],
+        transcript: list[dict[str, Any]],
+        turn_count: int,
+        tool_requirements: dict[str, list[str]] | None = None,
+    ) -> AgentAction:
+        """Never raises: an unreachable provider becomes the "temporarily
+        unavailable" clarification the DBA has always seen.
+
+        The real work is `decide_next_action_or_raise` below; this wrapper
+        only turns an unreachable provider back into that reply, so calling
+        this directly behaves byte-identically to before the split."""
+        try:
+            return await self.decide_next_action_or_raise(
+                problem_statement=problem_statement,
+                available_tool_ids=available_tool_ids,
+                transcript=transcript,
+                turn_count=turn_count,
+                tool_requirements=tool_requirements,
+            )
+        except LLMProviderUnavailableError:
+            # A transient upstream outage/rate-limit (e.g. Gemini 503 "high
+            # demand", or a free-tier daily quota exhausted across every one
+            # of its own fallback models) must degrade to a clear message,
+            # not a raw 500 — distinct from the malformed-completion message
+            # inside `decide_next_action_or_raise`.
+            return AskClarification(question=self._unavailable_question())
+
+    async def decide_next_action_or_raise(
         self,
         *,
         problem_statement: str,
@@ -539,21 +694,20 @@ class StructuredLLMProvider(LLMProvider):
                     question="I couldn't work out a safe next step — could you tell me more "
                     "about what you'd like me to check?"
                 )
-            # A transient upstream outage/rate-limit (e.g. Gemini 503 "high
-            # demand") must degrade to a clear message, not a raw 500 —
-            # distinct from the malformed-completion message above.
+            # Never got a response at all — a transient upstream outage or
+            # rate-limit. Raised rather than degraded here so the caller
+            # (`decide_next_action` above, or the cross-provider fallback
+            # walk in `agent.llm.fallback`) decides whether another vendor
+            # is worth trying before the DBA sees "temporarily unavailable".
             logger.warning(
                 "decide_next_action_call_failed",
                 provider=self.provider_name,
                 model=self.model,
                 error=str(exc),
             )
-            return AskClarification(
-                question=(
-                    f"The {self.provider_name} service is temporarily unavailable "
-                    "(high demand or a transient error) — please try again in a moment."
-                )
-            )
+            raise LLMProviderUnavailableError(
+                self.provider_name, "decide_next_action", exc
+            ) from exc
         if isinstance(action, ProposeToolCall) and action.tool_id not in available_tool_ids:
             # The model named a tool it wasn't offered — refuse rather than
             # forward it; this can never reach the Gateway anyway.

@@ -43,7 +43,7 @@ python -m venv .venv
 ./.venv/Scripts/python.exe -m pip install -e ".[dev]"
 cp .env.example .env
 cp config/dev_credentials.example.yaml config/dev_credentials.yaml
-./.venv/Scripts/python.exe -m pytest        # 413 pass, 24 opt-in skipped
+./.venv/Scripts/python.exe -m pytest        # 444 pass, 24 opt-in skipped
 ```
 
 Run the full stack (bundled sample PostgreSQL target included):
@@ -124,13 +124,15 @@ make docker-up       # full stack via docker compose
 Phases 1–9 of the build (foundation → gateway → execution → read tools →
 agent → channels → approvals → controlled writes → restricted-tool
 framework), server registration + discovery, and MySQL/MariaDB adapters are
-implemented and covered by an automated test suite (413 passing + 24
+implemented and covered by an automated test suite (444 passing + 24
 opt-in: unit, integration, and a dedicated security suite). The Execution
 Service uses real database connections against SQL Server, PostgreSQL,
 MySQL, and MariaDB; the Agent supports Anthropic, OpenAI, Gemini, and
 DeepSeek with per-conversation model selection, bounded-latency resilience
-(retry → model fallback → a hard ~20s ceiling on any single decision, so a
-provider outage degrades to a clear message in seconds, never a multi-minute
+(retry → model fallback → cross-provider fallback to another configured
+vendor, always disclosed in the reply → a hard ~20s ceiling on any single
+decision that all of those share, so a provider outage degrades to a clear
+message in seconds, never a multi-minute
 hang), and, for a recognized scenario, playbook-driven investigation (see
 [ARCHITECTURE.md](ARCHITECTURE.md#investigation-loop-freeform-vs-playbook-driven)).
 An Oracle adapter, a real OIDC identity provider, and the real

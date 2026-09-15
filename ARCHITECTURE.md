@@ -319,6 +319,77 @@ underneath, a single `decide_next_action`/`extract_intent` call degrades to
 a clear "try again" message within ~20s, never longer. This is the actual
 production guarantee — not any individual timeout's own value.
 
+## Cross-provider LLM fallback (when a whole vendor is down, not just a model)
+
+The layer above has one blind spot, confirmed live: it bounds how long a
+*failing* provider may take, not what happens when that provider has
+nothing left to give. This deployment's default (Gemini) exhausted its
+free-tier daily quota — `RESOURCE_EXHAUSTED`, 20 requests/day/model — and
+did so across every one of its *own* internal fallback models in turn
+(`gemini_provider._MODEL_FALLBACKS`: 3.5-flash → 3.6-flash → 3.7-flash →
+3.8-flash → 3.1-pro-preview → 3-flash-preview → 3.1-flash-lite). Every
+resilience layer worked exactly as designed and the DBA still got "The
+gemini service is temporarily unavailable" — while real
+`ANTHROPIC_API_KEY`, `OPENAI_API_KEY` and `DEEPSEEK_API_KEY` sat configured
+and unused in the same `.env`. Retrying harder inside one vendor cannot fix
+a vendor that is out of quota; the only useful move is sideways.
+
+`agent/llm/fallback.py` adds that move. When the conversation's provider
+proves *unreachable* for one specific `extract_intent`/`decide_next_action`
+call, `CrossProviderFallbackLLM` re-issues that same call against the next
+provider family from `Settings.configured_llm_providers()` — the same
+preference-ordered, key-filtered list `/models` and default resolution
+already use, so an unconfigured provider is never even considered. The
+split that makes this possible is `LLMProvider.*_or_raise`: "unreachable"
+(every retry hit a transport/API error, or the deadline expired) raises
+`LLMProviderUnavailableError`, while "answered, but the answer failed
+validation" keeps its own long-standing degraded reply and is deliberately
+*not* escalated — a malformed completion is a prompt/schema problem another
+vendor is no more likely to get right, so spending its latency budget on
+one would only add delay.
+
+**The time-budget arithmetic.** The guarantee above is a property of a
+*decision*, not of a provider, so cross-provider fallback divides that
+ceiling rather than repeating it — four providers at 20s each would mean an
+80s decision and break it outright. `per_attempt_budget_seconds` splits the
+same `OVERALL_DEADLINE_SECONDS` across the primary plus every configured
+fallback (the primary is the likeliest to answer, but is not entitled to
+spend the whole allowance and leave nothing for the escape hatch):
+
+| configured providers | per attempt | worst-case total |
+| --- | --- | --- |
+| 1 | 20.0s | 20s — not wrapped at all; byte-identical to before |
+| 2 | 10.0s | 20s |
+| 3 | 6.7s | 20s |
+| 4 | 5.0s | 20s |
+
+`MIN_PER_ATTEMPT_BUDGET_SECONDS` (5s) floors the slice so that adding a
+fifth provider family can never shrink every attempt below a usable
+round-trip — it would hand out four viable attempts and let the walk be cut
+short instead of five guaranteed-to-fail ones. It does not bind today
+(20/4 == 5 exactly), and is itself clamped to the total. Each attempt is
+additionally clamped to the time actually remaining, so the sum can never
+exceed the ceiling: the ~20s promise holds unchanged.
+
+**It is never silent.** A locked `LLM_PROVIDER`, or a DBA's explicit
+`/model` choice, does *not* disable the fallback — an answer beats "try
+again later" while usable keys sit idle — but a substituted vendor is
+disclosed, not hidden: every substitution is recorded on the per-message
+`ConversationState.llm_fallback_notices` sink and appended to the reply by
+`AgentOrchestrator.handle_message` ("(The gemini service was unavailable,
+so I used anthropic instead.)"). Done at that single outermost return
+point, not at each of the dozen-odd places a reply is built, so no future
+reply path can forget it. When *every* provider fails, nothing was
+substituted and the DBA gets the pre-existing message verbatim, naming the
+provider they actually chose — a strict no-regression, pinned by test.
+
+Two paths deliberately never see any of this: the deterministic offline
+planner (`llm_provider="mock"`, what the whole default test suite runs on)
+and single-provider deployments — today's common case — both get the bare
+provider back from `LLMRegistry.resilient_for_conversation`, unwrapped.
+Covered by `tests/unit/test_cross_provider_fallback.py` (31 tests, entirely
+stub-driven: no keys, no network, no real waiting).
+
 ## Instance-wide diagnostics don't demand a database
 
 Every read tool used to default to `required_target_scope = ["environment",

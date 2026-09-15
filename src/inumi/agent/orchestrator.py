@@ -17,6 +17,7 @@ import re
 
 from inumi.agent.context_manager import ContextManager, ConversationState, PendingApproval
 from inumi.agent.llm.base import LLMProvider
+from inumi.agent.llm.fallback import fallback_notice_text
 from inumi.agent.llm.registry import LLMRegistry
 from inumi.agent.planner.actions import (
     AskClarification,
@@ -272,8 +273,29 @@ class AgentOrchestrator:
         self._context = context
 
     def _llm_for(self, state: ConversationState) -> LLMProvider:
-        return self._llm_registry.for_conversation(
-            provider=state.llm_provider, model=state.llm_model
+        """The provider this conversation's next LLM call should use.
+
+        `resilient_for_conversation` (not `for_conversation`) so that a
+        total outage of the chosen provider — every retry and every one of
+        its own internal model fallbacks exhausted, the exact shape of the
+        live Gemini free-tier quota exhaustion this was built for — escapes
+        to the next configured provider family instead of dead-ending in
+        "temporarily unavailable" with other vendors' keys sitting unused.
+        See agent/llm/fallback.py for the mechanism and its time-budget
+        arithmetic; the registry returns the bare provider unchanged for
+        the offline mock planner and for single-provider deployments, so
+        neither pays anything for this.
+
+        `state.llm_fallback_notices` is the sink: anything recorded there
+        while answering the current message is disclosed to the DBA by
+        `handle_message` below. A fresh wrapper per call is deliberate —
+        it keeps that sink per-message rather than shared across
+        concurrent conversations (the real provider objects underneath are
+        still the registry's cached ones)."""
+        return self._llm_registry.resilient_for_conversation(
+            provider=state.llm_provider,
+            model=state.llm_model,
+            notices=state.llm_fallback_notices,
         )
 
     async def _list_servers_cached(self) -> list[dict]:
@@ -303,6 +325,49 @@ class AgentOrchestrator:
         return [h for h in dict.fromkeys(hints) if h]
 
     async def handle_message(
+        self,
+        *,
+        channel: str,
+        channel_account_id: str,
+        conversation_id: str,
+        channel_thread_id: str,
+        message: str,
+    ) -> AgentReply:
+        """Public entry point. Thin wrapper around `_handle_message` whose
+        only job is the cross-provider LLM fallback disclosure.
+
+        A fallback is allowed to happen even when a DBA explicitly locked a
+        provider (`LLM_PROVIDER=...` or `/model <provider>`) — an answer
+        beats "temporarily unavailable" while other configured keys sit
+        unused — but it is never allowed to happen *silently*: whichever
+        vendor actually produced this reply is stated plainly at the end of
+        it. Done here, at the single outermost return point, rather than at
+        each of the dozen-odd places a reply is constructed below, so no
+        future reply path can forget to disclose it.
+
+        `handle_approval_decision` (the other public entry point) makes no
+        LLM call at all, so it needs none of this.
+        """
+        state = self._context.get_or_create(
+            conversation_id, channel, channel_thread_id, channel_account_id
+        )
+        # Per-message scratch space — anything left over from the previous
+        # message on this conversation was already disclosed with it.
+        state.llm_fallback_notices.clear()
+        reply = await self._handle_message(
+            channel=channel,
+            channel_account_id=channel_account_id,
+            conversation_id=conversation_id,
+            channel_thread_id=channel_thread_id,
+            message=message,
+        )
+        notice = fallback_notice_text(state.llm_fallback_notices)
+        state.llm_fallback_notices.clear()
+        if notice:
+            reply.text = f"{reply.text}\n\n{notice}" if reply.text else notice
+        return reply
+
+    async def _handle_message(
         self,
         *,
         channel: str,

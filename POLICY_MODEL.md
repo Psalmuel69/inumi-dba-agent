@@ -330,6 +330,20 @@ retries and model switches happens underneath, one call is never worse than
 `StructuredLLMProvider._OVERALL_DEADLINE_SECONDS` (20s) late — see
 [ARCHITECTURE.md](ARCHITECTURE.md#latency-ceiling-on-a-single-llm-decision).
 
+**Cross-provider fallback.** When a provider is unreachable *as a whole*
+(every retry and every one of its own model fallbacks exhausted — verified
+live as a free-tier daily quota exhausted across all of Gemini's models),
+the same call is re-issued against the next configured provider from
+`configured_llm_providers()` before the DBA is told anything failed. This
+happens even when `LLM_PROVIDER` is locked or a DBA picked a provider with
+`/model` — an answer beats "try again later" while another configured key
+sits unused — so the lock is best read as "the provider to use", not "the
+only provider that may ever run". It is never silent: a reply produced by a
+substituted vendor says so plainly. The escalation shares the same 20s
+ceiling rather than adding one per provider — see
+[ARCHITECTURE.md](ARCHITECTURE.md#cross-provider-llm-fallback-when-a-whole-vendor-is-down-not-just-a-model)
+for the budget arithmetic.
+
 **Per-conversation selection** (chat commands, `agent/orchestrator.py`):
 
 - `/models` — lists each configured provider and the models its key can

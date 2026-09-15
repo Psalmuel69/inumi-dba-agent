@@ -13,6 +13,7 @@ import dataclasses
 import datetime as dt
 from typing import Any, Literal
 
+from inumi.agent.llm.fallback import FallbackEvent
 from inumi.common.ids import new_id
 
 # The stages this codebase's control flow can actually and accurately
@@ -173,6 +174,16 @@ class ConversationState:
     # the deployment's configured default. Never an authorization input.
     llm_provider: str | None = None
     llm_model: str | None = None
+    # Transient, per-INBOUND-MESSAGE scratch space, not conversation state:
+    # every cross-provider LLM fallback that happened while handling the
+    # message currently being answered (see agent.llm.fallback). Cleared at
+    # the top of `AgentOrchestrator.handle_message` and drained by that same
+    # method into the reply text, so a DBA is always told when a different
+    # vendor produced their answer. Lives here purely because the
+    # ConversationState is the one object already threaded through every
+    # layer that can make an LLM call — nothing ever reads it across
+    # messages, and it is never an authorization input.
+    llm_fallback_notices: list[FallbackEvent] = dataclasses.field(default_factory=list)
     updated_at: dt.datetime = dataclasses.field(
         default_factory=lambda: dt.datetime.now(dt.UTC)
     )
