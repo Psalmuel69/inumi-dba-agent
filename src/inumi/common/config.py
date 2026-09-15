@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Order in which a provider is auto-selected when the operator hasn't forced
@@ -85,11 +86,51 @@ class Settings(BaseSettings):
     agent_base_url: str = "http://localhost:8000"
     agent_port: int = 8000
 
+    channels_base_url: str = "http://localhost:8003"
     channels_port: int = 8003
     slack_signing_secret: str = ""
     slack_bot_token: str = ""
     teams_app_id: str = ""
     teams_app_password: str = ""
+
+    # --- Daily proactive digest (agent service only) ------------------------
+    # The scheduled, multi-server morning report: runs the
+    # `comprehensive_summary` playbook once per registered server and posts
+    # ONE combined digest. See `agent.scheduled_report` and ARCHITECTURE.md's
+    # "Scheduled daily digest" section.
+    #
+    # Disabled by default, and disabled by exactly one switch: an empty
+    # destination channel means no scheduler is constructed, no job is
+    # registered, and no background task exists at all (never a scheduler
+    # that wakes up daily only to discover it has nowhere to post). This is
+    # deliberately the *channel*, not a separate `enable_...` boolean —
+    # there is no coherent "enabled but with nowhere to send it" state, and
+    # two switches would only ever be a way to get them out of sync.
+    daily_report_slack_channel: str = ""
+    # Hour of the day, UTC, the digest runs at (minute 0). Bounded here
+    # rather than clamped at schedule time so a typo (`25`) fails the
+    # process at startup, next to every other configuration mistake, instead
+    # of silently running at a different hour than the operator intended.
+    daily_report_hour_utc: int = Field(default=6, ge=0, le=23)
+    # Comma-separated server ids/aliases to sweep. Empty (the default) means
+    # every *active* registered server — a newly onboarded server is then
+    # covered by the next morning's digest with no config change, which is
+    # the behavior an estate-wide report should have. Set it only to
+    # deliberately narrow the sweep.
+    daily_report_servers: str = ""
+    # The identity every tool call in a scheduled run is attributed to and
+    # authorized as. This is NOT a bypass and carries no privilege of its
+    # own: the Gateway independently re-resolves this (channel,
+    # channel_account_id) pair through the same `IdentityProvider` and the
+    # same authorization/policy pipeline as a live DBA's message (spec §62),
+    # so the digest can only ever see what this account's own DBA role is
+    # allowed to see, and every call it makes lands in the audit trail under
+    # this account rather than anonymously. It must name a real DBA account
+    # in the identity directory; if it doesn't, every call is simply DENIED
+    # and each server is reported as "could not be checked" in the digest —
+    # never silently skipped.
+    daily_report_identity_channel: str = "dev"
+    daily_report_identity_account: str = ""
 
     enable_readonly_sql_tool: bool = False
     enable_execute_sql_tool: bool = False

@@ -614,7 +614,16 @@ def test_comprehensive_summary_description_is_honest_about_scope():
     assert "one server" in description.lower() or "single server" in description.lower() or (
         "one shot" in description.lower()
     )
-    assert "deferred" in description.lower()
+    # This used to assert the word "deferred" (scheduling and multi-server
+    # orchestration didn't exist yet). They do now — `agent.scheduled_report`
+    # — so pinning "deferred" would pin a stale fact. The claim that still
+    # matters, and that this assertion now protects, is the one that hasn't
+    # changed: THIS PLAYBOOK is still one server per invocation. The
+    # scheduler calls it once per server; it never sweeps a fleet itself, and
+    # the description must keep saying so rather than quietly inheriting the
+    # scheduler's reach.
+    assert "never a fleet" in description.lower()
+    assert "not something this playbook does itself" in description.lower()
     # Must also be honest about why this playbook has 5 steps, not one for
     # every instance-wide read tool — the shared investigation turn budget,
     # not an oversight.

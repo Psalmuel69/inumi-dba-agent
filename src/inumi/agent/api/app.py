@@ -10,6 +10,9 @@ same `channel`/`channel_account_id` pair on every tool call regardless
 
 from __future__ import annotations
 
+import contextlib
+from collections.abc import AsyncIterator
+
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
@@ -17,6 +20,11 @@ from inumi.agent.context_manager import ContextManager
 from inumi.agent.llm.registry import LLMRegistry
 from inumi.agent.orchestrator import AgentOrchestrator
 from inumi.agent.reply import AgentReply
+from inumi.agent.scheduled_report import (
+    ChannelsDigestPublisher,
+    DailyDigestRunner,
+    schedule_daily_digest,
+)
 from inumi.agent.tool_client import ToolClient
 from inumi.common.config import Settings, get_settings
 from inumi.common.observability import configure_logging, get_logger
@@ -41,7 +49,9 @@ class ApprovalEventRequest(BaseModel):
     decision: str  # "approve" | "reject"
 
 
-def create_app(settings: Settings | None = None, *, gateway_transport=None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None, *, gateway_transport=None, channels_transport=None
+) -> FastAPI:
     settings = settings or get_settings()
     settings.validate_for_production()
     configure_logging("agent", settings.log_level)
@@ -59,7 +69,36 @@ def create_app(settings: Settings | None = None, *, gateway_transport=None) -> F
         selection_enabled=llm_registry.selection_enabled(),
     )
 
-    app = FastAPI(title="Inumi AI DBA Agent", version="0.1.0")
+    # The scheduled daily digest (agent service only — it owns the
+    # orchestrator and, unlike `execution`, holds no database credential;
+    # unlike `channels`, it is not a webhook front door whose lifecycle is
+    # driven by inbound traffic). Constructed unconditionally but *started*
+    # only if configured: `schedule_daily_digest` returns None and registers
+    # nothing when `daily_report_slack_channel` is unset, which is the
+    # default — see `agent.scheduled_report` for why "no channel" is the one
+    # and only off switch.
+    digest_runner = DailyDigestRunner(
+        orchestrator=orchestrator,
+        settings=settings,
+        publisher=ChannelsDigestPublisher(
+            settings.channels_base_url, issuer, transport=channels_transport
+        ),
+    )
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        # Started here rather than at import time so a test importing this
+        # module (or `create_app` being called to inspect routes) never
+        # spins up a background job — and so the scheduler's event loop is
+        # the one actually serving requests.
+        scheduler = schedule_daily_digest(digest_runner, settings)
+        try:
+            yield
+        finally:
+            if scheduler is not None:
+                scheduler.shutdown(wait=False)
+
+    app = FastAPI(title="Inumi AI DBA Agent", version="0.1.0", lifespan=lifespan)
 
     async def require_channel_service_token(x_service_token: str | None = Header(default=None)) -> None:
         if not x_service_token:

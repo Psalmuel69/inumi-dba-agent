@@ -82,6 +82,31 @@ class InvestigationState:
     # dataclass; look the object up via `get_playbook` when needed.
     playbook_id: str | None = None
     playbook_step: int = 0
+    # True only for an investigation nobody is sitting in front of — today
+    # that is exactly the scheduled daily digest (see
+    # `orchestrator.run_comprehensive_summary` and `agent.scheduled_report`).
+    # It means: this investigation may propose read-only diagnostics and
+    # nothing else, ever. A write-shaped proposal is dropped before a
+    # `ToolCallRequest` is even constructed, and an APPROVAL_REQUIRED
+    # response is never turned into a `PendingApproval` — so an unattended
+    # run can neither execute a write nor leave an approval card sitting in
+    # a channel for a DBA to rubber-stamp without the context that produced
+    # it.
+    #
+    # Why this lives on the investigation rather than being a parameter
+    # threaded through the loop: every enforcement point
+    # (`_continue_investigation`'s tool-menu filter, `_submit_and_relay`'s
+    # hard gate and its APPROVAL_REQUIRED branch) already receives the
+    # investigation, and a single field that travels with it cannot be
+    # accidentally dropped by one call site the way a defaulted keyword
+    # argument can. Defaults to False, so every pre-existing, DBA-driven
+    # investigation behaves exactly as it did before this flag existed —
+    # a DBA asking for a remediation turn-by-turn still gets the normal
+    # LLM-proposes / Gateway-approves flow, unchanged.
+    #
+    # Pinned by tests/unit/test_scheduled_digest_never_writes.py, which is
+    # the single most important test of the daily-digest feature.
+    read_only: bool = False
     # How many record_observation actions the LLM has proposed *in a row*
     # (reset by any other action) — see orchestrator._MAX_CONSECUTIVE_
     # RECORD_OBSERVATIONS: a real model can get stuck restating the same

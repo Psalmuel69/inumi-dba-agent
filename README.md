@@ -43,7 +43,7 @@ python -m venv .venv
 ./.venv/Scripts/python.exe -m pip install -e ".[dev]"
 cp .env.example .env
 cp config/dev_credentials.example.yaml config/dev_credentials.yaml
-./.venv/Scripts/python.exe -m pytest        # 413 pass, 24 opt-in skipped
+./.venv/Scripts/python.exe -m pytest        # 454 pass, 24 opt-in skipped
 ```
 
 Run the full stack (bundled sample PostgreSQL target included):
@@ -83,12 +83,26 @@ fixed, named diagnostic sequence instead of deciding each step freeform —
 faster and more consistent for the handful of situations that come up over
 and over. One playbook, `comprehensive_summary`, isn't tied to a specific
 symptom at all — it's a broad, single-server sweep ("comprehensive health
-check", "daily summary", "full report", ...) a DBA can ask for on demand, or
-a future scheduled job could call once per server (that scheduling and
-multi-server orchestration is itself deferred, out of scope for now). Ask
-`/playbooks` in chat to see the current list, or read
+check", "daily summary", "full report", ...) a DBA can ask for on demand,
+and the building block the **scheduled daily digest** calls once per
+registered server. Ask `/playbooks` in chat to see the current list, or read
 [ARCHITECTURE.md](ARCHITECTURE.md#investigation-loop-freeform-vs-playbook-driven)
 for how and why.
+
+**Daily digest (proactive, and structurally read-only).** Set
+`DAILY_REPORT_SLACK_CHANNEL` and, once a day at `DAILY_REPORT_HOUR_UTC`,
+Inumi sweeps every registered server with `comprehensive_summary` and posts
+one combined digest — organized by server, calling out only deviations, and
+reporting any server it *couldn't* check as exactly that rather than
+silently dropping it. Unset (the default) means no scheduler and no
+background job at all. Proactive output is text and a recommendation,
+**never** an action: a scheduled run is marked read-only, is offered no
+write tool, refuses to submit anything the Gateway's catalog doesn't
+confirm as a read, and never creates an approval request — so it can report
+that a session should probably be killed, but can never kill one. See
+[ARCHITECTURE.md](ARCHITECTURE.md#scheduled-daily-digest-proactive-and-structurally-read-only)
+for how that's enforced and [OPERATIONS.md](OPERATIONS.md) for how to turn
+it on.
 
 See [DEVELOPMENT.md](DEVELOPMENT.md) for the full local setup and
 [TOOL_CATALOG.md](TOOL_CATALOG.md) for what `@Inumi` can currently do.
@@ -124,7 +138,7 @@ make docker-up       # full stack via docker compose
 Phases 1–9 of the build (foundation → gateway → execution → read tools →
 agent → channels → approvals → controlled writes → restricted-tool
 framework), server registration + discovery, and MySQL/MariaDB adapters are
-implemented and covered by an automated test suite (413 passing + 24
+implemented and covered by an automated test suite (454 passing + 24
 opt-in: unit, integration, and a dedicated security suite). The Execution
 Service uses real database connections against SQL Server, PostgreSQL,
 MySQL, and MariaDB; the Agent supports Anthropic, OpenAI, Gemini, and
@@ -133,6 +147,9 @@ DeepSeek with per-conversation model selection, bounded-latency resilience
 provider outage degrades to a clear message in seconds, never a multi-minute
 hang), and, for a recognized scenario, playbook-driven investigation (see
 [ARCHITECTURE.md](ARCHITECTURE.md#investigation-loop-freeform-vs-playbook-driven)).
+The proactive, opt-in daily multi-server health digest is implemented and
+read-only by construction (see
+[ARCHITECTURE.md](ARCHITECTURE.md#scheduled-daily-digest-proactive-and-structurally-read-only)).
 An Oracle adapter, a real OIDC identity provider, and the real
 Vault/AWS/Azure/GCP secrets-manager SDK calls are structured for but not yet
 implemented — see the "Extending" / "Adding" sections in
