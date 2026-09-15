@@ -203,16 +203,17 @@ Within the turn/observation bounds, a step is decided one of two ways:
   still built only from what its own diagnostic calls returned in this one
   investigation.
 
-  **`comprehensive_summary`: a broad, single-server sweep, not a scheduled
-  cross-server report.** The other 13 playbooks are each triggered by one
+  **`comprehensive_summary`: a broad, single-server sweep.** The other 13
+  playbooks are each triggered by one
   specific symptom (deadlock, high CPU, ...); `comprehensive_summary` is
   the odd one out — a DBA asks for it directly ("comprehensive health
   check", "daily summary", "full report", ...) to sweep this one server's
   state across every dimension the other playbooks check individually, in
-  one shot. It's the building block a future scheduled, multi-server
-  morning report would call once per server — scheduling and multi-server
-  orchestration are both explicitly deferred, out of scope for this
-  playbook itself. Two honesty notes, both stated in the playbook's own
+  one shot. It is also the building block the scheduled, multi-server
+  morning digest calls once per server — that scheduling and multi-server
+  orchestration is no longer deferred, but it lives entirely outside this
+  playbook (see "Scheduled daily digest" below); the playbook itself is
+  still strictly one server per invocation. Two honesty notes, both stated in the playbook's own
   `description` and `conclusion_guidance` (`agent.playbooks.library`, not
   just here): (1) it reports only the server's *current* state — there is
   no historical data store anywhere in this system, so it cannot show a
@@ -306,6 +307,149 @@ terminology is never mistaken for a hallucination) and, on a miss, rejects
 the conclusion and gives the model one more bounded try — the same
 self-correction pattern used for a fixable Gateway denial above, capped by
 the same turn count as everything else.
+
+## Scheduled daily digest: proactive, and structurally read-only
+
+`comprehensive_summary` was always written as the building block of a
+scheduled morning report — one server per invocation, scheduling deferred.
+`agent/scheduled_report.py` is that deferred half: once a day at
+`DAILY_REPORT_HOUR_UTC`, run that playbook against every registered server
+and post ONE combined digest to `DAILY_REPORT_SLACK_CHANNEL`.
+
+**The constraint the whole feature is built inside: proactive output is text
+and a recommendation, never an action.** An investigation a human started
+turn-by-turn can legitimately propose a remediation and route it through the
+normal LLM-proposes / Gateway-approves flow (spec §7, §37) — a DBA is right
+there, reading the approval card, with all the context that produced it. An
+investigation nobody started has none of that. So a scheduled run must be
+able to say "session 13400 should probably be killed" and must not be able
+to kill it, and — just as important — must not leave an approval card in a
+channel for someone to rubber-stamp at 6am with no context.
+
+**Where that's enforced, and why not in the scheduler.** The flag is
+`InvestigationState.read_only`, set only by
+`orchestrator.run_comprehensive_summary`, and everything that acts on it
+lives next to the code that submits tool calls rather than in
+`scheduled_report.py`. A guarantee that only holds if the caller remembers
+to ask for it is not a guarantee. Three layers, each independently tested
+(`tests/unit/test_scheduled_digest_never_writes.py`) with every layer above
+it assumed broken — because a defense-in-depth layer tested only in
+combination is one whose silent failure is invisible:
+
+1. **The menu.** `_continue_investigation` filters `available_tools` to
+   `OperationType.READ` on a read-only run, so the model is never offered a
+   write. `StructuredLLMProvider.decide_next_action` already refuses a
+   `ProposeToolCall` naming a tool outside `available_tool_ids`, so in the
+   ordinary case the write never even becomes a proposal the loop sees.
+2. **The gate.** `_submit_and_relay` refuses anything not *confirmed* READ
+   by the Gateway's own live catalog (`_is_confirmed_read_tool`), **before**
+   a `ToolCallRequest` is constructed. Placement is the point: a write that
+   reaches the Gateway has already had a policy decision made about it, and
+   that decision can be APPROVAL_REQUIRED — which creates a real approval
+   record with a real TTL. "Never executes a write" has to mean the write
+   never left the Agent process, not that something further down stopped it.
+   The predicate fails closed: an unknown tool_id, or no catalog, is refused
+   rather than waved through on a `database.get_*` naming convention — the
+   cost of being wrong is asymmetric (a missing line in a report versus the
+   entire guarantee, in the one context where nobody is watching).
+   Layer 1 depends on a provider implementation behaving and on prompt
+   wording; this layer depends on nothing but local control flow, which is
+   why both exist.
+3. **The approval refusal.** Even for a READ tool a deployment's
+   `policy.yaml` puts behind approval, a read-only run never stores a
+   `PendingApproval` or returns an `ApprovalCard`. The Gateway's own
+   approval record is deliberately left alone to expire on its TTL — the
+   Agent has no authority to cancel a Gateway decision; what it refuses is
+   its own half, so nothing actionable reaches a human.
+
+A blocked proposal is **not** an error and does not end the turn. It's
+recorded as an `internal.readonly_guard` transcript entry (the same pattern
+`internal.grounding_check` and `internal.verification_check` already use) and
+as evidence, and the loop continues — so the model's next turn sees its
+proposal went nowhere and writes it up as a recommendation instead, which is
+exactly the output this feature wants. It also surfaces in the digest
+(`ScheduledSummary.dropped_proposals`), worded so it can't be misread as
+something Inumi did: "Inumi *would have* proposed ...".
+
+**Nothing here is a new route to a database.** Every call goes through the
+same ToolClient → Gateway → Execution pipeline as a DBA's message,
+authorized as a real configured DBA account
+(`DAILY_REPORT_IDENTITY_ACCOUNT`) that the Gateway independently
+re-resolves per call (spec §62). There is no scheduled-job bypass and no
+elevated service role: a digest sees exactly what that account would have
+seen by typing "daily summary" into Slack.
+
+**Reuse, not a second investigation engine.** `run_comprehensive_summary`
+builds the same `ConversationState` + `InvestigationState` pair
+`handle_message` would have, sets the `playbook_id` `match_playbook` would
+have matched, and calls the same `_continue_investigation` — so the turn
+budget, argument stripping, DENIED self-correction, "a FAILED step doesn't
+abort the run" behavior, conclusion grounding and the playbook's own
+`conclusion_guidance` all apply identically and for free.
+`tests/unit/test_scheduled_summary_entry_point.py` asserts the submitted
+tool sequence against `playbooks.library`'s own step list rather than a
+copy, so the two cannot drift. Two deliberate differences: the state is
+**never registered with the `ContextManager`** (a scheduled sweep must be
+invisible to the conversation layer — registering it could clobber a real
+DBA's live `database_context`, in-progress investigation or pending approval
+on whatever `conversation_id` it reused), and the environment is **supplied,
+not asked for** — `handle_message` refuses to guess an environment, but
+there is nobody here to ask, so the caller passes the environment the server
+registry itself declares.
+
+**Reporting a failure is the point, not an afterthought.** A DBA reading "6
+servers checked, all healthy" when it was really "6 attempted, 2 never
+responded" is worse off than with no digest at all — it actively tells them
+to stop looking. So `build_digest` always states both numbers, gives
+unchecked servers their own labelled section, and never folds them into the
+closing "all other checks came back clean" line. Whether a server *was*
+checked is decided structurally — `investigation.actions` is appended to
+only on an EXECUTED call, so an empty list means not one diagnostic
+succeeded — never by reading the model's prose, which will happily narrate
+"everything looks healthy" having gathered nothing. The same discipline
+decides whether a server gets its own block at all: `ScheduledSummary
+.is_clean` reads the typed `Conclude` action's own root-cause/recommendation
+fields, because there is no honest way to parse reassurance out of free
+text. This applies `comprehensive_summary`'s own "report ONLY deviations,
+then say plainly everything else came back clean" guidance a second time,
+one level up — without it a ten-server estate produces ten paragraphs of "X
+is fine" every morning, which is the same wall of text the playbook's
+guidance already rejects, just bigger. Per-server failures never abort the
+sweep, and `run_once` never raises into the scheduler: the one outcome
+deliberately not available anywhere in this module is silence, because a
+digest that simply doesn't arrive is indistinguishable from a quiet morning.
+
+**Delivery goes through Channels, not straight to Slack.** The Agent holds
+no channel credential and must not start holding one — it is the service
+running attacker-influenceable model output. `ChannelsDigestPublisher` posts
+to a new `POST /v1/notify` on the Channels service with the same signed,
+audience-scoped service token (`inumi-channels`) every other internal hop
+uses, and Channels does the rendering and the Slack call, exactly as it
+already does for every reply. That endpoint delivers text and nothing else:
+it takes no identity, no approval_id and no conversation, and the
+`AgentReply` it builds never carries an `approval_card`, so it cannot become
+a way to put a clickable action in front of a DBA. A Teams destination later
+is a change to that function, not to the Agent (see "Adding a channel").
+
+**Opt-in, with exactly one switch.** An unset `DAILY_REPORT_SLACK_CHANNEL`
+means `schedule_daily_digest` constructs nothing, starts nothing and
+registers no job — not an idle scheduler waking daily to find it has nowhere
+to post. Returning `None` rather than an inert scheduler is what makes that
+directly assertable (`tests/unit/test_daily_digest_scheduling.py`, which
+checks both directions without ever advancing a clock). There is deliberately
+no separate `enable_...` boolean: there is no coherent "enabled but with
+nowhere to send it" state, and two switches would only ever be a way to get
+them out of sync. APScheduler is used rather than a hand-rolled
+`asyncio.sleep` loop because the correctness of "every day at 06:00" lives
+almost entirely in edge cases a loop would have to reimplement by hand —
+missed occurrences after a restart, overlapping runs, drift, an explicit
+timezone — which here are `misfire_grace_time` / `max_instances` /
+`coalesce` / a UTC-pinned trigger. The job is registered in the **agent**
+service's FastAPI lifespan: it owns the orchestrator, holds no database
+credential (unlike `execution`), and is not a webhook front door whose
+lifecycle is driven by inbound traffic (unlike `channels`). Starting it in
+the lifespan rather than at import time also means importing the module, or
+building the app to inspect its routes, never spins up a background job.
 
 ## Latency ceiling on a single LLM decision
 
@@ -982,6 +1126,7 @@ src/inumi/
     planner/actions.py    # structured AgentAction union
     playbooks/library.py   # fixed diagnostic sequences for known scenarios
     orchestrator.py        # investigation loop
+    scheduled_report.py     # opt-in daily multi-server digest (read-only)
     context_manager.py     # conversation/investigation state (in-process)
     tool_client.py          # HTTP client to the Gateway
     api/                    # FastAPI app
@@ -1014,6 +1159,12 @@ Implement a new adapter under `channels/<name>/` that verifies its own
 transport's authenticity, resolves identity via the shared
 `IdentityProvider`, and calls the Agent's `/v1/chat` — the same contract
 Slack and Teams use. No Gateway or Agent code changes.
+
+The one outbound, Agent-initiated path (`POST /v1/notify`, used by the
+scheduled daily digest) lives here for the same reason: this is the only
+service holding a channel credential, and the only one that knows how a
+message should be rendered per channel. Sending the digest to a new channel
+type is a change to that handler, never to the Agent.
 
 ## `InvestigationState.status`: a bounded set of stages, not the full 17-state spec
 

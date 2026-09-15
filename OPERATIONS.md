@@ -31,6 +31,63 @@
   [ARCHITECTURE.md](ARCHITECTURE.md#investigation-loop-freeform-vs-playbook-driven).
   Ask `/playbooks` in chat to see what's currently registered.
 
+## Enabling the daily health digest
+
+Once a day, Inumi can sweep every registered server with the
+`comprehensive_summary` playbook and post one combined digest to a channel.
+It is **off by default**, and the destination channel is the only switch:
+with `DAILY_REPORT_SLACK_CHANNEL` unset, no scheduler is created and no job
+is registered at all.
+
+Set on the **agent** service (it owns the orchestrator; the digest is never
+scheduled from `channels` or `execution`):
+
+| Variable | Default | What it does |
+|---|---|---|
+| `DAILY_REPORT_SLACK_CHANNEL` | `""` (off) | Destination channel id. Empty = feature entirely disabled. |
+| `DAILY_REPORT_HOUR_UTC` | `6` | Hour (UTC, minute 0) the digest runs. Must be 0–23 — an out-of-range value fails the process at startup rather than silently running at another hour. |
+| `DAILY_REPORT_SERVERS` | `""` (all) | Comma-separated server ids/aliases to narrow the sweep. Empty means every *active* registered server, so a newly onboarded server is covered the next morning with no config change. |
+| `DAILY_REPORT_IDENTITY_ACCOUNT` | `""` | The DBA account every call in a scheduled run is authorized and audited as. **Required in practice** — see below. |
+| `DAILY_REPORT_IDENTITY_CHANNEL` | `dev` | Which channel namespace that account id belongs to (`slack` / `teams` / `dev`). |
+
+The agent service also needs `CHANNELS_BASE_URL` (default
+`http://localhost:8003`) to reach the Channels service, which is what
+actually posts the message — the Agent holds no Slack token.
+
+**About the identity.** A scheduled run is not privileged and has no bypass:
+the Gateway independently re-resolves `DAILY_REPORT_IDENTITY_ACCOUNT`
+through the normal `IdentityProvider` and runs the same
+authorization/policy/risk pipeline as a live DBA's message, so the digest
+can only see what that account's own role is allowed to see, and every call
+lands in the audit trail under it. Point it at a real, least-privilege DBA
+account. If it names an account the directory doesn't know, nothing breaks
+dangerously — every call is simply denied and each server shows up in the
+digest as "could not be checked", which is exactly how you'll notice.
+
+**It never takes an action.** A scheduled run is marked read-only: it is
+offered no write tool, refuses to submit anything the Gateway's catalog
+doesn't confirm is a read (before the request is even built), and never
+creates an approval request or posts an approval card. It can report that a
+session should probably be killed; it cannot kill one, and there is no
+configuration flag that changes that. See
+[ARCHITECTURE.md](ARCHITECTURE.md#scheduled-daily-digest-proactive-and-structurally-read-only).
+
+**Reading the digest.** Servers are grouped: `NEEDS ATTENTION` (only
+deviations, one block per server), `COULD NOT BE CHECKED` (with the reason),
+then a single closing line naming everything that came back clean. The
+header always states both numbers ("6 servers swept: 4 checked, 2 could not
+be checked") — if servers are consistently landing in the second group,
+that's an availability/credential/discovery problem worth chasing, not a
+digest problem. A line reading "Inumi would have proposed
+`database.kill_session` here" means the agent identified a remediation and
+was structurally prevented from taking it; it is a recommendation for you,
+never something that happened.
+
+**Turning it off / changing the time.** Unset `DAILY_REPORT_SLACK_CHANNEL`
+(or change `DAILY_REPORT_HOUR_UTC`) and restart the Agent — the schedule is
+read once at startup, like policy and playbooks. Nothing is persisted: there
+is no job store, so there is no stale schedule to clean up.
+
 ## Monitoring what matters
 
 Per spec §42, track (via the OpenTelemetry wiring in
@@ -46,6 +103,18 @@ Per spec §42, track (via the OpenTelemetry wiring in
 - Rate-limit rejections — sustained hits usually mean either abuse or a
   legitimately-busy incident response that needs a temporary limit bump
   (edit `config/rate_limits.yaml` and redeploy the Gateway).
+- `readonly_run_dropped_write_proposal` / `readonly_run_declined_approval_card`
+  (structured log, Agent) — the scheduled digest's read-only guard actually
+  firing. Not an error, and expected occasionally: it means the model
+  proposed an action during an unattended run and was structurally stopped
+  (the finding still reaches the digest as a recommendation). Worth watching
+  as a *rate*: a sudden rise means either a genuinely deteriorating estate or
+  a model increasingly inclined to act on its own.
+- `daily_digest_built` (structured log, Agent) — carries `server_count` and
+  `failed`. A `failed` count that is persistently non-zero is an
+  availability/credential/discovery problem, not a reporting one.
+  `daily_digest_publish_failed` means the digest was built but never reached
+  the channel — i.e. a silent morning that isn't a quiet one.
 - `llm_call_deadline_exceeded` (structured log, Agent) — a single decision
   hit the ~20s hard ceiling; sustained occurrences mean the configured
   provider is degraded/exhausted across its whole fallback chain, not a

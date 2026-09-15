@@ -12,10 +12,16 @@ confused model can't loop forever.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import re
 
-from inumi.agent.context_manager import ContextManager, ConversationState, PendingApproval
+from inumi.agent.context_manager import (
+    ContextManager,
+    ConversationState,
+    InvestigationState,
+    PendingApproval,
+)
 from inumi.agent.llm.base import LLMProvider
 from inumi.agent.llm.fallback import fallback_notice_text
 from inumi.agent.llm.registry import LLMRegistry
@@ -178,6 +184,135 @@ _VERIFICATION_TOOLS_BY_WRITE_TOOL: dict[str, tuple[str, ...]] = {
 }
 
 
+# The synthetic transcript `tool_id` recorded when the read-only gate below
+# drops a proposal. Deliberately shaped like the existing
+# `internal.grounding_check` / `internal.verification_check` entries: an
+# `internal.*` transcript row is this codebase's established way of making a
+# decision the orchestrator took *about* the model's output visible in the
+# same place a human (and the model's own next turn) reads everything else,
+# without inventing a parallel log. `ScheduledSummary.dropped_proposals`
+# reads these back out, which is also what makes the guard directly
+# assertable in a test instead of only observable as an absence.
+_READ_ONLY_GUARD_TOOL_ID = "internal.readonly_guard"
+
+# The playbook the scheduled daily digest runs, once per server. Named here
+# rather than inlined so a rename in `playbooks.library` breaks loudly at
+# this one reference (see `run_comprehensive_summary`, which refuses to run
+# at all if this id no longer resolves) instead of silently degrading a
+# scheduled run into a fully freeform investigation — which is exactly the
+# shape of failure that would matter most here, since a freeform run is the
+# one that would actually want to propose remediation.
+_SCHEDULED_SUMMARY_PLAYBOOK_ID = "comprehensive_summary"
+
+# The problem statement an unattended run opens with. This is layer zero of
+# the read-only guarantee — the only layer that shapes what the model *wants*
+# to do, rather than blocking what it tried to do — and it is here, not in a
+# provider's system prompt, because it is specific to this one triggering
+# path: the same model, in a live DBA conversation, absolutely should
+# propose a remediation when one is warranted (spec §7's assess action ->
+# approve -> execute), and nothing here changes that. It also carries the
+# server/environment in the DBA's own vocabulary so the final concluding
+# call reads the same way an interactive `comprehensive_summary` does.
+_SCHEDULED_SUMMARY_PROBLEM = (
+    "Scheduled daily health sweep of the {server_id} server ({environment}) — "
+    "an unattended, proactive run with no DBA in the conversation to answer a "
+    "question or approve anything. Report findings and recommendations as "
+    "text only: only read-only diagnostics are available to you here, and "
+    "nothing you propose will be executed, approved, or acted on "
+    "automatically. If something needs remediation, describe what you would "
+    "recommend and why, for a DBA to decide on — never as an action you are "
+    "taking. Do not ask a clarifying question; nobody is there to answer it."
+)
+
+
+def _is_confirmed_read_tool(
+    tool_id: str, tool_operation_types: dict[str, OperationType] | None
+) -> bool:
+    """Whether `tool_id` is *confirmed*, by the Gateway's own live tool
+    catalog, to be a read-only diagnostic — the predicate the read-only gate
+    in `_submit_and_relay` fails closed on.
+
+    Deliberately not a naming-convention check (`tool_id.startswith(
+    "database.get_")`) and deliberately not a hardcoded allow-list in this
+    file: `operation_type` is the tool catalog's own classification
+    (`gateway/domain/tool_catalog.py`), fetched fresh for this very
+    investigation in `_continue_investigation`, so a tool reclassified
+    WRITE tomorrow is treated as a write here tomorrow, with no second copy
+    of that judgment in the Agent to drift out of sync. Same reasoning
+    `_update_pending_verification` already gives for consulting
+    `tool_operation_types` rather than trusting a table baked into this
+    module.
+
+    Unknown means no: a `tool_id` missing from the map (a tool that wasn't
+    in the available list at all), or no map supplied, returns False. That
+    is the safe direction *for this gate specifically* — the worst case is
+    a read-only diagnostic being skipped and the server reported as
+    "nothing gathered" in the digest, whereas the opposite default would
+    let an unclassifiable proposal through in precisely the unattended
+    context where nobody is watching. Note this is the inverse of
+    `_update_pending_verification`'s own None handling, and intentionally
+    so: there, None means "trust the curated write list"; here, None means
+    "refuse", because that one errs toward *more* verification and this one
+    errs toward *less* action."""
+    operation_type = (tool_operation_types or {}).get(tool_id)
+    return operation_type == OperationType.READ
+
+
+@dataclasses.dataclass(frozen=True)
+class ScheduledSummary:
+    """One server's outcome from an unattended `comprehensive_summary` run
+    — what `run_comprehensive_summary` hands back to
+    `agent.scheduled_report`'s digest builder.
+
+    Richer than the `AgentReply` an interactive turn returns, because the
+    digest has to make two decisions no channel adapter ever has to: whether
+    this server is worth its own block in the digest at all (`is_clean` —
+    see `agent.scheduled_report.build_digest`, which applies
+    `comprehensive_summary`'s own "report ONLY deviations" discipline a
+    second time, at the multi-server level), and whether the run actually
+    produced an answer or merely produced *something* (`ok`). Both are
+    derived structurally — from the typed `Conclude` action's own
+    root-cause/recommendation fields, via `investigation.findings`/
+    `recommendations` — never by pattern-matching the model's prose, which
+    the digest has no honest way to parse."""
+
+    server_id: str
+    environment: str
+    investigation_id: str
+    # AgentReply.status: "ok" | "denied" | "error" | "clarification".
+    status: str
+    text: str
+    findings: tuple[str, ...] = ()
+    recommendations: tuple[str, ...] = ()
+    # Every tool_id the read-only gate refused to submit during this run.
+    # Empty in the normal case; non-empty means the model tried to propose
+    # an action and was structurally prevented from doing so — surfaced in
+    # the digest (see `build_digest`) rather than swallowed, because "the
+    # agent wanted to do something and wasn't allowed to" is information a
+    # DBA should see, not an implementation detail to hide.
+    dropped_proposals: tuple[str, ...] = ()
+    # Why this server could not be checked, when `ok` is False. Never a raw
+    # stack trace — same no-raw-error invariant the rest of this pipeline
+    # holds (see ARCHITECTURE.md's "The no-raw-error invariant").
+    error: str = ""
+
+    @property
+    def ok(self) -> bool:
+        """Whether this run actually reached a reported conclusion. A
+        non-"ok" reply status (the investigation was denied, errored, or
+        ended still asking a clarifying question nobody was there to
+        answer) is a server the digest must report as NOT checked — a DBA
+        reading "6 servers checked, all healthy" when two never responded
+        is worse than useless."""
+        return self.status == "ok" and not self.error
+
+    @property
+    def is_clean(self) -> bool:
+        """Nothing was flagged: the concluding action named no root cause
+        and recommended nothing. Only meaningful when `ok`."""
+        return not self.findings and not self.recommendations
+
+
 def _verification_still_shows_condition(tool_id: str, session_id: str | None, result: dict | None) -> bool:
     """True if a post-write re-check's OWN result rows still show the
     exact session_id the write targeted — i.e. the write did not actually
@@ -303,6 +438,24 @@ class AgentOrchestrator:
             return await self._tool_client.list_servers()
         except Exception:  # noqa: BLE001
             return []
+
+    async def list_registered_servers(self) -> list[dict]:
+        """Every registered server, straight from the Gateway's
+        `/v1/catalog/servers` — the same payload every other server-aware
+        path in this file reads, so the scheduled digest
+        (`agent.scheduled_report.DailyDigestRunner`) never grows a second,
+        separately-maintained idea of what the estate contains.
+
+        Deliberately NOT `_list_servers_cached`: that one swallows every
+        failure into `[]` because its callers are conveniences (offering the
+        planner known database names, auto-filling an environment) where a
+        missing list only costs a clarification round-trip. For the digest
+        that same `[]` would be indistinguishable from "no servers are
+        registered", and the difference is exactly what separates "nothing
+        to check this morning" from "we checked nothing and don't know
+        why" — so this one lets the failure propagate and leaves it to
+        `run_once` to report the gap plainly."""
+        return await self._tool_client.list_servers()
 
     async def _known_database_names(self) -> list[str]:
         """Every discovered database name — helps the planner resolve
@@ -678,6 +831,28 @@ class AgentOrchestrator:
     ) -> AgentReply:
         llm = self._llm_for(state)
         available = await self._tool_client.available_tools(channel, channel_account_id)
+        if investigation.read_only:
+            # First of the three layers enforcing "a scheduled run never
+            # writes" (see `InvestigationState.read_only` and
+            # ARCHITECTURE.md's "Scheduled daily digest" section): the
+            # model is simply never *offered* anything but reads, so the
+            # ordinary case is that it has nothing to propose. Cheapest and
+            # least surprising layer — `StructuredLLMProvider
+            # .decide_next_action`'s own post-validation already refuses a
+            # `ProposeToolCall` naming a tool outside `available_tool_ids`
+            # and turns it into an AskClarification (llm/base.py, the
+            # `action.tool_id not in available_tool_ids` check), so the
+            # write never even becomes a proposal this loop sees.
+            #
+            # This layer alone is NOT the guarantee, which is why the hard
+            # gate in `_submit_and_relay` exists underneath it: a filtered
+            # menu and a prompt instruction both depend on a provider
+            # implementation behaving, and `LLMProvider` is an interface
+            # anyone can implement (the offline mock planner does, and so
+            # would a future provider whose post-validation this file knows
+            # nothing about). The gate below depends on nothing but this
+            # process's own control flow.
+            available = [t for t in available if t.operation_type == OperationType.READ]
         available_ids = [t.tool_id for t in available]
         # Each tool's *actual* required arguments (its real Pydantic schema,
         # already alias-correct — e.g. "schema"/"table", not "schema_name"/
@@ -1159,6 +1334,67 @@ class AgentOrchestrator:
         tool_allowed_arguments: dict[str, set[str]] | None = None,
         tool_operation_types: dict[str, OperationType] | None = None,
     ) -> AgentReply | None:
+        if investigation.read_only and not _is_confirmed_read_tool(
+            action.tool_id, tool_operation_types
+        ):
+            # THE guarantee, for an unattended run: nothing that isn't a
+            # confirmed read-only diagnostic is ever submitted. This is the
+            # second of three layers (see `_continue_investigation`'s
+            # filtered tool menu above and the APPROVAL_REQUIRED branch
+            # below), and the only one that depends on nothing outside this
+            # process's own control flow — no prompt wording, no provider
+            # implementation's post-validation, no Gateway decision.
+            #
+            # Placed HERE, before `ToolCallRequest` is even constructed,
+            # rather than after the Gateway responds, and that ordering is
+            # the whole point: a write that reaches the Gateway has already
+            # had a policy decision made about it, and depending on the
+            # tool and the configured identity's role that decision can be
+            # APPROVAL_REQUIRED — which creates a real, live approval
+            # record with a real TTL sitting in a channel. "Proactive
+            # output is text + recommendation only" has to mean the write
+            # never left this process, not that it was stopped somewhere
+            # further down; anything later is already too late to honor
+            # that. So a dropped proposal costs exactly one Agent-local
+            # decision and zero network hops.
+            #
+            # Deliberately NOT an error and NOT the end of the turn: the
+            # finding the model was reacting to is real and belongs in the
+            # digest. Returning None continues the loop exactly like a
+            # FAILED diagnostic does, with the drop recorded as evidence —
+            # so the model's own next turn can see that its proposal went
+            # nowhere and write it up as a recommendation for a DBA
+            # instead, which is precisely the output this feature is
+            # supposed to produce.
+            logger.warning(
+                "readonly_run_dropped_write_proposal",
+                investigation_id=investigation.investigation_id,
+                tool_id=action.tool_id,
+                reason=action.reason,
+            )
+            investigation.transcript.append(
+                {
+                    "tool_id": _READ_ONLY_GUARD_TOOL_ID,
+                    "reason": "Enforcing read-only mode on an unattended, scheduled run.",
+                    "result": {
+                        "dropped_tool_id": action.tool_id,
+                        "dropped_reason": action.reason,
+                        "message": (
+                            f"{action.tool_id} was NOT submitted. This is an unattended "
+                            "scheduled health sweep: it reports findings and "
+                            "recommendations as text only and never takes an action. "
+                            "Describe what you would recommend and why, and conclude — "
+                            "a DBA will decide whether to act on it."
+                        ),
+                    },
+                }
+            )
+            investigation.evidence.append(
+                f"(a proposed {action.tool_id} was not submitted — this scheduled run "
+                "is read-only and never executes an action)"
+            )
+            return None
+
         arguments = self._strip_unschematized_arguments(action, tool_allowed_arguments)
         request = ToolCallRequest(
             tool_id=action.tool_id,
@@ -1219,6 +1455,54 @@ class AgentOrchestrator:
             response.status == ToolCallStatus.DENIED and response.failure_code == "INVALID_TARGET"
         ):
             state.database_context["database"] = database
+
+        if response.status == ToolCallStatus.APPROVAL_REQUIRED and investigation.read_only:
+            # Third layer. Reachable only for a tool the live catalog
+            # classifies READ that a deployment's `config/policy.yaml`
+            # nonetheless puts behind approval for this identity/
+            # environment — the gate above has already made a write
+            # impossible, so this is not a second chance to catch one. It
+            # exists because an unattended run must not leave an approval
+            # card in a channel either: nobody is in the conversation that
+            # produced it, so a DBA scrolling past would be asked to
+            # rubber-stamp an action with none of the context a live
+            # investigation would have given them, and `state` here is an
+            # ephemeral object (see `run_comprehensive_summary`) that no
+            # later `/approve` could ever resolve against anyway.
+            #
+            # The Gateway has already recorded its own approval request by
+            # this point and that is left alone on purpose — it expires on
+            # its own TTL (see OPERATIONS.md's "Approval queue hygiene"),
+            # and the Agent has no authority to cancel a Gateway decision.
+            # What this refuses is the Agent's half: no `PendingApproval`
+            # is stored and no `ApprovalCard` is ever returned, so nothing
+            # actionable reaches a human. Recorded as evidence and the loop
+            # continues, same as a dropped proposal.
+            logger.warning(
+                "readonly_run_declined_approval_card",
+                investigation_id=investigation.investigation_id,
+                tool_id=action.tool_id,
+                approval_id=response.approval_id,
+            )
+            investigation.transcript.append(
+                {
+                    "tool_id": _READ_ONLY_GUARD_TOOL_ID,
+                    "reason": "Declining an approval card on an unattended, scheduled run.",
+                    "result": {
+                        "dropped_tool_id": action.tool_id,
+                        "message": (
+                            f"{action.tool_id} requires DBA approval, which an "
+                            "unattended scheduled run must never request. Report this "
+                            "as something a DBA needs to look at, and conclude."
+                        ),
+                    },
+                }
+            )
+            investigation.evidence.append(
+                f"({action.tool_id} requires DBA approval — not requested, because this "
+                "scheduled run never asks for one)"
+            )
+            return None
 
         if response.status == ToolCallStatus.APPROVAL_REQUIRED:
             state.pending_approval = PendingApproval(
@@ -1450,6 +1734,135 @@ class AgentOrchestrator:
             )
         return AgentReply(
             text=f"Approved, but execution did not complete: {response.message}", status="error"
+        )
+
+    async def run_comprehensive_summary(
+        self, *, server_id: str, environment: str, channel: str, channel_account_id: str
+    ) -> ScheduledSummary:
+        """Run the `comprehensive_summary` playbook once against one server
+        and hand back its report — the per-server building block
+        `agent.scheduled_report`'s daily digest calls once per registered
+        server. The third public entry point on this class, alongside
+        `handle_message` and `handle_approval_decision`, and the only one
+        that isn't a human talking.
+
+        Reuses the existing machinery wholesale rather than reimplementing
+        any of it: this constructs the same `ConversationState` +
+        `InvestigationState` pair `handle_message` would have, sets the same
+        `playbook_id` `match_playbook` would have matched from a DBA typing
+        "daily summary", and then calls the very same
+        `_continue_investigation` — so every fixed step in
+        `playbooks.library.comprehensive_summary`, the shared
+        `_MAX_INVESTIGATION_TURNS` budget, the argument stripping, the
+        DENIED self-correction, the FAILED-step-doesn't-abort behavior, the
+        conclusion grounding check and the playbook's own
+        `conclusion_guidance` all apply here identically and for free. The
+        deliberate consequence is that this path can never drift from what a
+        DBA gets when they ask for the same thing interactively; pinned by
+        `test_scheduled_summary_reuses_the_real_playbook.py`, which asserts
+        the exact tool sequence matches the playbook's own steps.
+
+        What is *not* shared, on purpose:
+
+        - **The state is ephemeral and never registered with the
+          `ContextManager`.** A scheduled run must be invisible to the
+          conversation layer: registering it would let an unattended sweep
+          collide with (or clobber) a real DBA's live `database_context`,
+          in-progress investigation, or pending approval on whatever
+          `conversation_id` it happened to reuse, and would leave a
+          concluded investigation sitting in a conversation nobody started.
+          The `conversation_id` is synthetic and unique per run purely so
+          the Gateway's own audit trail can correlate this run's calls with
+          each other.
+        - **`read_only=True`.** See `InvestigationState.read_only` and the
+          three enforcement points it drives. This is the constraint the
+          whole feature is built around: proactive output is text and a
+          recommendation, never an action.
+        - **The environment is supplied, never asked for.** `handle_message`
+          refuses to guess an environment and asks the DBA (spec: "for
+          production targets I won't guess"). There is nobody to ask here,
+          so the caller passes the environment the server registry itself
+          declares for this server id (`/v1/catalog/servers` — see
+          `scheduled_report.DailyDigestRunner`), which is the registry's own
+          fact rather than a guess of ours, and the Gateway independently
+          re-resolves and validates the whole target regardless.
+        """
+        if get_playbook(_SCHEDULED_SUMMARY_PLAYBOOK_ID) is None:
+            # Fail loudly rather than silently running a *freeform*
+            # investigation against every server in the estate — see
+            # `_SCHEDULED_SUMMARY_PLAYBOOK_ID`'s own comment. Unreachable
+            # unless someone renames/removes the playbook, which is exactly
+            # when a silent degradation would be hardest to notice.
+            raise RuntimeError(
+                f"Playbook '{_SCHEDULED_SUMMARY_PLAYBOOK_ID}' is not registered in "
+                "agent.playbooks.library — the scheduled daily digest has no "
+                "playbook to run."
+            )
+
+        state = ConversationState(
+            conversation_id=f"scheduled-digest:{server_id}:{new_id('run')}",
+            channel=channel,
+            channel_thread_id="",
+            channel_account_id=channel_account_id,
+        )
+        state.database_context["instance"] = server_id
+        state.database_context["environment"] = environment
+        investigation = InvestigationState(
+            investigation_id=new_id("inv"),
+            problem=_SCHEDULED_SUMMARY_PROBLEM.format(
+                server_id=server_id, environment=environment
+            ),
+            playbook_id=_SCHEDULED_SUMMARY_PLAYBOOK_ID,
+            read_only=True,
+        )
+        state.investigation = investigation
+
+        reply = await self._continue_investigation(
+            state, investigation, channel, channel_account_id
+        )
+
+        # "Did anything actually answer?" is deliberately structural, not a
+        # reading of the reply text: `investigation.actions` is appended to
+        # only in `_submit_and_relay`'s EXECUTED branch, so an empty list
+        # means not one diagnostic call succeeded — an unreachable server, a
+        # never-completed discovery, every step denied. The model will still
+        # happily write a fluent paragraph about having found nothing
+        # concerning in that situation, and the digest must not print that
+        # as a clean bill of health. See `build_digest`: this is what makes
+        # "6 attempted, 2 failed to even respond" reportable instead of
+        # invisible.
+        error = ""
+        if not investigation.actions:
+            error = (
+                "no diagnostic call succeeded — the server may be unreachable, its "
+                "discovery may never have completed, or every check was denied"
+            )
+        elif reply.status != "ok":
+            error = f"the investigation ended with status '{reply.status}'"
+
+        if error:
+            logger.warning(
+                "scheduled_summary_incomplete",
+                server_id=server_id,
+                investigation_id=investigation.investigation_id,
+                status=reply.status,
+                executed_calls=len(investigation.actions),
+            )
+
+        return ScheduledSummary(
+            server_id=server_id,
+            environment=environment,
+            investigation_id=investigation.investigation_id,
+            status=reply.status,
+            text=reply.text,
+            findings=tuple(investigation.findings),
+            recommendations=tuple(investigation.recommendations),
+            dropped_proposals=tuple(
+                str(entry.get("result", {}).get("dropped_tool_id", ""))
+                for entry in investigation.transcript
+                if entry.get("tool_id") == _READ_ONLY_GUARD_TOOL_ID
+            ),
+            error=error,
         )
 
     async def _handle_command_if_any(

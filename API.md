@@ -114,6 +114,19 @@ Verifies the Bot Framework bearer token (`channels/teams/auth.py`) and
 routes both plain messages and Adaptive Card `Action.Submit` payloads
 (approve/reject).
 
+### `POST /v1/notify`
+
+The one Agent-initiated (outbound) path on this service: delivers an
+unsolicited message to a channel. Today that is only the scheduled daily
+health digest (`agent/scheduled_report.py`). Requires a service token with
+audience `inumi-channels`; body `{channel_id, text}`.
+
+Deliberately minimal — no identity, no `approval_id`, no conversation. It
+posts text and nothing else, and the reply it renders never carries an
+approval card, so it cannot be used to put a clickable action in front of a
+DBA. Delivery lives here rather than in the Agent because this is the only
+service holding a channel credential.
+
 ### `POST /dev/chat`, `POST /dev/chat/events` (spec §66)
 
 Mock channel for local development — no real Slack/Teams credentials

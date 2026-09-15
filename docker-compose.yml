@@ -121,6 +121,7 @@ services:
       GATEWAY_BASE_URL: http://gateway:8001
       EXECUTION_BASE_URL: http://execution:8002
       AGENT_BASE_URL: http://agent:8000
+      CHANNELS_BASE_URL: http://channels:8003
       # LLM: keys are passed through from your shell environment. With none
       # set, the agent falls back to the deterministic offline planner.
       # `LLM_PROVIDER` unset/"" = auto-pick the first provider that has a key.
@@ -172,6 +173,15 @@ services:
         SERVICE: agent
     environment:
       <<: *common-env
+      # Proactive daily digest — off unless a destination channel is set
+      # (then no scheduler or job is created at all). Only the agent
+      # service gets these: it owns the orchestrator and holds no database
+      # credential. See OPERATIONS.md's "Enabling the daily health digest".
+      DAILY_REPORT_SLACK_CHANNEL: "${DAILY_REPORT_SLACK_CHANNEL:-}"
+      DAILY_REPORT_HOUR_UTC: "${DAILY_REPORT_HOUR_UTC:-6}"
+      DAILY_REPORT_SERVERS: "${DAILY_REPORT_SERVERS:-}"
+      DAILY_REPORT_IDENTITY_CHANNEL: "${DAILY_REPORT_IDENTITY_CHANNEL:-dev}"
+      DAILY_REPORT_IDENTITY_ACCOUNT: "${DAILY_REPORT_IDENTITY_ACCOUNT:-}"
     ports:
       - "8000:8000"
     depends_on:

@@ -21,7 +21,7 @@ import json
 import time
 
 import httpx
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel
 
 from inumi.agent.reply import AgentReply
@@ -34,9 +34,27 @@ from inumi.channels.teams.sender import TeamsMessageSender
 from inumi.common.config import Settings, get_settings
 from inumi.common.identity import build_identity_provider
 from inumi.common.observability import configure_logging, get_logger
-from inumi.common.service_auth import ServiceTokenIssuer
+from inumi.common.service_auth import ServiceTokenIssuer, ServiceTokenVerifier
 
 logger = get_logger(__name__)
+
+
+class NotifyRequest(BaseModel):
+    """An unsolicited message the Agent asks this service to deliver — today
+    only the scheduled daily health digest (`agent.scheduled_report`).
+
+    Note what is deliberately absent: no identity, no approval_id, no
+    conversation. This endpoint delivers text to a channel and does nothing
+    else. It cannot start an investigation, cannot render an approval card
+    (`render_reply_blocks` only emits one for a reply carrying an
+    `approval_card`, which an `AgentReply` built here never has), and so
+    cannot be turned into a way to get an action in front of a DBA for a
+    click. That matters more than it looks: this is the one inbound path on
+    this service whose content originates from an LLM-backed process rather
+    than from a human, so its blast radius is kept to "posts text"."""
+
+    channel_id: str
+    text: str
 
 
 class DevChatRequest(BaseModel):
@@ -98,6 +116,13 @@ def create_app(settings: Settings | None = None, *, agent_transport=None) -> Fas
 
     identity_provider = build_identity_provider(settings)
     issuer = ServiceTokenIssuer(settings.service_jwt_secret, settings.service_jwt_issuer)
+    # Inbound, for the one endpoint another of our services calls (`/v1/notify`
+    # — see `NotifyRequest`). Every other path into this service is a webhook
+    # authenticated by its own transport's scheme (Slack signature, Bot
+    # Framework JWT); this one is a same-trust-domain hop and uses the same
+    # signed, audience-scoped service token as Agent -> Gateway and
+    # Gateway -> Execution, never a bare header (spec §31).
+    verifier = ServiceTokenVerifier(settings.service_jwt_secret, settings.service_jwt_issuer)
     slack_sender = SlackMessageSender(settings.slack_bot_token)
 
     # Slack's Events API retries a delivery it hasn't gotten a fast ack for
@@ -193,9 +218,36 @@ def create_app(settings: Settings | None = None, *, agent_transport=None) -> Fas
             response.raise_for_status()
             return response.json()
 
+    async def require_agent_service_token(x_service_token: str | None = Header(default=None)) -> None:
+        if not x_service_token:
+            raise HTTPException(status_code=401, detail="Missing service token.")
+        try:
+            verifier.verify(x_service_token, expected_audience="inumi-channels")
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=401, detail="Invalid service token.") from exc
+
     @app.get("/health")
     async def health() -> dict:
         return {"status": "ok"}
+
+    # ------------------------------------------------ Outbound (Agent-initiated)
+
+    @app.post("/v1/notify", dependencies=[Depends(require_agent_service_token)])
+    async def notify(body: NotifyRequest) -> dict:
+        """Deliver an unsolicited message to a channel on the Agent's behalf
+        — the scheduled daily digest's one delivery route.
+
+        Delivery lives here rather than in the Agent for the same reason
+        every other outbound Slack call does: this is the only service that
+        holds a channel credential, and the only one that knows how a
+        message should be rendered for each channel (see
+        `channels.slack.blocks`, and ARCHITECTURE.md's "Adding a channel").
+        A Teams destination for the same digest is a change to this
+        function, not to the Agent."""
+        logger.info("notify_received", channel=body.channel_id, length=len(body.text))
+        reply = AgentReply(text=body.text)
+        await slack_sender.post_message(body.channel_id, reply.text, render_reply_blocks(reply))
+        return {"ok": True}
 
     # ------------------------------------------------------------------ Slack
 

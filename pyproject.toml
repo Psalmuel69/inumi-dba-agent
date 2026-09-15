@@ -31,6 +31,15 @@ dependencies = [
   "cryptography>=42.0.0",
   "itsdangerous>=2.2.0",
   "PyJWT[crypto]>=2.8.0",
+  # The Agent's once-daily proactive health digest (agent/scheduled_report.py)
+  # — used for its AsyncIOScheduler + cron trigger. Chosen over a hand-rolled
+  # `asyncio.sleep`-until-the-next-hour loop because the correctness of "every
+  # day at 06:00 UTC" lives almost entirely in the edge cases a loop would have
+  # to reimplement by hand (missed occurrences after a restart, overlapping
+  # runs, drift, an explicit timezone) — here those are `misfire_grace_time` /
+  # `max_instances` / `coalesce` / an explicitly-UTC trigger. No job store or
+  # persistence is used: the schedule is configuration, not state.
+  "apscheduler>=3.10",
   # Database drivers — the Execution Service always uses real connections.
   "pyodbc>=5.1.0",
   "psycopg[binary,pool]>=3.1.0",
