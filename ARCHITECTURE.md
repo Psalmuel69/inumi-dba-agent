@@ -996,3 +996,118 @@ See `tests/unit/test_environment_clarification.py`'s
 (the negative case guarding the target-naming check specifically,
 independent of the word-count floor the three-turn test above already
 covers).
+
+## Masking a sensitive FIELD says nothing about a sensitive VALUE
+
+`DataMinimizer` (`gateway/domain/data_policy.py`) has always masked a field
+whose NAME matches a sensitive pattern — `password`, `ssn`,
+`account_number`. That is the right treatment for a column that is nothing
+but a secret, and it is blind to the case that actually leaks: a field whose
+name is entirely innocuous and whose CONTENTS are a verbatim statement a
+user ran. `database.get_running_queries` returns a `query_text` column
+straight out of `pg_stat_activity` (`execution/adapters/postgresql.py::
+running_queries`; SQL Server's `sys.dm_exec_sql_text` and MySQL's
+`information_schema.PROCESSLIST` return the same shape), and
+
+```
+SELECT * FROM accounts WHERE account_number = '1234567890'
+                         AND customer_name = 'Jane Doe'
+```
+
+passed through untouched — the field name "query_text" is not sensitive, so
+nothing masked it — into the LLM and from there into a Slack channel. That
+is real customer data leaving the database through the one component whose
+entire premise (SECURITY.md control 13) is that Inumi reads diagnostics and
+never table contents.
+
+The fix has to keep the statement *useful*. A DBA diagnosing a slow or
+deadlocked query needs the shape — which tables, which columns, which
+joins, whether there's a leading-wildcard LIKE, whether the ORDER BY is
+unindexed. None of that is the literal values, and the literal values are
+exactly what must never leave. So `gateway/domain/query_scrubber.py`
+parses the text with `sqlglot` — the same real parser `sql_validator.py`
+already uses for the read-only SQL tool, and the house pattern this follows
+— and replaces every literal node with a placeholder, leaving table names,
+column names, keywords and structure intact.
+
+**Where it lives: inside `DataMinimizer`, keyed on field name.** The
+alternative considered was a second, separate minimization pass applied only
+to the four tool results that obviously return raw text
+(`running_queries`, `top_queries`, `deadlocks`, `error_logs`). Rejected,
+for two reasons. First, it has a hole on day one:
+`database.get_blocking_sessions` is not in that list, and all three
+adapters return `blocked_query`/`blocking_query`/`blocked_query_text` from
+it (`execution/adapters/*.py::blocking`) — full statement text carrying
+exactly the literals this exists to catch; `get_sessions` returns
+`query_text` too. A tool-id-keyed list is a list someone must remember to
+extend every time an adapter grows a column; a field-name-keyed rule covers
+them the moment they appear. Second, `DataMinimizer.apply()` is already the
+one mandatory seam — every tool result passes through it, unconditionally,
+at step 10 of `tool_call_handler.py::_handle_inner`, with no code path
+around it. A second pass would be a second thing to remember to call.
+`DataPolicyConfig` therefore grows a `free_text_sql_field_patterns` set
+*separate from* `sensitive_field_patterns`, because the treatment differs:
+sensitive fields are fully masked, these are literal-scrubbed and keep
+their shape. Sensitive-by-name is checked first and wins, which is what
+makes the change strictly additive — every field masked before is still
+masked, byte for byte (`test_existing_field_name_masking_is_completely_
+unchanged`).
+
+**The placeholder is `<redacted>`, not `?`.** `?` is the obvious first
+instinct and is wrong: `?` is itself a real bind-parameter marker in the
+ODBC/MySQL dialects this system talks to, so `... WHERE account_number = ?`
+is indistinguishable from a statement the application genuinely sent
+parameterized. A DBA (and the LLM) could not tell "Inumi removed a value
+here" from "the app used a bind parameter here" — and those call for
+different diagnoses. `<redacted>` can never be mistaken for something the
+application wrote, and it matches the existing `***MASKED***` convention:
+say plainly that something was deliberately removed. It is emitted as a
+string literal in every position, numbers included, so the scrubbed
+statement still parses as valid SQL. Every literal goes, including ones
+harmless in isolation (a `LIMIT 100`, a `WHERE status = 1`): the
+alternative is a per-literal judgment about whether a value is sensitive,
+which is the kind of guess this codebase refuses to make elsewhere and the
+one that fails silently and unrecoverably when it guesses wrong.
+
+**The fallback path is deliberately less precise, and deliberately not a
+crash.** A Postgres error-log line, SQL Server's `deadlock_graph` XML,
+MySQL's `SHOW ENGINE INNODB STATUS` blob, a plan's text representation, or
+a valid statement chopped mid-literal (the adapters themselves truncate at
+`left(query, 200)` / `LEFT(INFO, 500)`) are all normal inputs here.
+Dropping the row or raising would blind the DBA to exactly the diagnostic
+they asked for and turn a successful tool call into a FAILED one, so
+`scrub_sql_literals` falls back to a regex scrub of obvious literal shapes
+— single-quoted runs and bare numeric runs — instead of the AST. With no
+structure there is no way to tell a value from an identifier, so that path
+over-redacts on purpose (timestamps and PIDs in a log line go too). Two
+deliberate carve-outs: double-quoted text is preserved, because in standard
+SQL it is an *identifier* and in Postgres log text it is almost always the
+object name the DBA needs (`violates unique constraint "accounts_pkey"`);
+and sqlglot is always tried first, so anything that really is SQL gets the
+precise treatment.
+
+**Why a successful parse is not enough on its own.** sqlglot is permissive
+by design and `ErrorLevel.RAISE` does not cover this. Verified against
+sqlglot 30.17: `"Jane Doe"` parses cleanly as an `exp.Alias` and
+round-trips as `Jane AS Doe` — the value survives unredacted *and* the text
+is mangled; `"1234567890"` parses as a bare `exp.Literal`. Accepting those
+would be strictly worse than the fallback. So a parse counts only when the
+root node is an actual statement (`_SQL_STATEMENT_TYPES`); a bare
+expression or fragment is treated as unparseable and handed to the regex
+path, which redacts both of those examples correctly.
+
+Cost, measured on the worst realistic case (a full 100-row result — the
+`max_rows` cap — every row carrying a complete statement): ~142ms, about
+1.4ms per statement. A result of plain metric columns costs ~0.9ms total,
+since no field name matches and no parse is attempted. Both are immaterial
+against the database round trip and the 20s per-decision LLM deadline.
+
+Only `str` values are scrubbed. That is not incidental: PostgreSQL's
+`deadlocks()` returns a numeric `deadlocks` COUNTER, and several engines
+return NULL query text for an idle session — running a text scrubber over
+an int would destroy a metric while protecting nothing. The Gateway reports
+`literal_scrubbed_fields` alongside the existing `masked_fields` in the
+tool result, kept distinct because the two mean different things: a masked
+field is gone, a scrubbed field is still there and still readable and only
+its values were replaced. See `tests/unit/test_query_scrubber.py` and the
+no-regression guards in `tests/unit/test_data_policy.py`.
