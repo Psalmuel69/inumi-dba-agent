@@ -58,6 +58,23 @@ jobs:
       - name: Install package
         run: python -m pip install -e ".[dev]"
 
+      # config/dev_credentials.yaml is gitignored (real values never
+      # committed — see the Makefile's own `dev` target and README's Quick
+      # Start) and does not exist on a fresh checkout. Found live: without
+      # this, `tests/unit`+`tests/integration`'s collection crashes with
+      # FileNotFoundError — several test modules import a service's
+      # `create_app` factory, and each service's `app.py` has a
+      # module-level `app = create_app()` (needed so `uvicorn
+      # inumi.execution.api.app:app` etc. can actually serve it) that
+      # eagerly constructs `LocalDevCredentialProvider`, which reads this
+      # file at construction time, not lazily. Reproduced exactly locally
+      # (moving the file aside reproduces the identical "6 errors during
+      # collection" pytest exit code 2) before landing on this fix — the
+      # Python-version pin above was a red herring for this specific
+      # failure, ruled out the same way.
+      - name: Set up dev credentials fixture
+        run: cp config/dev_credentials.example.yaml config/dev_credentials.yaml
+
       - name: Unit + integration tests
         run: python -m pytest tests/unit tests/integration -q
 
