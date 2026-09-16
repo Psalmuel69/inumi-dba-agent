@@ -491,3 +491,197 @@ def test_build_identity_provider_rejects_an_unknown_name():
     directory."""
     with pytest.raises(InumiError):
         build_identity_provider(_settings(identity_provider="okta-ish"))
+
+
+# --------------------------------------------------------------------------- #
+# Discovery document — caching and malformed responses
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_the_discovery_document_is_fetched_once_and_cached(identity_config):
+    """Static endpoint metadata for the life of the process — unlike
+    anything about a user (see the module docstring)."""
+    http = _FakeHTTPClient([_found(), _found()])
+    provider = _provider(identity_config, http)
+
+    await provider.resolve_by_external_account("slack", "U012ABC")
+    await provider.resolve_by_external_account("slack", "U012ABC")
+
+    discovery_calls = [c for c in http.get_calls if c["url"].endswith("openid-configuration")]
+    assert len(discovery_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_non_200_discovery_response_returns_none_rather_than_raising(identity_config):
+    http = _FakeHTTPClient([], discovery_status=503)
+    provider = _provider(identity_config, http)
+
+    assert await provider.resolve_by_external_account("slack", "U012ABC") is None
+
+
+@pytest.mark.asyncio
+async def test_a_non_dict_discovery_document_returns_none_rather_than_raising(identity_config):
+    class _MalformedDiscoveryClient(_FakeHTTPClient):
+        async def get(self, url, headers=None, params=None):
+            self.get_calls.append({"url": url, "headers": headers or {}, "params": params or {}})
+            if url.endswith("/.well-known/openid-configuration"):
+                return _FakeResponse(200, ["not", "an", "object"])
+            raise AssertionError("should never reach the directory")
+
+    provider = _provider(identity_config, _MalformedDiscoveryClient())
+    assert await provider.resolve_by_external_account("slack", "U012ABC") is None
+
+
+@pytest.mark.asyncio
+async def test_a_discovery_document_missing_a_token_endpoint_returns_none(identity_config):
+    class _NoTokenEndpointClient(_FakeHTTPClient):
+        async def get(self, url, headers=None, params=None):
+            self.get_calls.append({"url": url, "headers": headers or {}, "params": params or {}})
+            if url.endswith("/.well-known/openid-configuration"):
+                return _FakeResponse(200, {"issuer": _ISSUER})  # no token_endpoint
+            raise AssertionError("should never reach the directory")
+
+    provider = _provider(identity_config, _NoTokenEndpointClient())
+    assert await provider.resolve_by_external_account("slack", "U012ABC") is None
+
+
+@pytest.mark.asyncio
+async def test_a_token_response_carrying_no_access_token_returns_none(identity_config):
+    class _EmptyTokenClient(_FakeHTTPClient):
+        async def post(self, url, data=None, headers=None):
+            self.post_calls.append({"url": url, "data": data or {}})
+            return _FakeResponse(200, {"token_type": "Bearer"})  # no access_token
+
+    provider = _provider(identity_config, _EmptyTokenClient())
+    assert await provider.resolve_by_external_account("slack", "U012ABC") is None
+
+
+# --------------------------------------------------------------------------- #
+# SCIM user resource parsing — fallback branches
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_a_non_list_groups_attribute_is_treated_as_no_groups(identity_config):
+    user = dict(_SCIM_USER, groups="not-a-list")
+    http = _FakeHTTPClient([_found(user)])
+    provider = _provider(identity_config, http)
+
+    identity = await provider.resolve_by_external_account("slack", "U012ABC")
+    assert identity is not None
+    assert identity.enterprise_groups == []
+
+
+@pytest.mark.asyncio
+async def test_a_plain_string_emails_field_is_accepted(identity_config):
+    user = dict(_SCIM_USER, emails="single@example.test")
+    http = _FakeHTTPClient([_found(user)])
+    provider = _provider(identity_config, http)
+
+    identity = await provider.resolve_by_external_account("slack", "U012ABC")
+    assert identity is not None
+    assert identity.email == "single@example.test"
+
+
+@pytest.mark.asyncio
+async def test_emails_with_no_primary_flag_falls_back_to_the_first_value(identity_config):
+    user = dict(_SCIM_USER, emails=[{"value": "secondary@example.test"}])
+    http = _FakeHTTPClient([_found(user)])
+    provider = _provider(identity_config, http)
+
+    identity = await provider.resolve_by_external_account("slack", "U012ABC")
+    assert identity is not None
+    assert identity.email == "secondary@example.test"
+
+
+@pytest.mark.asyncio
+async def test_no_emails_at_all_falls_back_to_username(identity_config):
+    user = {k: v for k, v in _SCIM_USER.items() if k != "emails"}
+    http = _FakeHTTPClient([_found(user)])
+    provider = _provider(identity_config, http)
+
+    identity = await provider.resolve_by_external_account("slack", "U012ABC")
+    assert identity is not None
+    assert identity.email == _SCIM_USER["userName"]
+
+
+@pytest.mark.asyncio
+async def test_display_name_falls_back_to_name_formatted_when_displayname_is_absent(identity_config):
+    user = {k: v for k, v in _SCIM_USER.items() if k != "displayName"}
+    user["name"] = {"formatted": "Formatted Name"}
+    http = _FakeHTTPClient([_found(user)])
+    provider = _provider(identity_config, http)
+
+    identity = await provider.resolve_by_external_account("slack", "U012ABC")
+    assert identity is not None
+    assert identity.display_name == "Formatted Name"
+
+
+@pytest.mark.asyncio
+async def test_display_name_falls_back_to_username_when_nothing_else_is_present(identity_config):
+    user = {k: v for k, v in _SCIM_USER.items() if k not in ("displayName", "name")}
+    http = _FakeHTTPClient([_found(user)])
+    provider = _provider(identity_config, http)
+
+    identity = await provider.resolve_by_external_account("slack", "U012ABC")
+    assert identity is not None
+    assert identity.display_name == _SCIM_USER["userName"]
+
+
+@pytest.mark.asyncio
+async def test_a_string_mfa_attribute_of_yes_reads_as_satisfied(identity_config):
+    user = dict(_SCIM_USER, mfaEnrolled="yes")
+    http = _FakeHTTPClient([_found(user)])
+    provider = _provider(identity_config, http)
+
+    identity = await provider.resolve_by_external_account("slack", "U012ABC")
+    assert identity is not None
+    assert identity.mfa_satisfied is True
+
+
+@pytest.mark.asyncio
+async def test_a_string_mfa_attribute_of_false_text_reads_as_not_satisfied(identity_config):
+    user = dict(_SCIM_USER, mfaEnrolled="false")
+    http = _FakeHTTPClient([_found(user)])
+    provider = _provider(identity_config, http)
+
+    identity = await provider.resolve_by_external_account("slack", "U012ABC")
+    assert identity is not None
+    assert identity.mfa_satisfied is False
+
+
+# --------------------------------------------------------------------------- #
+# refresh — fail-closed branches not already covered above
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_refresh_with_an_unconfigured_directory_endpoint_returns_none(tmp_path):
+    path = tmp_path / "identity.yaml"
+    path.write_text(_IDENTITY_YAML.replace('"https://idp.example.test/scim/v2/Users"', '""'))
+    http = _FakeHTTPClient([])
+
+    provider = _provider(path, http)
+    assert await provider.refresh("idp-subject-0001") is None
+    assert http.get_calls == []
+
+
+@pytest.mark.asyncio
+async def test_refresh_with_a_blank_subject_id_never_reaches_the_directory(identity_config):
+    http = _FakeHTTPClient([])
+    provider = _provider(identity_config, http)
+
+    assert await provider.refresh("") is None
+    assert await provider.refresh("   ") is None
+    assert http.directory_get_calls == []
+
+
+@pytest.mark.asyncio
+async def test_refresh_of_a_malformed_non_object_payload_returns_none(identity_config):
+    """A SCIM server that returns a JSON array instead of a user resource
+    must fail closed rather than raise deep inside attribute access."""
+    http = _FakeHTTPClient([_FakeResponse(200, ["not", "a", "user", "resource"])])
+    provider = _provider(identity_config, http)
+
+    assert await provider.refresh("idp-subject-0001") is None
