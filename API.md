@@ -92,6 +92,20 @@ Body: `{channel, channel_account_id, conversation_id, approval_id, decision}`
 where `decision` is `"approve"` or `"reject"` — routes to the Gateway's
 approval endpoints and resubmits the original tool call on success.
 
+### `POST /v1/alerts/trigger`
+
+Internal — called by Channels' `/webhooks/alerts` after it verifies the
+external monitoring system's signature, with a service token audience
+`inumi-agent` (same as `/v1/chat`). Body:
+`{server, metric?, current_value?, threshold?, severity?, source?, message?}`.
+Runs one freeform, read-only investigation
+(`orchestrator.run_triggered_investigation` — see ARCHITECTURE.md's
+"Alert-triggered investigation") against the named server and delivers the
+result via Channels' `POST /v1/notify`. Response: `{ok, error?}` — `ok:
+false` covers an unresolvable `server`, the feature being unconfigured
+(`ALERT_WEBHOOK_SLACK_CHANNEL` unset), or a delivery failure; none of these
+are HTTP errors, since the request Channels forwarded was itself valid.
+
 ### `GET /health`
 
 ## Channels (`channels/api/app.py`) — default port 8003
@@ -113,6 +127,22 @@ Handles Block Kit button clicks (Approve/Reject), routing to the Agent's
 Verifies the Bot Framework bearer token (`channels/teams/auth.py`) and
 routes both plain messages and Adaptive Card `Action.Submit` payloads
 (approve/reject).
+
+### `POST /webhooks/alerts`
+
+An external monitoring system (Prometheus Alertmanager, Datadog, a cloud
+provider's own alarms, ...) reporting a threshold breach. Verifies
+`X-Inumi-Alert-Signature`/`X-Inumi-Alert-Timestamp`
+(`channels/alerts/signature.py` — same HMAC-over-timestamp-bound-body shape
+as the Slack signature above); an unset `ALERT_WEBHOOK_SECRET` refuses
+every request. Body: `{server, metric?, current_value?, threshold?,
+severity?, source?, message?, alert_id?}` — `server` is the only required
+field (a registered server id or alias) and `alert_id`, if the sender
+includes one, deduplicates a retried delivery the same way Slack's own
+event retries are. Forwards to the Agent's `POST /v1/alerts/trigger` and
+returns `{ok, error?}` — always HTTP 200/400/401, since a monitoring
+system's retry/backoff logic should react to "the request was malformed,"
+not to "the server name in a well-formed alert didn't match anything."
 
 ### `POST /v1/notify`
 

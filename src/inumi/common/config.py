@@ -28,6 +28,13 @@ class Settings(BaseSettings):
     control_db_url: str = "sqlite+aiosqlite:///./inumi_dev.db"
     redis_url: str = "redis://localhost:6379/0"
 
+    # "memory"  -> per-process fixed-window counters (tests / single-instance
+    #   local dev; a rate limit means nothing shared across replicas).
+    # "redis"   -> shared counters via REDIS_URL, required the moment more
+    #   than one Gateway replica is running (spec §29) — see
+    #   gateway.api.state.GatewayState.build.
+    rate_limit_backend: str = "memory"
+
     secrets_provider: str = "local_dev"
     vault_addr: str = ""
     vault_token: str = ""
@@ -132,6 +139,35 @@ class Settings(BaseSettings):
     daily_report_identity_channel: str = "dev"
     daily_report_identity_account: str = ""
 
+    # --- Alert-triggered investigation (agent + channels services) ----------
+    # An external monitoring system (Prometheus Alertmanager, Datadog, a
+    # cloud provider's own alarms, ...) POSTs a threshold-breach alert to
+    # Channels' `/webhooks/alerts`; Channels verifies it, then the Agent runs
+    # one freeform, read-only investigation against the named server and
+    # posts the result — the same architecture as the daily digest
+    # (`agent.scheduled_report`), just triggered by an event instead of a
+    # clock. See `agent.alert_trigger` and ARCHITECTURE.md's
+    # "Alert-triggered investigation" section.
+    #
+    # Disabled by default, and disabled by exactly one switch for the same
+    # reason the digest has exactly one: an empty secret means
+    # `channels.alerts.signature` has nothing safe to verify against, so the
+    # webhook route refuses every request outright rather than ever falling
+    # back to "unauthenticated is fine for now."
+    alert_webhook_secret: str = ""
+    # Where a finished investigation is posted. Independent of
+    # `daily_report_slack_channel` on purpose — an alert is an event a team
+    # may want routed to a different (e.g. incident-response) channel than
+    # the morning digest.
+    alert_webhook_slack_channel: str = ""
+    # Same non-bypass guarantee as `daily_report_identity_account`: the
+    # Gateway independently re-resolves this (channel, channel_account_id)
+    # pair and authorizes every call exactly as it would for a live DBA's
+    # message. A separate account from the digest's, deliberately — so the
+    # two features can be enabled, disabled, and audited independently.
+    alert_webhook_identity_channel: str = "dev"
+    alert_webhook_identity_account: str = ""
+
     enable_readonly_sql_tool: bool = False
     enable_execute_sql_tool: bool = False
     enable_restore_database_tool: bool = False
@@ -219,6 +255,12 @@ class Settings(BaseSettings):
             violations.append(
                 "SERVICE_JWT_SECRET is still the development placeholder — set a "
                 "real, unique secret for production."
+            )
+        if self.rate_limit_backend != "redis":
+            violations.append(
+                "RATE_LIMIT_BACKEND is not 'redis' — the in-memory backend counts per "
+                "process, so every rate limit is silently multiplied by replica count "
+                "the moment more than one Gateway instance is running."
             )
 
         if violations:

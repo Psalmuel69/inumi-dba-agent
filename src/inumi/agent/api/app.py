@@ -16,6 +16,7 @@ from collections.abc import AsyncIterator
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
+from inumi.agent.alert_trigger import AlertPayload, AlertTriggerRunner
 from inumi.agent.context_manager import ContextManager
 from inumi.agent.llm.registry import LLMRegistry
 from inumi.agent.orchestrator import AgentOrchestrator
@@ -49,6 +50,24 @@ class ApprovalEventRequest(BaseModel):
     decision: str  # "approve" | "reject"
 
 
+class AlertTriggerRequest(BaseModel):
+    """What `channels.api.app`'s `/webhooks/alerts` forwards after verifying
+    the external monitoring system's signature — see `agent.alert_trigger`."""
+
+    server: str
+    metric: str = ""
+    current_value: str = ""
+    threshold: str = ""
+    severity: str = ""
+    source: str = ""
+    message: str = ""
+
+
+class AlertTriggerResponse(BaseModel):
+    ok: bool
+    error: str = ""
+
+
 def create_app(
     settings: Settings | None = None, *, gateway_transport=None, channels_transport=None
 ) -> FastAPI:
@@ -78,6 +97,19 @@ def create_app(
     # default — see `agent.scheduled_report` for why "no channel" is the one
     # and only off switch.
     digest_runner = DailyDigestRunner(
+        orchestrator=orchestrator,
+        settings=settings,
+        publisher=ChannelsDigestPublisher(
+            settings.channels_base_url, issuer, transport=channels_transport
+        ),
+    )
+
+    # The alert-triggered investigation (see `agent.alert_trigger`) — same
+    # "constructed unconditionally, only ever does anything if configured"
+    # shape as the digest above, and for the same reason: `handle_alert`
+    # itself refuses to run when `alert_webhook_slack_channel` is unset, so
+    # there is nothing here to gate a second time.
+    alert_trigger_runner = AlertTriggerRunner(
         orchestrator=orchestrator,
         settings=settings,
         publisher=ChannelsDigestPublisher(
@@ -136,6 +168,26 @@ def create_app(
             channel=body.channel,
             channel_account_id=body.channel_account_id,
         )
+
+    @app.post(
+        "/v1/alerts/trigger",
+        response_model=AlertTriggerResponse,
+        dependencies=[Depends(require_channel_service_token)],
+    )
+    async def alerts_trigger(body: AlertTriggerRequest) -> AlertTriggerResponse:
+        logger.info("alert_trigger_received", server=body.server, metric=body.metric)
+        outcome = await alert_trigger_runner.handle_alert(
+            AlertPayload(
+                server=body.server,
+                metric=body.metric,
+                current_value=body.current_value,
+                threshold=body.threshold,
+                severity=body.severity,
+                source=body.source,
+                message=body.message,
+            )
+        )
+        return AlertTriggerResponse(ok=outcome.ok, error=outcome.error)
 
     return app
 

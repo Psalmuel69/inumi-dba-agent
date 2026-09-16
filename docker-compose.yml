@@ -116,7 +116,17 @@ services:
       SERVERS_CONFIG_PATH: /app/config/servers.yaml
       IDENTITY_CONFIG_PATH: /app/config/identity.yaml
       RATE_LIMIT_CONFIG_PATH: /app/config/rate_limits.yaml
-      SERVICE_JWT_SECRET: dev-only-change-me-in-production
+      # "memory" (default) only counts within one process — fine for this
+      # single-replica local stack. Set to "redis" for anything with more
+      # than one Gateway instance (validate_for_production requires it).
+      RATE_LIMIT_BACKEND: "${RATE_LIMIT_BACKEND:-memory}"
+      # Every other secret in this file is `${VAR:-}` — overridable, empty
+      # by default. This one still needs a harmless non-empty default so the
+      # dev stack works with zero setup, but it must never be the value any
+      # real deployment actually runs with — set SERVICE_JWT_SECRET in your
+      # environment/.env to override it. validate_for_production() refuses
+      # to boot with INUMI_ENV=production while this default is still active.
+      SERVICE_JWT_SECRET: "${SERVICE_JWT_SECRET:-dev-only-change-me-in-production}"
       SERVICE_JWT_ISSUER: inumi-internal
       GATEWAY_BASE_URL: http://gateway:8001
       EXECUTION_BASE_URL: http://execution:8002
@@ -131,6 +141,9 @@ services:
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
       GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
       DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY:-}"
+    volumes:
+      - ./config:/app/config:ro
+      - ./migrations:/app/migrations:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -145,8 +158,16 @@ services:
     ports:
       - "8002:8002"
     # Lets the execution container reach databases running on the host.
+    # `host-gateway` resolves to the Docker daemon's own machine — under
+    # Docker Desktop that IS Windows, but this stack also runs against a
+    # Docker Engine installed natively inside WSL2, where `host-gateway`
+    # only reaches the WSL2 VM itself, not the Windows host one hop further
+    # out. WINDOWS_HOST_IP overrides the target for that case (see .env.example
+    # for how to find it); Docker Desktop users can leave it unset.
     extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - "host.docker.internal:${WINDOWS_HOST_IP:-host-gateway}"
+    volumes:
+      - ./config:/app/config:ro
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -160,6 +181,8 @@ services:
       <<: *common-env
     ports:
       - "8001:8001"
+    volumes:
+      - ./config:/app/config:ro
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -182,8 +205,19 @@ services:
       DAILY_REPORT_SERVERS: "${DAILY_REPORT_SERVERS:-}"
       DAILY_REPORT_IDENTITY_CHANNEL: "${DAILY_REPORT_IDENTITY_CHANNEL:-dev}"
       DAILY_REPORT_IDENTITY_ACCOUNT: "${DAILY_REPORT_IDENTITY_ACCOUNT:-}"
+      # Alert-triggered investigation — off unless a destination channel is
+      # set, same one-switch shape as the digest above. See
+      # `agent.alert_trigger` and ARCHITECTURE.md's "Alert-triggered
+      # investigation". `ALERT_WEBHOOK_SECRET` itself is NOT needed here —
+      # only Channels verifies the inbound signature; this service only
+      # ever sees an already-verified request.
+      ALERT_WEBHOOK_SLACK_CHANNEL: "${ALERT_WEBHOOK_SLACK_CHANNEL:-}"
+      ALERT_WEBHOOK_IDENTITY_CHANNEL: "${ALERT_WEBHOOK_IDENTITY_CHANNEL:-dev}"
+      ALERT_WEBHOOK_IDENTITY_ACCOUNT: "${ALERT_WEBHOOK_IDENTITY_ACCOUNT:-}"
     ports:
       - "8000:8000"
+    volumes:
+      - ./config:/app/config:ro
     depends_on:
       - gateway
 
@@ -198,8 +232,14 @@ services:
       SLACK_BOT_TOKEN: "${SLACK_BOT_TOKEN:-}"
       TEAMS_APP_ID: "${TEAMS_APP_ID:-}"
       TEAMS_APP_PASSWORD: "${TEAMS_APP_PASSWORD:-dev-teams-shared-token}"
+      # `/webhooks/alerts`' one switch: unset here, the route refuses every
+      # request outright (see channels.alerts.signature) rather than ever
+      # treating an unconfigured webhook as trusted-by-default.
+      ALERT_WEBHOOK_SECRET: "${ALERT_WEBHOOK_SECRET:-}"
     ports:
       - "8003:8003"
+    volumes:
+      - ./config:/app/config:ro
     depends_on:
       - agent
 

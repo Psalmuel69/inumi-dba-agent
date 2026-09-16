@@ -399,3 +399,40 @@ async def test_the_scheduled_entry_point_blocks_a_write_end_to_end():
     assert set(submitted) <= {t.tool_id for t in _REAL_TOOLS if t.operation_type == OperationType.READ}
     # The attempt is visible to the digest rather than hidden.
     assert summary.dropped_proposals == ("database.kill_session",)
+
+
+@pytest.mark.asyncio
+async def test_the_triggered_entry_point_blocks_a_write_end_to_end():
+    """Same guarantee through `run_triggered_investigation` — the
+    alert-triggered sibling of `run_comprehensive_summary` (see
+    `agent.alert_trigger`), sharing the identical `read_only=True` wiring
+    via `_continue_investigation`. An unattended path with nobody present
+    to click "approve" must never be the one place approval quietly stops
+    being required, and that must hold regardless of which of the two
+    unattended entry points got there."""
+    tool_client = _FakeToolClient()
+    llm = _WritePushingLLM(
+        actions=[
+            ProposeToolCall(
+                tool_id="database.kill_session",
+                arguments={"session_id": "13400"},
+                target={},
+                reason="Clearing the blocking chain.",
+            ),
+            Conclude(summary="Blocking chain found; a DBA should decide."),
+        ]
+    )
+    orchestrator = _orchestrator(tool_client, llm)
+
+    summary = await orchestrator.run_triggered_investigation(
+        server_id="postgres-local",
+        environment="development",
+        channel="dev",
+        channel_account_id="dba_l2@example.com",
+        problem="A monitoring alert fired for the postgres-local server — investigate.",
+    )
+
+    submitted = [r.tool_id for r in tool_client.requests]
+    assert "database.kill_session" not in submitted
+    assert set(submitted) <= {t.tool_id for t in _REAL_TOOLS if t.operation_type == OperationType.READ}
+    assert summary.dropped_proposals == ("database.kill_session",)

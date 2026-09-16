@@ -88,6 +88,44 @@ never something that happened.
 read once at startup, like policy and playbooks. Nothing is persisted: there
 is no job store, so there is no stale schedule to clean up.
 
+## Enabling alert-triggered investigation
+
+The event-driven sibling of the digest above: point your monitoring system
+(Prometheus Alertmanager, Datadog, a cloud provider's own alarms, ...) at
+`POST https://<channels-host>/webhooks/alerts`, and Inumi investigates the
+specific breach it reports instead of waiting for the next scheduled sweep.
+**Off by default**, with two independent switches — one per service:
+
+| Variable | Service | Default | What it does |
+|---|---|---|---|
+| `ALERT_WEBHOOK_SECRET` | channels | `""` (off) | Signs/verifies inbound alert requests. Empty = the webhook route refuses every request outright. |
+| `ALERT_WEBHOOK_SLACK_CHANNEL` | agent | `""` (off) | Destination channel id. Empty = the Agent-side handler is a no-op even if a request somehow reaches it. |
+| `ALERT_WEBHOOK_IDENTITY_ACCOUNT` | agent | `""` | The DBA account every call in a triggered run is authorized and audited as. **Required in practice** — same reasoning as `DAILY_REPORT_IDENTITY_ACCOUNT` below, and deliberately a *separate* account so the two features can be enabled, disabled, and audited independently. |
+| `ALERT_WEBHOOK_IDENTITY_CHANNEL` | agent | `dev` | Which channel namespace that account id belongs to. |
+
+**Sending an alert.** POST JSON with at minimum `{"server": "<id-or-alias>"}`
+(matched against `config/servers.yaml` by exact id/alias, case- and
+punctuation-insensitive — an unmatched or ambiguous name is reported back as
+`"unknown server"`, never guessed). Add whatever of `metric`,
+`current_value`, `threshold`, `severity`, `source`, `message` your
+monitoring system has — they become the investigation's opening problem
+statement, so a specific symptom drives what actually gets checked, unlike
+the digest's fixed checklist. An optional `alert_id` deduplicates a retried
+delivery. Sign the request: `X-Inumi-Alert-Timestamp` (Unix seconds) and
+`X-Inumi-Alert-Signature: sha256=<hmac>` computed over
+`f"{timestamp}.{raw_body}"` with `ALERT_WEBHOOK_SECRET` — see
+`channels/alerts/signature.py`.
+
+**Same read-only guarantee as the digest, same mechanism.** A triggered
+investigation is marked read-only exactly like a scheduled one — same three
+enforcement layers, same inability to create an approval request. See
+[ARCHITECTURE.md](ARCHITECTURE.md#alert-triggered-investigation-the-digests-event-driven-sibling).
+
+**Turning it off.** Unset either `ALERT_WEBHOOK_SECRET` (Channels refuses
+every request) or `ALERT_WEBHOOK_SLACK_CHANNEL` (the Agent no-ops even on a
+request that got through) and restart that service. No job store, no
+scheduler, nothing to clean up.
+
 ## Monitoring what matters
 
 Per spec §42, track (via the OpenTelemetry wiring in

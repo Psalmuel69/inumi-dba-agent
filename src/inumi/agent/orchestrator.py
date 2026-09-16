@@ -261,21 +261,22 @@ def _is_confirmed_read_tool(
 
 @dataclasses.dataclass(frozen=True)
 class ScheduledSummary:
-    """One server's outcome from an unattended `comprehensive_summary` run
-    — what `run_comprehensive_summary` hands back to
-    `agent.scheduled_report`'s digest builder.
+    """One server's outcome from an unattended investigation — what both
+    `run_comprehensive_summary` (the daily digest's fixed-playbook sweep)
+    and `run_triggered_investigation` (an alert-triggered freeform
+    investigation) hand back, via the shared `_unattended_summary`.
 
-    Richer than the `AgentReply` an interactive turn returns, because the
-    digest has to make two decisions no channel adapter ever has to: whether
-    this server is worth its own block in the digest at all (`is_clean` —
-    see `agent.scheduled_report.build_digest`, which applies
+    Richer than the `AgentReply` an interactive turn returns, because a
+    caller here has to make two decisions no channel adapter ever has to:
+    whether this server is worth its own block in the digest at all
+    (`is_clean` — see `agent.scheduled_report.build_digest`, which applies
     `comprehensive_summary`'s own "report ONLY deviations" discipline a
     second time, at the multi-server level), and whether the run actually
     produced an answer or merely produced *something* (`ok`). Both are
     derived structurally — from the typed `Conclude` action's own
     root-cause/recommendation fields, via `investigation.findings`/
     `recommendations` — never by pattern-matching the model's prose, which
-    the digest has no honest way to parse."""
+    neither caller has an honest way to parse."""
 
     server_id: str
     environment: str
@@ -1841,17 +1842,28 @@ class AgentOrchestrator:
         reply = await self._continue_investigation(
             state, investigation, channel, channel_account_id
         )
+        return self._unattended_summary(server_id, environment, investigation, reply)
 
-        # "Did anything actually answer?" is deliberately structural, not a
-        # reading of the reply text: `investigation.actions` is appended to
-        # only in `_submit_and_relay`'s EXECUTED branch, so an empty list
-        # means not one diagnostic call succeeded — an unreachable server, a
-        # never-completed discovery, every step denied. The model will still
-        # happily write a fluent paragraph about having found nothing
-        # concerning in that situation, and the digest must not print that
-        # as a clean bill of health. See `build_digest`: this is what makes
-        # "6 attempted, 2 failed to even respond" reportable instead of
-        # invisible.
+    def _unattended_summary(
+        self, server_id: str, environment: str, investigation, reply: AgentReply
+    ) -> ScheduledSummary:
+        """Shared by `run_comprehensive_summary` (the daily digest) and
+        `run_triggered_investigation` (an alert-triggered investigation) —
+        both hand this a just-concluded, nobody-watching investigation and
+        get back the same structurally-derived `ScheduledSummary` a digest
+        or an alert notification renders.
+
+        "Did anything actually answer?" is deliberately structural, not a
+        reading of the reply text: `investigation.actions` is appended to
+        only in `_submit_and_relay`'s EXECUTED branch, so an empty list
+        means not one diagnostic call succeeded — an unreachable server, a
+        never-completed discovery, every step denied. The model will still
+        happily write a fluent paragraph about having found nothing
+        concerning in that situation, and neither caller must print that as
+        a clean bill of health. See `scheduled_report.build_digest`: this is
+        what makes "6 attempted, 2 failed to even respond" reportable
+        instead of invisible.
+        """
         error = ""
         if not investigation.actions:
             error = (
@@ -1863,7 +1875,7 @@ class AgentOrchestrator:
 
         if error:
             logger.warning(
-                "scheduled_summary_incomplete",
+                "unattended_investigation_incomplete",
                 server_id=server_id,
                 investigation_id=investigation.investigation_id,
                 status=reply.status,
@@ -1885,6 +1897,54 @@ class AgentOrchestrator:
             ),
             error=error,
         )
+
+    async def run_triggered_investigation(
+        self, *, server_id: str, environment: str, channel: str, channel_account_id: str, problem: str
+    ) -> ScheduledSummary:
+        """Run one freeform, read-only investigation against one server,
+        seeded with a problem statement this call already knows — the
+        building block an event-driven trigger (a monitoring webhook firing
+        because a threshold was breached — see `agent.alert_trigger`) calls
+        once per alert. The fourth public entry point on this class,
+        alongside `handle_message`, `handle_approval_decision`, and
+        `run_comprehensive_summary`.
+
+        Deliberately freeform (`playbook_id` left `None`), unlike
+        `run_comprehensive_summary`'s fixed `comprehensive_summary`
+        playbook: a digest sweep asks "how is this server doing" and always
+        runs the same checklist, but an alert already names a specific
+        symptom (e.g. "replication_lag_seconds is 340, threshold 120") that
+        should drive what gets checked next — the same LLM-planned,
+        turn-by-turn investigation a DBA typing that symptom into chat would
+        get, via the same `_continue_investigation` loop, not a second
+        planner. Every other property `run_comprehensive_summary` documents
+        still holds identically here and for the same reasons: the state is
+        ephemeral and never registered with the `ContextManager`, the
+        environment is supplied (the server registry's own fact) rather
+        than guessed, and — the constraint this whole feature is built
+        around — `read_only=True`, enforced at the same three points, so an
+        alert can only ever produce a report and a recommendation, never an
+        executed action.
+        """
+        state = ConversationState(
+            conversation_id=f"triggered-investigation:{server_id}:{new_id('run')}",
+            channel=channel,
+            channel_thread_id="",
+            channel_account_id=channel_account_id,
+        )
+        state.database_context["instance"] = server_id
+        state.database_context["environment"] = environment
+        investigation = InvestigationState(
+            investigation_id=new_id("inv"),
+            problem=problem,
+            read_only=True,
+        )
+        state.investigation = investigation
+
+        reply = await self._continue_investigation(
+            state, investigation, channel, channel_account_id
+        )
+        return self._unattended_summary(server_id, environment, investigation, reply)
 
     async def _handle_command_if_any(
         self, state: ConversationState, message: str, channel: str, channel_account_id: str

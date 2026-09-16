@@ -451,6 +451,73 @@ lifecycle is driven by inbound traffic (unlike `channels`). Starting it in
 the lifespan rather than at import time also means importing the module, or
 building the app to inspect its routes, never spins up a background job.
 
+## Alert-triggered investigation: the digest's event-driven sibling
+
+The digest above is triggered by a clock; `agent/alert_trigger.py` is the
+same shape triggered by an event instead — an external monitoring system
+(Prometheus Alertmanager, Datadog, a cloud provider's own alarms, ...)
+reports a threshold breach, and Inumi investigates it unattended, the same
+way it would sweep a server at 6am.
+
+**Every constraint the digest section above documents applies here
+identically, for the same reason and via the same mechanism.** This is
+deliberate, not incidental: `run_triggered_investigation` and
+`run_comprehensive_summary` are two thin, distinctly-shaped callers
+(`orchestrator.py`) into the *same* `_continue_investigation` loop, sharing
+the same `read_only=True` flag and all three of its enforcement layers, the
+same never-registered-with-`ContextManager` ephemeral state, the same
+environment-supplied-not-guessed rule, and the same
+`_unattended_summary`/`ScheduledSummary` result shape —
+`tests/unit/test_scheduled_digest_never_writes.py`'s
+`test_the_triggered_entry_point_blocks_a_write_end_to_end` asserts the
+identical guarantee through this entry point specifically, not just through
+the loop internals the two share. The one deliberate difference: where
+`run_comprehensive_summary` always runs the fixed `comprehensive_summary`
+playbook, `run_triggered_investigation` is freeform (`playbook_id=None`) —
+an alert already names a specific symptom (a metric, a threshold, a current
+value), so what should get checked next is exactly the kind of judgment the
+LLM planner makes for a live DBA typing that same symptom into chat, not a
+fixed checklist. That problem statement (`alert_trigger.build_problem_statement`)
+is layer zero of the same read-only guarantee `_SCHEDULED_SUMMARY_PROBLEM`
+is for the digest: it states outright that nothing proposed is ever
+executed and that nobody is present to answer a clarifying question.
+
+**The inbound path is new; nothing about the outbound or authorization path
+is.** An external system is not one of our own services, so it needs its own
+trust boundary rather than `common.service_auth`'s internal-only token
+scheme: `POST /webhooks/alerts` (Channels) verifies an HMAC signature
+(`channels/alerts/signature.py`, the same shape as
+`channels/slack/signature.py` — a timestamp-bound signature with a
+replay-defeating freshness check) before the body is even parsed, and
+`ALERT_WEBHOOK_SECRET` unset is a hard failure at the signature-check level,
+never a silent "unauthenticated is fine for now." From there the shape
+collapses back onto everything already established: Channels forwards to
+the Agent's `POST /v1/alerts/trigger` with the same signed, audience-scoped
+internal service token `/v1/chat` uses; the Agent resolves the alert's
+`server` field against the registry by exact id/alias match (never a
+guessed substring — an ambiguous or absent match is reported as "unknown
+server," because unlike a live DBA conversation, nobody is present to
+notice or correct a wrong match); every diagnostic call is authorized as a
+real configured DBA account (`ALERT_WEBHOOK_IDENTITY_ACCOUNT`, deliberately
+separate from the digest's own account so the two features can be enabled,
+disabled and audited independently) that the Gateway independently
+re-resolves per call, exactly like every other path into this system; and
+delivery goes back through Channels' `POST /v1/notify`
+(`scheduled_report.ChannelsDigestPublisher`, reused as-is — it already does
+precisely "ask Channels to deliver this text to this channel_id"), never
+straight from the Agent.
+
+**Opt-in, with exactly one switch, on each side of the boundary
+independently.** An unset `ALERT_WEBHOOK_SLACK_CHANNEL` makes
+`AlertTriggerRunner.handle_alert` a no-op on the Agent side, mirroring the
+digest's own one-switch design; an unset `ALERT_WEBHOOK_SECRET` makes every
+request to `/webhooks/alerts` fail signature verification on the Channels
+side. Retries are deduplicated the same way Slack's own event retries are
+(`channels/api/app.py`'s TTL'd `_seen_slack_event_ids` cache), on an
+optional `alert_id` field in the alert payload — kept as an independent
+cache rather than sharing Slack's, since the two features' lifecycles
+(enabled/disabled, key spaces) have no reason to be coupled.
+
 ## Latency ceiling on a single LLM decision
 
 Each layer of `StructuredLLMProvider`'s resilience (per-call timeout →

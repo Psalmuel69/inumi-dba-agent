@@ -25,6 +25,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel
 
 from inumi.agent.reply import AgentReply
+from inumi.channels.alerts.signature import AlertSignatureError, verify_alert_signature
 from inumi.channels.slack.blocks import render_reply_blocks, resolve_approval_blocks
 from inumi.channels.slack.sender import SlackMessageSender
 from inumi.channels.slack.signature import SlackSignatureError, verify_slack_signature
@@ -142,6 +143,31 @@ def create_app(settings: Settings | None = None, *, agent_transport=None) -> Fas
     _seen_slack_event_ids: dict[str, float] = {}
     _SEEN_EVENT_TTL_SECONDS = 300.0  # comfortably longer than Slack's own retry window
 
+    # Same retry-deduplication shape as the Slack event_id cache just above,
+    # for the same reason: a monitoring system that doesn't get a fast ack
+    # commonly retries, and the field it uses for that ("alert_id" here —
+    # every vendor names it differently, e.g. Alertmanager's `fingerprint`)
+    # is optional, so a sender that omits it simply gets no dedup rather
+    # than a rejected request. Kept as its own cache rather than reusing
+    # Slack's: the two features are independent (see
+    # `Settings.alert_webhook_secret`'s comment), and sharing one dict would
+    # couple their eviction and, worse, their key spaces if a Slack
+    # event_id and an alert_id ever collided.
+    _seen_alert_ids: dict[str, float] = {}
+
+    def _alert_already_seen(alert_id: str | None) -> bool:
+        if not alert_id:
+            return False
+        now = time.monotonic()
+        for expired_id in [
+            aid for aid, seen_at in _seen_alert_ids.items() if now - seen_at > _SEEN_EVENT_TTL_SECONDS
+        ]:
+            del _seen_alert_ids[expired_id]
+        if alert_id in _seen_alert_ids:
+            return True
+        _seen_alert_ids[alert_id] = now
+        return False
+
     def _slack_event_already_seen(event_id: str | None) -> bool:
         if not event_id:
             return False
@@ -213,6 +239,38 @@ def create_app(settings: Settings | None = None, *, agent_transport=None) -> Fas
                     "conversation_id": conversation_id,
                     "approval_id": approval_id,
                     "decision": decision,
+                },
+            )
+            response.raise_for_status()
+            return response.json()
+
+    async def _call_agent_alert_trigger(
+        *,
+        server: str,
+        metric: str,
+        current_value: str,
+        threshold: str,
+        severity: str,
+        source: str,
+        message: str,
+    ) -> dict:
+        token = issuer.issue(service_name="channels", audience="inumi-agent")
+        async with httpx.AsyncClient(
+            base_url=settings.agent_base_url,
+            transport=agent_transport,
+            timeout=300,  # see _call_agent_chat — same real-LLM latency reasoning
+        ) as client:
+            response = await client.post(
+                "/v1/alerts/trigger",
+                headers={"X-Service-Token": token},
+                json={
+                    "server": server,
+                    "metric": metric,
+                    "current_value": current_value,
+                    "threshold": threshold,
+                    "severity": severity,
+                    "source": source,
+                    "message": message,
                 },
             )
             response.raise_for_status()
@@ -450,6 +508,70 @@ def create_app(settings: Settings | None = None, *, agent_transport=None) -> Fas
             card,
         )
         return {"type": "message", "text": agent_reply.text}
+
+    # ------------------------------------------------------------------ Alerts
+
+    @app.post("/webhooks/alerts")
+    async def alerts_webhook(
+        request: Request,
+        x_inumi_alert_timestamp: str | None = Header(default=None),
+        x_inumi_alert_signature: str | None = Header(default=None),
+    ) -> dict:
+        """An external monitoring system reporting a threshold breach — see
+        `agent.alert_trigger` for what happens after this hands off to the
+        Agent. Signature-verified the same way `/webhooks/slack` is
+        (`verify_slack_signature` there, `verify_alert_signature` here):
+        rejected outright, before the body is even parsed as JSON, if it
+        doesn't verify.
+
+        `alert_webhook_secret` unset is a hard failure here, not a silent
+        allow — `verify_alert_signature` itself refuses an empty secret
+        rather than this route deciding whether to call it, so there is
+        exactly one place either signature route can end up trusting an
+        unconfigured webhook: nowhere."""
+        raw_body = await request.body()
+        try:
+            verify_alert_signature(
+                secret=settings.alert_webhook_secret,
+                request_body=raw_body,
+                timestamp_header=x_inumi_alert_timestamp,
+                signature_header=x_inumi_alert_signature,
+            )
+        except AlertSignatureError as exc:
+            logger.warning("alert_signature_rejected", detail=str(exc))
+            raise HTTPException(status_code=401, detail="Invalid alert signature.") from exc
+
+        try:
+            payload = json.loads(raw_body or b"{}")
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail="Malformed alert payload.") from exc
+
+        if _alert_already_seen(payload.get("alert_id")):
+            logger.info("alert_retry_deduplicated", alert_id=payload.get("alert_id"))
+            return {"ok": True}
+
+        server = payload.get("server", "")
+        if not server:
+            raise HTTPException(status_code=400, detail="'server' is required.")
+
+        result = await _call_agent_alert_trigger(
+            server=server,
+            metric=payload.get("metric", ""),
+            current_value=str(payload.get("current_value", "")),
+            threshold=str(payload.get("threshold", "")),
+            severity=payload.get("severity", ""),
+            source=payload.get("source", ""),
+            message=payload.get("message", ""),
+        )
+        if not result.get("ok"):
+            logger.warning("alert_trigger_failed", server=server, error=result.get("error"))
+            # Still a 200: the request itself was valid and accepted — what
+            # failed (an unresolvable server, the feature being
+            # unconfigured) is reported in the body for observability, not
+            # as a delivery failure the sender's own retry/backoff logic
+            # should react to (retrying "unknown server" changes nothing).
+            return {"ok": False, "error": result.get("error", "")}
+        return {"ok": True}
 
     # ------------------------------------------------------------------ Dev/mock channel (spec §66)
 

@@ -14,7 +14,12 @@ from inumi.common.service_auth import ServiceTokenIssuer, ServiceTokenVerifier
 from inumi.gateway.domain.catalog import CatalogStore
 from inumi.gateway.domain.data_policy import DataMinimizer
 from inumi.gateway.domain.policy_engine import PolicyEngine
-from inumi.gateway.domain.rate_limiter import InMemoryRateLimitBackend, RateLimiter
+from inumi.gateway.domain.rate_limiter import (
+    InMemoryRateLimitBackend,
+    RateLimitBackend,
+    RateLimiter,
+    RedisRateLimitBackend,
+)
 from inumi.gateway.domain.risk_engine import RiskEngine
 from inumi.gateway.domain.servers import ServerRegistry
 from inumi.gateway.domain.target_validation import TargetValidator
@@ -22,6 +27,14 @@ from inumi.gateway.domain.tool_registry import ToolRegistry
 from inumi.gateway.infrastructure.catalog_store import DbCatalogStore
 from inumi.gateway.infrastructure.db.session import Database
 from inumi.gateway.infrastructure.execution_client import ExecutionClient, HttpExecutionClient
+
+
+def _build_rate_limit_backend(settings: Settings) -> RateLimitBackend:
+    if settings.rate_limit_backend == "redis":
+        import redis.asyncio as redis
+
+        return RedisRateLimitBackend(redis.from_url(settings.redis_url))
+    return InMemoryRateLimitBackend()
 
 
 @dataclass
@@ -61,7 +74,7 @@ class GatewayState:
             target_validator=TargetValidator(server_registry, catalog_store),
             policy_engine=PolicyEngine(settings.policy_config_path),
             risk_engine=RiskEngine(),
-            rate_limiter=RateLimiter(settings.rate_limit_config_path, InMemoryRateLimitBackend()),
+            rate_limiter=RateLimiter(settings.rate_limit_config_path, _build_rate_limit_backend(settings)),
             data_minimizer=DataMinimizer(),
             execution_client=HttpExecutionClient(
                 settings.execution_base_url,

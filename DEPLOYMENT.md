@@ -43,6 +43,12 @@ posture, replace `common/service_auth.py`'s implementation with mTLS
 every call site already goes through this one module, so the blast radius
 of that change is contained.
 
+`docker-compose.yml` passes it through as `${SERVICE_JWT_SECRET:-dev-only-change-me-in-production}`
+— set a real, unique value in your production environment/secret store
+before deploying; `validate_for_production()` refuses to boot with
+`INUMI_ENV=production` while the placeholder default is still active, so a
+forgotten override fails at startup rather than running insecurely.
+
 ## Identity provider
 
 Set `IDENTITY_PROVIDER=oidc` and provide `OIDC_ISSUER`, `OIDC_CLIENT_ID`,
