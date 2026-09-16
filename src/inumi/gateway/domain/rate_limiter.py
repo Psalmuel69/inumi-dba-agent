@@ -2,56 +2,34 @@
 
 Enforced by the Gateway before policy evaluation, at multiple keys
 (user/conversation/tool/database/environment), with separate, much stricter
-budgets for write and critical operations. Two backends satisfy the same
-interface: an in-memory fixed-window counter for tests/local dev, and Redis
-for multi-instance production deployments.
+budgets for write and critical operations. `RateLimiter` below is the
+Gateway-specific multi-key checker; the two backends it runs on
+(`InMemoryRateLimitBackend` for tests/local dev, `RedisRateLimitBackend` for
+multi-instance production deployments) are generic enough that
+`agent.alert_trigger`'s investigation cooldown reuses them too, so they live
+in `common.rate_limit_backend` — re-exported here unchanged so every
+existing import of this module keeps working.
 """
 
 from __future__ import annotations
 
-import time
-from abc import ABC, abstractmethod
 from pathlib import Path
 
 import yaml
 
 from inumi.common.models.failures import FailureCode, InumiError
+from inumi.common.rate_limit_backend import (
+    InMemoryRateLimitBackend,
+    RateLimitBackend,
+    RedisRateLimitBackend,
+)
 
-
-class RateLimitBackend(ABC):
-    @abstractmethod
-    async def increment_and_check(self, key: str, limit: int, window_seconds: int = 60) -> bool:
-        """Returns True if the call is within budget (and records it),
-        False if the limit has been exceeded."""
-
-
-class InMemoryRateLimitBackend(RateLimitBackend):
-    def __init__(self) -> None:
-        self._buckets: dict[str, tuple[int, float]] = {}  # key -> (count, window_start)
-
-    async def increment_and_check(self, key: str, limit: int, window_seconds: int = 60) -> bool:
-        now = time.time()
-        count, window_start = self._buckets.get(key, (0, now))
-        if now - window_start >= window_seconds:
-            count, window_start = 0, now
-        count += 1
-        self._buckets[key] = (count, window_start)
-        return count <= limit
-
-
-class RedisRateLimitBackend(RateLimitBackend):
-    """Production backend. Uses a simple INCR + EXPIRE fixed window, which is
-    sufficient given the coarse per-minute budgets configured here."""
-
-    def __init__(self, redis_client) -> None:
-        self._redis = redis_client
-
-    async def increment_and_check(self, key: str, limit: int, window_seconds: int = 60) -> bool:
-        pipe = self._redis.pipeline()
-        pipe.incr(key)
-        pipe.expire(key, window_seconds)
-        count, _ = await pipe.execute()
-        return int(count) <= limit
+__all__ = [
+    "InMemoryRateLimitBackend",
+    "RateLimitBackend",
+    "RateLimiter",
+    "RedisRateLimitBackend",
+]
 
 
 class RateLimiter:

@@ -51,7 +51,7 @@ async def test_in_memory_backend_keys_are_independent():
 async def test_in_memory_backend_resets_after_the_window_elapses(monkeypatch):
     backend = InMemoryRateLimitBackend()
     now = [1000.0]
-    monkeypatch.setattr("inumi.gateway.domain.rate_limiter.time.time", lambda: now[0])
+    monkeypatch.setattr("inumi.common.rate_limit_backend.time.time", lambda: now[0])
 
     for _ in range(5):
         await backend.increment_and_check("k", limit=5, window_seconds=60)

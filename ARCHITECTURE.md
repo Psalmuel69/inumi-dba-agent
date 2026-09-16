@@ -518,6 +518,19 @@ optional `alert_id` field in the alert payload — kept as an independent
 cache rather than sharing Slack's, since the two features' lifecycles
 (enabled/disabled, key spaces) have no reason to be coupled.
 
+**A cooldown, distinct from `alert_id` dedup.** Dedup catches a retried
+delivery of the *same* firing; it does nothing for a metric that genuinely
+re-breaches its threshold every few minutes, which would otherwise run a
+full investigation — and post a fresh message — on every occurrence.
+`AlertTriggerRunner` enforces a per-`(server, metric)` cooldown
+(`ALERT_WEBHOOK_COOLDOWN_SECONDS`, default 900s, 0 disables it) on top of
+the dedup, using the exact same `RateLimitBackend` abstraction the
+Gateway's own rate limiter runs on (`limit=1` over the cooldown window is
+what a cooldown *is* — moved to `common.rate_limit_backend` specifically so
+both features share it) — Redis-backed and correctly shared across
+replicas the instant `RATE_LIMIT_BACKEND=redis` is set, unlike a
+per-process cache that would silently reset on every load-balanced request.
+
 ## Latency ceiling on a single LLM decision
 
 Each layer of `StructuredLLMProvider`'s resilience (per-call timeout →

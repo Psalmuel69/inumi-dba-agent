@@ -27,6 +27,19 @@ as-is: it already does exactly one thing, "ask Channels to deliver this
 text to this channel_id," which is precisely what a finished alert
 investigation needs too. No second delivery path, no new channel credential
 anywhere near the Agent.
+
+**A cooldown, not just alert_id dedup.** `channels.api.app`'s `alert_id`
+dedup catches a literal retried delivery of the *same* firing; it does
+nothing for a flapping metric that genuinely re-breaches its threshold
+every few minutes, which would otherwise run a full LLM-driven
+investigation — and post a fresh message — on every single occurrence.
+`AlertTriggerRunner` also enforces a per-`(server, metric)` cooldown
+(`Settings.alert_webhook_cooldown_seconds`) using the same
+`RateLimitBackend` the Gateway's rate limiter runs on (`limit=1` over the
+cooldown window is exactly what a cooldown is), so it is Redis-backed and
+correctly shared across replicas the moment `RATE_LIMIT_BACKEND=redis` is
+set — an in-memory-only cooldown would silently reset per replica, letting
+a load-balanced deployment re-investigate on every request regardless.
 """
 
 from __future__ import annotations
@@ -38,9 +51,25 @@ from inumi.agent.orchestrator import AgentOrchestrator, ScheduledSummary
 from inumi.agent.scheduled_report import DigestPublisher
 from inumi.common.config import Settings
 from inumi.common.observability import get_logger
+from inumi.common.rate_limit_backend import (
+    InMemoryRateLimitBackend,
+    RateLimitBackend,
+    RedisRateLimitBackend,
+)
 from inumi.common.server_reference import normalize_server_reference
 
 logger = get_logger(__name__)
+
+
+def _build_cooldown_backend(settings: Settings) -> RateLimitBackend:
+    """Mirrors `gateway.api.state._build_rate_limit_backend` exactly — same
+    setting, same reasoning: reuse `RATE_LIMIT_BACKEND` rather than a second
+    toggle an operator would have to remember exists and keep in sync."""
+    if settings.rate_limit_backend == "redis":
+        import redis.asyncio as redis
+
+        return RedisRateLimitBackend(redis.from_url(settings.redis_url))
+    return InMemoryRateLimitBackend()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -67,6 +96,10 @@ class AlertTriggerOutcome:
     ok: bool
     text: str = ""
     error: str = ""
+    # True only when a per-(server, metric) cooldown suppressed a real
+    # investigation — distinct from `error`, which means something went
+    # wrong. A cooldown hit is the feature working as intended.
+    suppressed: bool = False
 
 
 def resolve_server(server_ref: str, servers: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -163,10 +196,18 @@ class AlertTriggerRunner:
     tests exercise the actual investigation/read-only logic instead of
     re-mocking the transport layer for every case."""
 
-    def __init__(self, *, orchestrator: AgentOrchestrator, settings: Settings, publisher: DigestPublisher):
+    def __init__(
+        self,
+        *,
+        orchestrator: AgentOrchestrator,
+        settings: Settings,
+        publisher: DigestPublisher,
+        cooldown_backend: RateLimitBackend | None = None,
+    ):
         self._orchestrator = orchestrator
         self._settings = settings
         self._publisher = publisher
+        self._cooldown_backend = cooldown_backend or _build_cooldown_backend(settings)
 
     async def handle_alert(self, alert: AlertPayload) -> AlertTriggerOutcome:
         channel_id = self._settings.alert_webhook_slack_channel
@@ -202,6 +243,22 @@ class AlertTriggerRunner:
 
         server_id = str(server["id"])
         environment = str(server.get("environment", ""))
+
+        cooldown_seconds = self._settings.alert_webhook_cooldown_seconds
+        if cooldown_seconds > 0:
+            cooldown_key = f"alert-cooldown:{server_id}:{alert.metric or '_'}"
+            within_budget = await self._cooldown_backend.increment_and_check(
+                cooldown_key, limit=1, window_seconds=cooldown_seconds
+            )
+            if not within_budget:
+                logger.info(
+                    "alert_trigger_cooldown_active",
+                    server_id=server_id,
+                    metric=alert.metric,
+                    cooldown_seconds=cooldown_seconds,
+                )
+                return AlertTriggerOutcome(ok=True, suppressed=True)
+
         problem = build_problem_statement(alert).format(server_id=server_id)
 
         logger.info("alert_trigger_starting", server_id=server_id, metric=alert.metric)

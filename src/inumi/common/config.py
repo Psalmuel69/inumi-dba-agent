@@ -167,6 +167,13 @@ class Settings(BaseSettings):
     # two features can be enabled, disabled, and audited independently.
     alert_webhook_identity_channel: str = "dev"
     alert_webhook_identity_account: str = ""
+    # Per-(server, metric) cooldown: a flapping metric that re-breaches its
+    # threshold every few minutes would otherwise trigger a full LLM-driven
+    # investigation — and a fresh channel post — on every single firing.
+    # 0 disables the cooldown entirely (every alert always investigates).
+    # Shared across replicas via the same RATE_LIMIT_BACKEND setting the
+    # Gateway's rate limiter uses (see agent.alert_trigger).
+    alert_webhook_cooldown_seconds: int = Field(default=900, ge=0)
 
     enable_readonly_sql_tool: bool = False
     enable_execute_sql_tool: bool = False

@@ -102,6 +102,7 @@ specific breach it reports instead of waiting for the next scheduled sweep.
 | `ALERT_WEBHOOK_SLACK_CHANNEL` | agent | `""` (off) | Destination channel id. Empty = the Agent-side handler is a no-op even if a request somehow reaches it. |
 | `ALERT_WEBHOOK_IDENTITY_ACCOUNT` | agent | `""` | The DBA account every call in a triggered run is authorized and audited as. **Required in practice** — same reasoning as `DAILY_REPORT_IDENTITY_ACCOUNT` below, and deliberately a *separate* account so the two features can be enabled, disabled, and audited independently. |
 | `ALERT_WEBHOOK_IDENTITY_CHANNEL` | agent | `dev` | Which channel namespace that account id belongs to. |
+| `ALERT_WEBHOOK_COOLDOWN_SECONDS` | agent | `900` | Suppresses a re-investigation of the same `(server, metric)` pair within this many seconds, so a flapping alert doesn't re-run the investigation (and re-post to the channel) on every firing. `0` disables the cooldown. |
 
 **Sending an alert.** POST JSON with at minimum `{"server": "<id-or-alias>"}`
 (matched against `config/servers.yaml` by exact id/alias, case- and

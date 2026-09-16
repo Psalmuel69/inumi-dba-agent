@@ -19,6 +19,7 @@ from inumi.agent.alert_trigger import (
 )
 from inumi.agent.orchestrator import ScheduledSummary
 from inumi.common.config import Settings
+from inumi.common.rate_limit_backend import InMemoryRateLimitBackend, RedisRateLimitBackend
 
 # --------------------------------------------------------------- resolve_server ---
 
@@ -278,3 +279,158 @@ async def test_an_incomplete_investigation_is_reported_not_printed_as_clean():
     _, text = publisher.published[0]
     assert "Could not complete the investigation" in text
     assert "no diagnostic call succeeded" in text
+
+
+# --------------------------------------------------------- cooldown ---
+
+
+@pytest.mark.asyncio
+async def test_a_second_alert_for_the_same_server_and_metric_is_suppressed():
+    """The headline property: a flapping metric must not re-run a full
+    investigation (and re-post to the channel) on every single firing."""
+    servers = [{"id": "postgres-dev-02", "environment": "development"}]
+    orchestrator = _FakeOrchestrator(servers=servers, summary=_ok_summary())
+    publisher = _RecordingPublisher()
+    runner = AlertTriggerRunner(
+        orchestrator=orchestrator,
+        settings=_settings(alert_webhook_slack_channel="C_ALERTS", alert_webhook_cooldown_seconds=900),
+        publisher=publisher,
+        cooldown_backend=InMemoryRateLimitBackend(),
+    )
+    alert = AlertPayload(server="postgres-dev-02", metric="replication_lag_seconds")
+
+    first = await runner.handle_alert(alert)
+    second = await runner.handle_alert(alert)
+
+    assert first.ok and not first.suppressed
+    assert second.ok and second.suppressed
+    assert len(orchestrator.calls) == 1  # only the first alert actually investigated
+    assert len(publisher.published) == 1  # only the first alert actually posted
+
+
+@pytest.mark.asyncio
+async def test_cooldown_is_scoped_per_metric_not_just_per_server():
+    servers = [{"id": "postgres-dev-02", "environment": "development"}]
+    orchestrator = _FakeOrchestrator(servers=servers, summary=_ok_summary())
+    runner = AlertTriggerRunner(
+        orchestrator=orchestrator,
+        settings=_settings(alert_webhook_slack_channel="C_ALERTS", alert_webhook_cooldown_seconds=900),
+        publisher=_RecordingPublisher(),
+        cooldown_backend=InMemoryRateLimitBackend(),
+    )
+
+    await runner.handle_alert(AlertPayload(server="postgres-dev-02", metric="replication_lag_seconds"))
+    second = await runner.handle_alert(AlertPayload(server="postgres-dev-02", metric="connections_used_pct"))
+
+    assert not second.suppressed
+    assert len(orchestrator.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_cooldown_is_scoped_per_server_not_just_per_metric():
+    servers = [
+        {"id": "postgres-dev-02", "environment": "development"},
+        {"id": "sqlserver-dev-02", "environment": "development"},
+    ]
+    orchestrator = _FakeOrchestrator(servers=servers, summary=_ok_summary())
+    runner = AlertTriggerRunner(
+        orchestrator=orchestrator,
+        settings=_settings(alert_webhook_slack_channel="C_ALERTS", alert_webhook_cooldown_seconds=900),
+        publisher=_RecordingPublisher(),
+        cooldown_backend=InMemoryRateLimitBackend(),
+    )
+
+    await runner.handle_alert(AlertPayload(server="postgres-dev-02", metric="cpu"))
+    second = await runner.handle_alert(AlertPayload(server="sqlserver-dev-02", metric="cpu"))
+
+    assert not second.suppressed
+    assert len(orchestrator.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_cooldown_zero_disables_suppression_entirely():
+    servers = [{"id": "postgres-dev-02", "environment": "development"}]
+    orchestrator = _FakeOrchestrator(servers=servers, summary=_ok_summary())
+    runner = AlertTriggerRunner(
+        orchestrator=orchestrator,
+        settings=_settings(alert_webhook_slack_channel="C_ALERTS", alert_webhook_cooldown_seconds=0),
+        publisher=_RecordingPublisher(),
+        cooldown_backend=InMemoryRateLimitBackend(),
+    )
+    alert = AlertPayload(server="postgres-dev-02", metric="cpu")
+
+    first = await runner.handle_alert(alert)
+    second = await runner.handle_alert(alert)
+
+    assert not first.suppressed and not second.suppressed
+    assert len(orchestrator.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_cooldown_expires_after_the_configured_window():
+    import inumi.common.rate_limit_backend as backend_module
+
+    servers = [{"id": "postgres-dev-02", "environment": "development"}]
+    orchestrator = _FakeOrchestrator(servers=servers, summary=_ok_summary())
+    runner = AlertTriggerRunner(
+        orchestrator=orchestrator,
+        settings=_settings(alert_webhook_slack_channel="C_ALERTS", alert_webhook_cooldown_seconds=60),
+        publisher=_RecordingPublisher(),
+        cooldown_backend=InMemoryRateLimitBackend(),
+    )
+    alert = AlertPayload(server="postgres-dev-02", metric="cpu")
+
+    now = [1_700_000_000.0]
+    original_time = backend_module.time.time
+    backend_module.time.time = lambda: now[0]
+    try:
+        first = await runner.handle_alert(alert)
+        immediate_retry = await runner.handle_alert(alert)
+        now[0] += 61  # past the 60s cooldown window
+        after_window = await runner.handle_alert(alert)
+    finally:
+        backend_module.time.time = original_time
+
+    assert not first.suppressed
+    assert immediate_retry.suppressed
+    assert not after_window.suppressed
+    assert len(orchestrator.calls) == 2  # first + after_window, not immediate_retry
+
+
+@pytest.mark.asyncio
+async def test_a_suppressed_alert_never_reaches_the_orchestrator_or_publisher():
+    """No wasted LLM call, no channel spam — the whole point."""
+    servers = [{"id": "postgres-dev-02", "environment": "development"}]
+    orchestrator = _FakeOrchestrator(servers=servers, summary=_ok_summary())
+    publisher = _RecordingPublisher()
+    runner = AlertTriggerRunner(
+        orchestrator=orchestrator,
+        settings=_settings(alert_webhook_slack_channel="C_ALERTS", alert_webhook_cooldown_seconds=900),
+        publisher=publisher,
+        cooldown_backend=InMemoryRateLimitBackend(),
+    )
+    alert = AlertPayload(server="postgres-dev-02", metric="cpu")
+
+    await runner.handle_alert(alert)
+    orchestrator.calls.clear()
+    publisher.published.clear()
+
+    await runner.handle_alert(alert)
+
+    assert orchestrator.calls == []
+    assert publisher.published == []
+
+
+def test_cooldown_defaults_to_in_memory_backend():
+    """Mirrors `test_gateway_defaults_to_in_memory_backend` in
+    test_rate_limiter.py — same setting, same reasoning."""
+    from inumi.agent.alert_trigger import _build_cooldown_backend
+
+    assert isinstance(_build_cooldown_backend(_settings()), InMemoryRateLimitBackend)
+
+
+def test_cooldown_uses_redis_backend_when_configured():
+    from inumi.agent.alert_trigger import _build_cooldown_backend
+
+    backend = _build_cooldown_backend(_settings(rate_limit_backend="redis"))
+    assert isinstance(backend, RedisRateLimitBackend)
