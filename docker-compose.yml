@@ -62,6 +62,12 @@ services:
       - "1433:1433"
     volumes:
       - ./scripts/seed_sqlserver_sample.sql:/seed/seed.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -C -Q 'SELECT 1' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
 
   # Opt-in. Start with:  docker compose --profile mysql up -d mysql-sample
   mysql-sample:

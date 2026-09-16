@@ -1,0 +1,14 @@
+# Pin line endings to LF for every text file this repo tracks, regardless
+# of which OS/editor touches it. Without this, editing a file from a
+# Windows-side tool (vs. WSL/Linux) silently rewrites its line endings on
+# save, turning an unrelated one-line change into a whole-file diff — this
+# has already happened once across ~80 files in this repo's history.
+* text=auto eol=lf
+
+# Binary — never touched by line-ending normalization.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary

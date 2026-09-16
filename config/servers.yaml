@@ -26,7 +26,12 @@ servers:
   - id: sqlserver-dev-01
     platform: sqlserver
     environment: development
-    host: localhost
+    # The compose-internal `mssql-sample` dummy container (docker compose
+    # --profile mssql up -d mssql-sample), seeded by
+    # scripts/seed_sqlserver_sample.sql — the real target
+    # tests/e2e/test_live_databases.py exercises. From the host (rather
+    # than another container) it's reachable at localhost:1433.
+    host: mssql-sample
     port: 1433
     aliases: [dev-sql, sampledev]
     organization: platform-eng
@@ -141,8 +146,13 @@ servers:
   - id: analytics-postgres-prod
     platform: postgresql
     environment: production
-    host: localhost
-    port: 5435
+    # The compose-internal `postgres-sample` dummy container (auto-seeded
+    # on first start by scripts/seed_postgres_sample.sql via Postgres'
+    # docker-entrypoint-initdb.d) — the real target
+    # tests/e2e/test_live_databases.py exercises. From the host (rather
+    # than another container) it's reachable at localhost:5435.
+    host: postgres-sample
+    port: 5432
     aliases: [analytics, analytics-cluster, postgres-prod-cluster-01]
     organization: analytics
     region: primary
