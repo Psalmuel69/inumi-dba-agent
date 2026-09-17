@@ -17,7 +17,7 @@ from inumi.agent.context_manager import ContextManager, ConversationState, Inves
 from inumi.agent.llm.mock import MockLLMProvider
 from inumi.agent.llm.registry import LLMRegistry
 from inumi.agent.orchestrator import AgentOrchestrator
-from inumi.agent.planner.actions import Conclude
+from inumi.agent.planner.actions import Conclude, CritiqueVerdict
 from inumi.agent.tool_client import ToolClient
 from inumi.common.config import Settings
 from inumi.common.service_auth import ServiceTokenIssuer
@@ -129,6 +129,9 @@ class _FakeLLM:
     verifies the real Gateway's target-validation/tool-catalog pipeline,
     not a real model's own heuristics."""
 
+    provider_name = "fake"
+    model = "fake-model"
+
     def __init__(self, actions: list):
         self._actions = list(actions)
         self.calls: list[dict] = []
@@ -136,6 +139,9 @@ class _FakeLLM:
     async def decide_next_action(self, **kwargs):
         self.calls.append(kwargs)
         return self._actions.pop(0)
+
+    async def critique_conclusion(self, **kwargs):
+        return CritiqueVerdict(sound=True)
 
 
 async def test_comprehensive_summary_runs_exactly_five_tool_calls_through_the_real_gateway():

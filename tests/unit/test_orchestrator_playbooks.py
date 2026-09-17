@@ -34,10 +34,16 @@ class _FakeToolClient:
             return self._responses.pop(0)
         return self._default
 
+    async def log_decision_event(self, request):
+        pass
+
 
 class _FakeLLM:
     """Only `decide_next_action` is exercised by `_run_investigation_loop`
     — the other LLMProvider methods are never reached by it."""
+
+    provider_name = "fake"
+    model = "fake-model"
 
     def __init__(self, actions: list):
         self._actions = list(actions)

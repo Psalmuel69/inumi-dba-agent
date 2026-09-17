@@ -202,6 +202,27 @@ class InvestigationEventRecord(Base):
     payload: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
+
+class LlmDecisionEventRecord(Base):
+    """Durable counterpart to a handful of structured log lines (see
+    gateway.domain.decision_events for exactly which ones and why not all
+    of them): a conclusion rejected by grounding/verification/self-critique,
+    or a cross-provider fallback substitution. Small, queryable, and meant
+    to be reviewed periodically (see the /v1/decision-events/summary
+    rollup) — never raw prompts or DBA content, matching the masking
+    conventions everywhere else in this schema."""
+
+    __tablename__ = "llm_decision_events"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("dqe"))
+    conversation_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    investigation_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    event_type: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    provider: Mapped[str] = mapped_column(String, default="")
+    model: Mapped[str] = mapped_column(String, default="")
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
 # ---------------------------------------------------------------------------
 # Tool requests / executions
 # ---------------------------------------------------------------------------

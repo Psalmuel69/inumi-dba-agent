@@ -38,6 +38,7 @@ from inumi.agent.tool_client import ToolClient
 from inumi.common.config import get_settings
 from inumi.common.ids import new_id
 from inumi.common.models.catalog import LeastPrivilegeFinding
+from inumi.common.models.decision_event import DecisionEventCreateRequest
 from inumi.common.models.investigation import (
     InvestigationCreateRequest,
     InvestigationUpdateRequest,
@@ -522,6 +523,19 @@ class AgentOrchestrator:
             message=message,
         )
         notice = fallback_notice_text(state.llm_fallback_notices)
+        for event in state.llm_fallback_notices:
+            # Pure telemetry, fired without blocking the reply — a fallback
+            # substitution is already disclosed to the DBA via `notice`
+            # below; this is the durable, reviewable copy of the same fact
+            # (see gateway.domain.decision_events).
+            await self._tool_client.log_decision_event(
+                DecisionEventCreateRequest(
+                    event_type="llm_cross_provider_fallback_used",
+                    conversation_id=conversation_id,
+                    provider=event.used_provider,
+                    payload={"failed_providers": event.failed_providers},
+                )
+            )
         state.llm_fallback_notices.clear()
         if notice:
             reply.text = f"{reply.text}\n\n{notice}" if reply.text else notice
@@ -1103,7 +1117,7 @@ class AgentOrchestrator:
 
             if isinstance(action, Conclude):
                 investigation.consecutive_record_observations = 0
-                reply = await self._finalize_conclude(investigation, action, llm=llm)
+                reply = await self._finalize_conclude(investigation, action, llm=llm, state=state)
                 if reply is not None:
                     return reply
                 continue  # rejected as ungrounded — logged inside, try again
@@ -1141,7 +1155,7 @@ class AgentOrchestrator:
             # rather than rejecting into the generic no-root-cause
             # fallback and losing everything the investigation actually did.
             reply = await self._finalize_conclude(
-                investigation, final_action, llm=llm, final_chance=True
+                investigation, final_action, llm=llm, state=state, final_chance=True
             )
             if reply is not None:
                 return reply
@@ -1167,8 +1181,7 @@ class AgentOrchestrator:
         if not investigation.evidence or investigation.evidence[-1] != text:
             investigation.evidence.append(text)
 
-    @staticmethod
-    async def _self_critique_conclude(investigation, action: Conclude, llm: LLMProvider):
+    async def _self_critique_conclude(self, investigation, action: Conclude, llm: LLMProvider, state):
         """A second LLM opinion on a draft Conclude — see `CritiqueVerdict`'s
         docstring for what this catches that `_ungrounded_identifiers` and
         `pending_verification` don't. Returns `None` (meaning "accept," the
@@ -1181,7 +1194,7 @@ class AgentOrchestrator:
         if not get_settings().self_critique_enabled:
             return None
         try:
-            return await llm.critique_conclusion(
+            verdict = await llm.critique_conclusion(
                 problem_statement=investigation.problem,
                 transcript=investigation.transcript,
                 proposed_summary=action.summary,
@@ -1195,10 +1208,27 @@ class AgentOrchestrator:
                 investigation_id=investigation.investigation_id,
                 error=str(exc),
             )
+            await self._tool_client.log_decision_event(
+                DecisionEventCreateRequest(
+                    event_type="self_critique_call_failed",
+                    conversation_id=state.conversation_id,
+                    investigation_id=investigation.investigation_id,
+                    provider=llm.provider_name,
+                    model=llm.model,
+                    payload={"error": str(exc)},
+                )
+            )
             return None
+        return verdict
 
     async def _finalize_conclude(
-        self, investigation, action: Conclude, *, llm: LLMProvider, final_chance: bool = False
+        self,
+        investigation,
+        action: Conclude,
+        *,
+        llm: LLMProvider,
+        state,
+        final_chance: bool = False,
     ) -> AgentReply | None:
         """Builds the final reply for a Conclude action, or returns None
         if it's rejected — the caller decides what happens next (loop back
@@ -1251,6 +1281,16 @@ class AgentOrchestrator:
                 investigation_id=investigation.investigation_id,
                 names=ungrounded,
             )
+            await self._tool_client.log_decision_event(
+                DecisionEventCreateRequest(
+                    event_type="conclusion_rejected_ungrounded_identifiers",
+                    conversation_id=state.conversation_id,
+                    investigation_id=investigation.investigation_id,
+                    provider=llm.provider_name,
+                    model=llm.model,
+                    payload={"names": ungrounded},
+                )
+            )
             return None
 
         if not final_chance and investigation.pending_verification is not None:
@@ -1290,10 +1330,20 @@ class AgentOrchestrator:
                 investigation_id=investigation.investigation_id,
                 tool_id=pending["tool_id"],
             )
+            await self._tool_client.log_decision_event(
+                DecisionEventCreateRequest(
+                    event_type="conclusion_rejected_pending_verification",
+                    conversation_id=state.conversation_id,
+                    investigation_id=investigation.investigation_id,
+                    provider=llm.provider_name,
+                    model=llm.model,
+                    payload={"tool_id": pending["tool_id"]},
+                )
+            )
             return None
 
         if not final_chance:
-            verdict = await self._self_critique_conclude(investigation, action, llm)
+            verdict = await self._self_critique_conclude(investigation, action, llm, state)
             if verdict is not None and not verdict.sound:
                 note = (
                     f"A second review of your draft conclusion found a problem: "
@@ -1316,6 +1366,16 @@ class AgentOrchestrator:
                     "conclusion_rejected_self_critique",
                     investigation_id=investigation.investigation_id,
                     issue=verdict.issue,
+                )
+                await self._tool_client.log_decision_event(
+                    DecisionEventCreateRequest(
+                        event_type="conclusion_rejected_self_critique",
+                        conversation_id=state.conversation_id,
+                        investigation_id=investigation.investigation_id,
+                        provider=llm.provider_name,
+                        model=llm.model,
+                        payload={"issue": verdict.issue},
+                    )
                 )
                 return None
 

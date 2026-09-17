@@ -63,6 +63,11 @@ class Settings(BaseSettings):
     # redeploy if this misbehaves in production (rejects too aggressively,
     # or a provider's critique calls turn out unreliable).
     self_critique_enabled: bool = True
+    # Durable, queryable storage for a handful of decision-quality signals
+    # (see gateway.domain.decision_events for exactly which ones) — a kill
+    # switch for the same reason as the two above: never worth blocking a
+    # deploy over telemetry.
+    decision_event_logging_enabled: bool = True
     # Crawl every registered server once at Gateway startup. Off by default:
     # the catalog also refreshes lazily on first use and via `/discover`, and
     # an eager crawl slows startup / adds load. Turn on for an always-warm

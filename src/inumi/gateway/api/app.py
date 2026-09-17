@@ -17,6 +17,7 @@ from inumi.gateway.api.routers import (
     approvals,
     audit,
     catalog,
+    decision_events,
     investigations,
     tool_calls,
     tools,
@@ -63,6 +64,7 @@ def create_app(settings: Settings | None = None, *, execution_transport=None) ->
     app.include_router(tools.router)
     app.include_router(approvals.router)
     app.include_router(investigations.router)
+    app.include_router(decision_events.router)
     app.include_router(audit.router)
     app.include_router(catalog.router)
 

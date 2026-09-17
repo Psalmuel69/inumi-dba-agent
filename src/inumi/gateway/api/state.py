@@ -13,6 +13,7 @@ from inumi.common.identity import IdentityProvider, build_identity_provider
 from inumi.common.service_auth import ServiceTokenIssuer, ServiceTokenVerifier
 from inumi.gateway.domain.catalog import CatalogStore
 from inumi.gateway.domain.data_policy import DataMinimizer
+from inumi.gateway.domain.decision_events import DbDecisionEventStore, DecisionEventStore
 from inumi.gateway.domain.investigation_memory import InvestigationMemory
 from inumi.gateway.domain.investigation_store import DbInvestigationStore, InvestigationStore
 from inumi.gateway.domain.policy_engine import PolicyEngine
@@ -57,6 +58,7 @@ class GatewayState:
     service_token_verifier: ServiceTokenVerifier
     investigation_store: InvestigationStore
     investigation_memory: InvestigationMemory
+    decision_event_store: DecisionEventStore
 
     @classmethod
     def build(cls, settings: Settings, *, execution_transport=None) -> GatewayState:
@@ -91,4 +93,5 @@ class GatewayState:
             service_token_verifier=verifier,
             investigation_store=investigation_store,
             investigation_memory=InvestigationMemory(investigation_store),
+            decision_event_store=DbDecisionEventStore(database.session_factory),
         )

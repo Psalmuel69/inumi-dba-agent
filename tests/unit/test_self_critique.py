@@ -25,6 +25,9 @@ class _ScriptedCritiqueLLM:
     `_finalize_conclude` calls the latter only after a Conclude action is
     already proposed."""
 
+    provider_name = "fake"
+    model = "fake-model"
+
     def __init__(self, actions: list, critiques: list[CritiqueVerdict] | None = None):
         self._actions = list(actions)
         self._critiques = list(critiques) if critiques is not None else None

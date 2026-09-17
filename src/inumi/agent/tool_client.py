@@ -12,6 +12,7 @@ from typing import Any
 
 import httpx
 
+from inumi.common.models.decision_event import DecisionEventCreateRequest
 from inumi.common.models.investigation import (
     InvestigationCreateRequest,
     InvestigationEventCreateRequest,
@@ -209,3 +210,23 @@ class ToolClient:
             # not "the investigation can't start."
             logger.warning("get_investigation_memory_failed", server_id=server_id, error=str(exc))
             return []
+
+    async def log_decision_event(self, request: DecisionEventCreateRequest) -> None:
+        """Best-effort, same posture as the four methods above — pure
+        telemetry, never worth blocking or failing the caller over. On
+        total failure this logs locally so the signal isn't silently lost
+        even from local logs (the one place this differs from the others:
+        there is no other record of this event at all if both the Gateway
+        call and this log line were to vanish)."""
+        try:
+            async with httpx.AsyncClient(base_url=self._base_url, transport=self._transport) as client:
+                response = await client.post(
+                    "/v1/decision-events",
+                    json=request.model_dump(mode="json"),
+                    headers=self._headers(),
+                )
+                response.raise_for_status()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "log_decision_event_failed", event_type=request.event_type, error=str(exc)
+            )

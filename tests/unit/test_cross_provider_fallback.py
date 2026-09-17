@@ -495,6 +495,9 @@ class _FakeToolClient:
     async def get_investigation_memory(self, server_id, *, exclude_investigation_id=None, limit=3):
         return []
 
+    async def log_decision_event(self, request):
+        pass
+
 
 @pytest.mark.asyncio
 async def test_the_dba_facing_reply_says_which_provider_actually_answered():

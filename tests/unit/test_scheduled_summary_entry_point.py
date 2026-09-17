@@ -60,6 +60,9 @@ class _FakeToolClient:
     async def get_investigation_memory(self, server_id, *, exclude_investigation_id=None, limit=3):
         return []
 
+    async def log_decision_event(self, request):
+        pass
+
 
 class _FakeLLM:
     def __init__(self, actions: list):

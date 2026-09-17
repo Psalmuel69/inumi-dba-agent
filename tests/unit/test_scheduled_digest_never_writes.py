@@ -96,6 +96,9 @@ class _FakeToolClient:
     async def get_investigation_memory(self, server_id, *, exclude_investigation_id=None, limit=3):
         return []
 
+    async def log_decision_event(self, request):
+        pass
+
 
 class _WritePushingLLM:
     """A model that proposes a write regardless of what it was offered.
@@ -107,6 +110,9 @@ class _WritePushingLLM:
     that validation would all produce exactly this behavior — which is
     precisely why layer 2 must not depend on it. Repeats its last action
     once the script runs out so a loop can always terminate."""
+
+    provider_name = "fake"
+    model = "fake-model"
 
     def __init__(self, actions: list):
         self._actions = list(actions)
