@@ -24,6 +24,15 @@ class _FakeToolClient:
     async def submit(self, request):
         raise AssertionError("no tool call expected")
 
+    async def create_investigation(self, request):
+        pass
+
+    async def update_investigation(self, investigation_id, request):
+        pass
+
+    async def get_investigation_memory(self, server_id, *, exclude_investigation_id=None, limit=3):
+        return []
+
 
 class _FakeLLM:
     def __init__(self, intent: IntentExtraction):

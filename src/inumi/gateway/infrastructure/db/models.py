@@ -175,6 +175,10 @@ class InvestigationRecord(Base):
     )
     conversation_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
     user_subject_id: Mapped[str] = mapped_column(String, nullable=False)
+    # Indexed separately from `target` (a JSON blob) so memory recall and
+    # cross-server correlation can query by server directly rather than
+    # scanning/filtering JSON — see migration 0003.
+    server_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True, default=None)
     target: Mapped[dict] = mapped_column(JSON, default=dict)
     problem: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(String, default="INVESTIGATING")

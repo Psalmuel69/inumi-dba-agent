@@ -13,6 +13,8 @@ from inumi.common.identity import IdentityProvider, build_identity_provider
 from inumi.common.service_auth import ServiceTokenIssuer, ServiceTokenVerifier
 from inumi.gateway.domain.catalog import CatalogStore
 from inumi.gateway.domain.data_policy import DataMinimizer
+from inumi.gateway.domain.investigation_memory import InvestigationMemory
+from inumi.gateway.domain.investigation_store import DbInvestigationStore, InvestigationStore
 from inumi.gateway.domain.policy_engine import PolicyEngine
 from inumi.gateway.domain.rate_limiter import (
     InMemoryRateLimitBackend,
@@ -53,6 +55,8 @@ class GatewayState:
     execution_client: ExecutionClient
     service_token_issuer: ServiceTokenIssuer
     service_token_verifier: ServiceTokenVerifier
+    investigation_store: InvestigationStore
+    investigation_memory: InvestigationMemory
 
     @classmethod
     def build(cls, settings: Settings, *, execution_transport=None) -> GatewayState:
@@ -62,6 +66,7 @@ class GatewayState:
         server_registry = ServerRegistry(settings.servers_config_path)
         database = Database(settings.control_db_url)
         catalog_store: CatalogStore = DbCatalogStore(database.session_factory)
+        investigation_store: InvestigationStore = DbInvestigationStore(database.session_factory)
         issuer = ServiceTokenIssuer(settings.service_jwt_secret, settings.service_jwt_issuer)
         verifier = ServiceTokenVerifier(settings.service_jwt_secret, settings.service_jwt_issuer)
         return cls(
@@ -84,4 +89,6 @@ class GatewayState:
             ),
             service_token_issuer=issuer,
             service_token_verifier=verifier,
+            investigation_store=investigation_store,
+            investigation_memory=InvestigationMemory(investigation_store),
         )

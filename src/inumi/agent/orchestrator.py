@@ -35,8 +35,13 @@ from inumi.agent.planner.actions import (
 from inumi.agent.playbooks.library import PLAYBOOKS, get_playbook, match_playbook
 from inumi.agent.reply import AgentReply, ApprovalCard
 from inumi.agent.tool_client import ToolClient
+from inumi.common.config import get_settings
 from inumi.common.ids import new_id
 from inumi.common.models.catalog import LeastPrivilegeFinding
+from inumi.common.models.investigation import (
+    InvestigationCreateRequest,
+    InvestigationUpdateRequest,
+)
 from inumi.common.models.tool import OperationType, ToolCallRequest, ToolCallResponse, ToolCallStatus
 from inumi.common.observability import get_logger
 from inumi.common.server_reference import normalize_server_reference
@@ -832,6 +837,7 @@ class AgentOrchestrator:
         self, state: ConversationState, investigation, channel: str, channel_account_id: str
     ) -> AgentReply:
         llm = self._llm_for(state)
+        await self._bootstrap_investigation_memory(state, investigation, channel_account_id)
         available = await self._tool_client.available_tools(channel, channel_account_id)
         if investigation.read_only:
             # First of the three layers enforcing "a scheduled run never
@@ -900,7 +906,7 @@ class AgentOrchestrator:
         # tool catalog right now, not stale knowledge baked into this file.
         tool_operation_types = {t.tool_id: t.operation_type for t in available}
 
-        return await self._run_investigation_loop(
+        reply = await self._run_investigation_loop(
             state,
             investigation,
             available_ids,
@@ -911,6 +917,56 @@ class AgentOrchestrator:
             tool_allowed_arguments,
             tool_operation_types,
         )
+        await self._tool_client.update_investigation(
+            investigation.investigation_id,
+            InvestigationUpdateRequest(
+                server_id=state.database_context.get("instance"),
+                target=dict(state.database_context),
+                status=investigation.effective_status,
+                evidence=investigation.evidence,
+                hypotheses=investigation.hypotheses,
+                findings=investigation.findings,
+                recommendations=investigation.recommendations,
+                actions=investigation.actions,
+            ),
+        )
+        return reply
+
+    async def _bootstrap_investigation_memory(
+        self, state: ConversationState, investigation, channel_account_id: str
+    ) -> None:
+        """One-time, best-effort hook covering every path into
+        `_continue_investigation` (interactive, resumed, the scheduled
+        digest, and an alert-triggered run): tells the Gateway this
+        investigation exists, and — if a specific server is already known —
+        recalls recent, concluded findings for it into
+        `investigation.memory_context` (see that field's own docstring for
+        why it's kept separate from `evidence`). Guarded by
+        `remote_bootstrap_done` since this must run exactly once per
+        investigation, not on every resumed turn."""
+        if investigation.remote_bootstrap_done:
+            return
+        investigation.remote_bootstrap_done = True
+        server_id = state.database_context.get("instance")
+        await self._tool_client.create_investigation(
+            InvestigationCreateRequest(
+                investigation_id=investigation.investigation_id,
+                conversation_id=state.conversation_id,
+                user_subject_id=channel_account_id,
+                server_id=server_id,
+                target=dict(state.database_context),
+                problem=investigation.problem,
+                status=investigation.status,
+            )
+        )
+        lookback = get_settings().investigation_memory_lookback
+        if server_id and lookback > 0:
+            entries = await self._tool_client.get_investigation_memory(
+                server_id,
+                exclude_investigation_id=investigation.investigation_id,
+                limit=lookback,
+            )
+            investigation.memory_context = [e.model_dump(mode="json") for e in entries]
 
     async def _run_investigation_loop(
         self,
@@ -1289,6 +1345,24 @@ class AgentOrchestrator:
         fresh, context-free intent-extraction call."""
         playbook = get_playbook(investigation.playbook_id)
         problem = investigation.problem
+        if investigation.memory_context:
+            # Background only — never grounding evidence. A prior
+            # investigation's findings are the *previous* investigation's
+            # confirmed facts, not this one's; `_ungrounded_identifiers`
+            # only ever checks this investigation's own `evidence`/
+            # `transcript`, so citing something from here without actually
+            # re-confirming it this time will still get rejected as
+            # ungrounded, which is deliberate.
+            lines = "\n".join(
+                f"- ({m['status']}) {m['problem']!r} — findings: {m['findings']}; "
+                f"recommendations: {m['recommendations']}"
+                for m in investigation.memory_context
+            )
+            problem += (
+                "\n\nFor background only, not verified findings for THIS "
+                "investigation — prior investigations on this server:\n"
+                f"{lines}"
+            )
         if investigation.last_message:
             problem += f"\n\nThe DBA just replied: {investigation.last_message!r}"
         if playbook is not None and investigation.playbook_step >= len(playbook.steps):

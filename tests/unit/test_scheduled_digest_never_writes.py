@@ -87,6 +87,15 @@ class _FakeToolClient:
         self.requests.append(request)
         return self._response
 
+    async def create_investigation(self, request):
+        pass
+
+    async def update_investigation(self, investigation_id, request):
+        pass
+
+    async def get_investigation_memory(self, server_id, *, exclude_investigation_id=None, limit=3):
+        return []
+
 
 class _WritePushingLLM:
     """A model that proposes a write regardless of what it was offered.

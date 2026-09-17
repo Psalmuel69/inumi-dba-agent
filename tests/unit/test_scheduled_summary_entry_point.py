@@ -51,6 +51,15 @@ class _FakeToolClient:
             status=ToolCallStatus.EXECUTED, message="ok", result={"rows": [], "row_count": 0}
         )
 
+    async def create_investigation(self, request):
+        pass
+
+    async def update_investigation(self, investigation_id, request):
+        pass
+
+    async def get_investigation_memory(self, server_id, *, exclude_investigation_id=None, limit=3):
+        return []
+
 
 class _FakeLLM:
     def __init__(self, actions: list):

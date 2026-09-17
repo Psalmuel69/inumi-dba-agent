@@ -1,17 +1,22 @@
-"""GET /v1/investigations/{id} (spec §25, §57).
+"""Investigation persistence and recall (spec §25, §57).
 
-Read-only projection of investigation state maintained by the Agent via
-`inumi.gateway.domain.investigation_store` (see Phase 5) — the Gateway
-itself never fabricates evidence/findings, it only persists and serves back
-what the Agent recorded.
+Read-write projection of investigation state, maintained by the Agent via
+`inumi.gateway.domain.investigation_store` — the Gateway itself never
+fabricates evidence/findings, it only persists and serves back what the
+Agent recorded.
 """
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import APIRouter, Depends, HTTPException, Query
 
-from inumi.gateway.api.deps import get_session, require_agent_service_token
+from inumi.common.models.investigation import (
+    InvestigationCreateRequest,
+    InvestigationEventCreateRequest,
+    InvestigationUpdateRequest,
+)
+from inumi.gateway.api.deps import get_state, require_agent_service_token
+from inumi.gateway.api.state import GatewayState
 from inumi.gateway.infrastructure.db.models import InvestigationRecord
 
 router = APIRouter(
@@ -19,16 +24,11 @@ router = APIRouter(
 )
 
 
-@router.get("/{investigation_id}")
-async def get_investigation(
-    investigation_id: str, session: AsyncSession = Depends(get_session)
-) -> dict:
-    record = await session.get(InvestigationRecord, investigation_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail="Investigation not found.")
+def _serialize(record: InvestigationRecord) -> dict:
     return {
         "investigation_id": record.investigation_id,
         "conversation_id": record.conversation_id,
+        "server_id": record.server_id,
         "target": record.target,
         "problem": record.problem,
         "status": record.status,
@@ -40,3 +40,56 @@ async def get_investigation(
         "created_at": record.created_at.isoformat(),
         "updated_at": record.updated_at.isoformat(),
     }
+
+
+@router.get("/memory/{server_id}")
+async def get_investigation_memory(
+    server_id: str,
+    exclude_investigation_id: str | None = Query(default=None),
+    limit: int = Query(default=3, ge=0, le=20),
+    state: GatewayState = Depends(get_state),
+) -> list[dict]:
+    entries = await state.investigation_memory.recall(
+        server_id, exclude_investigation_id=exclude_investigation_id, limit=limit
+    )
+    return [e.model_dump(mode="json") for e in entries]
+
+
+@router.get("/{investigation_id}")
+async def get_investigation(
+    investigation_id: str, state: GatewayState = Depends(get_state)
+) -> dict:
+    record = await state.investigation_store.get(investigation_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Investigation not found.")
+    return _serialize(record)
+
+
+@router.post("")
+async def create_investigation(
+    body: InvestigationCreateRequest, state: GatewayState = Depends(get_state)
+) -> dict:
+    record = await state.investigation_store.create(**body.model_dump())
+    return _serialize(record)
+
+
+@router.patch("/{investigation_id}")
+async def update_investigation(
+    investigation_id: str,
+    body: InvestigationUpdateRequest,
+    state: GatewayState = Depends(get_state),
+) -> dict:
+    record = await state.investigation_store.update(investigation_id, **body.model_dump())
+    if record is None:
+        raise HTTPException(status_code=404, detail="Investigation not found.")
+    return _serialize(record)
+
+
+@router.post("/{investigation_id}/events")
+async def append_investigation_event(
+    investigation_id: str,
+    body: InvestigationEventCreateRequest,
+    state: GatewayState = Depends(get_state),
+) -> dict:
+    await state.investigation_store.append_event(investigation_id, body.event_type, body.payload)
+    return {"status": "ok"}

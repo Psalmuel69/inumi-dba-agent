@@ -12,8 +12,17 @@ from typing import Any
 
 import httpx
 
+from inumi.common.models.investigation import (
+    InvestigationCreateRequest,
+    InvestigationEventCreateRequest,
+    InvestigationMemoryEntry,
+    InvestigationUpdateRequest,
+)
 from inumi.common.models.tool import ToolCallRequest, ToolCallResponse, ToolDefinition
+from inumi.common.observability import get_logger
 from inumi.common.service_auth import ServiceTokenIssuer
+
+logger = get_logger(__name__)
 
 # A bound on the Agent's own wait for one tool-call round trip (Gateway,
 # and whatever it takes to the Execution Service and the real database) —
@@ -119,3 +128,84 @@ class ToolClient:
             if response.status_code >= 400:
                 return {"status": "ERROR", "detail": response.json().get("detail", "error")}
             return response.json()
+
+    # -- Investigation persistence/recall -----------------------------------
+    # All four below are best-effort by construction: memory is an
+    # enhancement to an investigation, never a dependency of it, so a
+    # Gateway hiccup here must never surface to the caller as an exception
+    # — verified-live precedent for this posture is `alert_trigger.py`'s
+    # treatment of its cooldown backend the same way.
+
+    async def create_investigation(self, request: InvestigationCreateRequest) -> None:
+        try:
+            async with httpx.AsyncClient(base_url=self._base_url, transport=self._transport) as client:
+                response = await client.post(
+                    "/v1/investigations",
+                    json=request.model_dump(mode="json"),
+                    headers=self._headers(),
+                )
+                response.raise_for_status()
+        except Exception as exc:  # noqa: BLE001 — never block an investigation on this
+            logger.warning(
+                "create_investigation_failed",
+                investigation_id=request.investigation_id,
+                error=str(exc),
+            )
+
+    async def update_investigation(
+        self, investigation_id: str, request: InvestigationUpdateRequest
+    ) -> None:
+        try:
+            async with httpx.AsyncClient(base_url=self._base_url, transport=self._transport) as client:
+                response = await client.patch(
+                    f"/v1/investigations/{investigation_id}",
+                    json=request.model_dump(mode="json"),
+                    headers=self._headers(),
+                )
+                response.raise_for_status()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "update_investigation_failed", investigation_id=investigation_id, error=str(exc)
+            )
+
+    async def append_investigation_event(
+        self, investigation_id: str, request: InvestigationEventCreateRequest
+    ) -> None:
+        try:
+            async with httpx.AsyncClient(base_url=self._base_url, transport=self._transport) as client:
+                response = await client.post(
+                    f"/v1/investigations/{investigation_id}/events",
+                    json=request.model_dump(mode="json"),
+                    headers=self._headers(),
+                )
+                response.raise_for_status()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "append_investigation_event_failed",
+                investigation_id=investigation_id,
+                error=str(exc),
+            )
+
+    async def get_investigation_memory(
+        self, server_id: str, *, exclude_investigation_id: str | None = None, limit: int = 3
+    ) -> list[InvestigationMemoryEntry]:
+        try:
+            async with httpx.AsyncClient(base_url=self._base_url, transport=self._transport) as client:
+                response = await client.get(
+                    f"/v1/investigations/memory/{server_id}",
+                    params={
+                        k: v
+                        for k, v in {
+                            "exclude_investigation_id": exclude_investigation_id,
+                            "limit": limit,
+                        }.items()
+                        if v is not None
+                    },
+                    headers=self._headers(),
+                )
+                response.raise_for_status()
+                return [InvestigationMemoryEntry.model_validate(e) for e in response.json()]
+        except Exception as exc:  # noqa: BLE001 — a lookup failure means "no memory,"
+            # not "the investigation can't start."
+            logger.warning("get_investigation_memory_failed", server_id=server_id, error=str(exc))
+            return []

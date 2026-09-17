@@ -486,6 +486,15 @@ class _FakeToolClient:
     async def available_tools(self, channel, channel_account_id):
         return []
 
+    async def create_investigation(self, request):
+        pass
+
+    async def update_investigation(self, investigation_id, request):
+        pass
+
+    async def get_investigation_memory(self, server_id, *, exclude_investigation_id=None, limit=3):
+        return []
+
 
 @pytest.mark.asyncio
 async def test_the_dba_facing_reply_says_which_provider_actually_answered():

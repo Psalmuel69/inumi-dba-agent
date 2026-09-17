@@ -89,3 +89,24 @@ def test_every_table_added_after_0001_has_an_explicit_migration():
         "file has an explicit `op.create_table(...)` for them — add one in a new "
         "revision (see migrations/versions/0002_server_catalogs.py for the pattern)."
     )
+
+
+def test_alembic_head_adds_investigations_server_id_column(tmp_path):
+    """The two checks above only ever look at table presence, not columns —
+    neither would have caught a migration that creates a table but forgets
+    a column added to its model afterward (exactly migration 0003's shape:
+    `investigations` already existed via 0001, `server_id` was added to the
+    model later and needs its own explicit `op.add_column`)."""
+    db_path = tmp_path / "migration_check_server_id.db"
+    env = dict(os.environ, CONTROL_DB_URL=f"sqlite+aiosqlite:///{db_path}")
+    result = subprocess.run(
+        [sys.executable, "-m", "alembic", "upgrade", "head"],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+    columns = {c["name"] for c in inspect(create_engine(f"sqlite:///{db_path}")).get_columns("investigations")}
+    assert "server_id" in columns

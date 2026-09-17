@@ -54,6 +54,10 @@ class Settings(BaseSettings):
     # How often the discovery crawler refreshes each server's catalog.
     discovery_refresh_minutes: int = 60
     discovery_max_objects_per_database: int = 5000
+    # How many recent, concluded past investigations on the same server the
+    # Agent recalls as background context before starting a new one. 0
+    # disables recall entirely without touching any call site.
+    investigation_memory_lookback: int = Field(default=3, ge=0)
     # Crawl every registered server once at Gateway startup. Off by default:
     # the catalog also refreshes lazily on first use and via `/discover`, and
     # an eager crawl slows startup / adds load. Turn on for an always-warm

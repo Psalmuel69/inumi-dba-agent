@@ -154,6 +154,21 @@ class InvestigationState:
     # independently-checked outcome in the DBA-facing reply rather than
     # trusting the model's own free-text claim of success.
     last_verification: str | None = None
+    # Set True the first time this investigation fires its one-time Gateway
+    # persistence + memory-recall bootstrap (see
+    # orchestrator._continue_investigation) — guards against redoing it on
+    # every resumed turn, since the investigation object itself lives only
+    # in this process and has no other way to know "have I already told the
+    # Gateway about myself."
+    remote_bootstrap_done: bool = False
+    # Recalled findings from past, concluded investigations on the same
+    # server (see gateway.domain.investigation_memory). Deliberately kept
+    # separate from `evidence`, never merged into it: `evidence` is what
+    # `_ungrounded_identifiers` treats as things *this* investigation
+    # actually confirmed via a real tool call — folding a prior
+    # investigation's unverified claim in there would let the model cite it
+    # as if it had just confirmed it itself. This is prompt background only.
+    memory_context: list[dict[str, Any]] = dataclasses.field(default_factory=list)
 
     @property
     def is_concluded(self) -> bool:
