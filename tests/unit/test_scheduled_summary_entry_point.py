@@ -17,7 +17,7 @@ import pytest
 from inumi.agent.context_manager import ContextManager
 from inumi.agent.llm.registry import LLMRegistry
 from inumi.agent.orchestrator import AgentOrchestrator
-from inumi.agent.planner.actions import Conclude
+from inumi.agent.planner.actions import Conclude, CritiqueVerdict
 from inumi.agent.playbooks.library import get_playbook
 from inumi.common.config import Settings
 from inumi.common.models.tool import ToolCallResponse, ToolCallStatus
@@ -69,6 +69,9 @@ class _FakeLLM:
     async def decide_next_action(self, **kwargs):
         self.calls.append(kwargs)
         return self._actions.pop(0)
+
+    async def critique_conclusion(self, **kwargs):
+        return CritiqueVerdict(sound=True)
 
 
 def _orchestrator(tool_client, llm, context=None) -> AgentOrchestrator:

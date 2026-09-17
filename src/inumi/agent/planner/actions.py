@@ -54,6 +54,20 @@ AgentAction = Annotated[
 agent_action_adapter: TypeAdapter = TypeAdapter(AgentAction)
 
 
+class CritiqueVerdict(BaseModel):
+    """A second, independent LLM opinion on a draft Conclude — does the
+    conclusion actually follow from the evidence gathered, or is it a leap?
+    Distinct from `_ungrounded_identifiers`'s regex heuristic (which only
+    catches a *named* fabrication) and from `pending_verification`'s
+    structural check (which only catches a missing re-check after a write)
+    — this is the one check that can catch a conclusion that names nothing
+    fabricated and has nothing pending, but still doesn't actually follow
+    from what was found."""
+
+    sound: bool
+    issue: str | None = None
+
+
 class IntentExtraction(BaseModel):
     """First-pass classification of an incoming message (spec §6, §39)."""
 

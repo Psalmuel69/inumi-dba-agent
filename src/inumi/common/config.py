@@ -58,6 +58,11 @@ class Settings(BaseSettings):
     # Agent recalls as background context before starting a new one. 0
     # disables recall entirely without touching any call site.
     investigation_memory_lookback: int = Field(default=3, ge=0)
+    # A second LLM opinion on a draft Conclude before it's accepted — see
+    # orchestrator._self_critique_conclude. A kill switch cheaper than a
+    # redeploy if this misbehaves in production (rejects too aggressively,
+    # or a provider's critique calls turn out unreliable).
+    self_critique_enabled: bool = True
     # Crawl every registered server once at Gateway startup. Off by default:
     # the catalog also refreshes lazily on first use and via `/discover`, and
     # an eager crawl slows startup / adds load. Turn on for an always-warm

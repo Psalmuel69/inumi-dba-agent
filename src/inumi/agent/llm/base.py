@@ -25,6 +25,7 @@ from typing import Any
 from inumi.agent.planner.actions import (
     AgentAction,
     AskClarification,
+    CritiqueVerdict,
     IntentExtraction,
     ProposeToolCall,
     agent_action_adapter,
@@ -233,6 +234,36 @@ _SUMMARY_SYSTEM = (
     "invent findings that are not in the transcript."
 )
 
+_CRITIQUE_SYSTEM = (
+    "You are reviewing a DBA investigation's draft conclusion before it is "
+    "reported. Given the problem, the transcript of tool calls actually run, "
+    "and the draft conclusion, judge only one thing: does this conclusion "
+    "actually follow from what the transcript shows, or does it overstate, "
+    "guess, or draw a connection the evidence doesn't support? A conclusion "
+    "can honestly say the root cause is unconfirmed — that is sound. It is "
+    "unsound only if it states something as established that the transcript "
+    "does not actually support, or claims a confidence level the evidence "
+    "does not warrant. If unsound, say specifically what doesn't follow."
+)
+
+# A flat schema for the same function-calling-compatibility reason
+# `_FLAT_ACTION_SCHEMA` is flat — Gemini's function-calling layer rejects
+# `$defs`/discriminated-union schemas.
+_CRITIQUE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "sound": {
+            "type": "boolean",
+            "description": "True if the conclusion actually follows from the transcript.",
+        },
+        "issue": {
+            "type": "string",
+            "description": "If not sound, specifically what doesn't follow. Omit if sound.",
+        },
+    },
+    "required": ["sound"],
+}
+
 # A flat schema every provider's function-calling layer can accept (Gemini
 # in particular rejects `$defs` / discriminated-union JSON Schema). The
 # discriminated-union validation still happens afterwards via
@@ -384,6 +415,32 @@ class LLMProvider(ABC):
 
     async def list_models(self) -> list[str]:
         return [self.model]
+
+    async def critique_conclusion(
+        self,
+        *,
+        problem_statement: str,
+        transcript: list[dict[str, Any]],
+        proposed_summary: str,
+        proposed_root_cause: str | None,
+        proposed_confidence: str,
+        proposed_recommendation: str | None,
+    ) -> CritiqueVerdict:
+        """A second opinion on a draft Conclude — see `CritiqueVerdict`'s
+        own docstring for what this catches that the two structural checks
+        in `orchestrator._finalize_conclude` don't.
+
+        Deliberately concrete, not `@abstractmethod`, and deliberately
+        `sound=True` unconditionally here: making this abstract would force
+        every existing `LLMProvider` subclass — including every test double
+        across the suite, and the deterministic offline mock planner this
+        entire default test suite runs on — to implement it just to keep
+        instantiating. A provider that has no real critique capability (or
+        chooses not to spend a call on one) simply never rejects anything,
+        exactly as if this feature didn't exist for it. `StructuredLLMProvider`
+        below is the one real implementation, inherited by all four vendor
+        providers with no per-vendor code."""
+        return CritiqueVerdict(sound=True)
 
     def _unavailable_question(self) -> str:
         """The exact DBA-facing wording for "this provider is down". One
@@ -724,6 +781,43 @@ class StructuredLLMProvider(LLMProvider):
             system=_SUMMARY_SYSTEM,
             user=f"Problem: {problem_statement}\nTranscript: {transcript}",
         )
+
+    async def critique_conclusion(
+        self,
+        *,
+        problem_statement: str,
+        transcript: list[dict[str, Any]],
+        proposed_summary: str,
+        proposed_root_cause: str | None,
+        proposed_confidence: str,
+        proposed_recommendation: str | None,
+    ) -> CritiqueVerdict:
+        """Deliberately does not catch anything here — an unreachable
+        provider or a persistently malformed response both just propagate
+        as an exception. `orchestrator._self_critique_conclude` is where
+        that's turned into "fail open, accept the conclusion" (a critique
+        call failing must never be worse than not having critiqued at
+        all), so there is nothing useful this layer could do differently
+        by catching it here too."""
+
+        async def attempt() -> CritiqueVerdict:
+            data = await self._call_tool(
+                system=_CRITIQUE_SYSTEM,
+                user=(
+                    f"Problem: {problem_statement}\n"
+                    f"Transcript of tool calls actually run: {transcript}\n"
+                    "Draft conclusion:\n"
+                    f"  summary: {proposed_summary}\n"
+                    f"  likely_root_cause: {proposed_root_cause}\n"
+                    f"  confidence: {proposed_confidence}\n"
+                    f"  recommendation: {proposed_recommendation}"
+                ),
+                schema=_CRITIQUE_SCHEMA,
+                tool_name="submit_critique",
+            )
+            return CritiqueVerdict.model_validate(data)
+
+        return await self._call_with_retry(attempt, what="critique_conclusion")
 
     # --- SDK-specific primitives ------------------------------------------
 

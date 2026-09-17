@@ -11,7 +11,7 @@ import pytest
 from inumi.agent.context_manager import ContextManager
 from inumi.agent.llm.registry import LLMRegistry
 from inumi.agent.orchestrator import AgentOrchestrator
-from inumi.agent.planner.actions import Conclude, IntentExtraction
+from inumi.agent.planner.actions import Conclude, CritiqueVerdict, IntentExtraction
 
 
 class _FakeToolClient:
@@ -43,6 +43,9 @@ class _FakeLLM:
 
     async def decide_next_action(self, **kwargs):
         return Conclude(summary="Nothing to check.")
+
+    async def critique_conclusion(self, **kwargs):
+        return CritiqueVerdict(sound=True)
 
 
 def _orchestrator(llm) -> tuple[AgentOrchestrator, ContextManager]:

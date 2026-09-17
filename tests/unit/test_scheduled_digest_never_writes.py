@@ -45,7 +45,7 @@ from inumi.agent.orchestrator import (
     AgentOrchestrator,
     _is_confirmed_read_tool,
 )
-from inumi.agent.planner.actions import Conclude, ProposeToolCall
+from inumi.agent.planner.actions import Conclude, CritiqueVerdict, ProposeToolCall
 from inumi.common.config import Settings
 from inumi.common.models.tool import OperationType, ToolCallResponse, ToolCallStatus
 from inumi.gateway.domain.tool_catalog import build_tool_catalog
@@ -117,6 +117,9 @@ class _WritePushingLLM:
         if len(self._actions) > 1:
             return self._actions.pop(0)
         return self._actions[0]
+
+    async def critique_conclusion(self, **kwargs):
+        return CritiqueVerdict(sound=True)
 
 
 def _orchestrator(tool_client, llm) -> AgentOrchestrator:

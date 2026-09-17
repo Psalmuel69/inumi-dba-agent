@@ -626,3 +626,27 @@ async def test_the_offline_planner_can_never_start_a_walk():
     llm = CrossProviderFallbackLLM(mock, [("anthropic", (lambda: never))])
     await _decide(llm)
     assert never.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_critique_conclusion_delegates_to_the_primary_only():
+    """Deliberately NOT part of the fallback walk (see the method's own
+    docstring) — a fallback provider configured alongside the primary must
+    never be touched by a critique call."""
+    primary = _StubProvider("gemini", result={"sound": False, "issue": "no evidence for this"})
+    fallback_provider = _StubProvider("anthropic", result={"sound": True})
+    llm = _wrap(primary, fallback_provider)
+
+    verdict = await llm.critique_conclusion(
+        problem_statement="p",
+        transcript=[],
+        proposed_summary="s",
+        proposed_root_cause=None,
+        proposed_confidence="unable_to_confirm",
+        proposed_recommendation=None,
+    )
+
+    assert verdict.sound is False
+    assert verdict.issue == "no evidence for this"
+    assert primary.call_count == 1
+    assert fallback_provider.call_count == 0

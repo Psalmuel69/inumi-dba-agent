@@ -1103,7 +1103,7 @@ class AgentOrchestrator:
 
             if isinstance(action, Conclude):
                 investigation.consecutive_record_observations = 0
-                reply = self._finalize_conclude(investigation, action)
+                reply = await self._finalize_conclude(investigation, action, llm=llm)
                 if reply is not None:
                     return reply
                 continue  # rejected as ungrounded — logged inside, try again
@@ -1140,7 +1140,9 @@ class AgentOrchestrator:
             # state plainly that it was never independently re-checked,
             # rather than rejecting into the generic no-root-cause
             # fallback and losing everything the investigation actually did.
-            reply = self._finalize_conclude(investigation, final_action, final_chance=True)
+            reply = await self._finalize_conclude(
+                investigation, final_action, llm=llm, final_chance=True
+            )
             if reply is not None:
                 return reply
 
@@ -1165,26 +1167,58 @@ class AgentOrchestrator:
         if not investigation.evidence or investigation.evidence[-1] != text:
             investigation.evidence.append(text)
 
-    def _finalize_conclude(
-        self, investigation, action: Conclude, *, final_chance: bool = False
+    @staticmethod
+    async def _self_critique_conclude(investigation, action: Conclude, llm: LLMProvider):
+        """A second LLM opinion on a draft Conclude — see `CritiqueVerdict`'s
+        docstring for what this catches that `_ungrounded_identifiers` and
+        `pending_verification` don't. Returns `None` (meaning "accept," the
+        same as a `sound=True` verdict) on ANY exception — a critique call
+        failing (a timeout, a provider outage, a malformed response after
+        retries) must never be worse than not having critiqued at all; only
+        an actual working `sound=False` verdict rejects. Gated by
+        `Settings.self_critique_enabled` as a cheaper-than-a-redeploy kill
+        switch if this misbehaves in production."""
+        if not get_settings().self_critique_enabled:
+            return None
+        try:
+            return await llm.critique_conclusion(
+                problem_statement=investigation.problem,
+                transcript=investigation.transcript,
+                proposed_summary=action.summary,
+                proposed_root_cause=action.likely_root_cause,
+                proposed_confidence=action.confidence,
+                proposed_recommendation=action.recommendation,
+            )
+        except Exception as exc:  # noqa: BLE001 — fail open, see docstring above
+            logger.warning(
+                "self_critique_call_failed",
+                investigation_id=investigation.investigation_id,
+                error=str(exc),
+            )
+            return None
+
+    async def _finalize_conclude(
+        self, investigation, action: Conclude, *, llm: LLMProvider, final_chance: bool = False
     ) -> AgentReply | None:
         """Builds the final reply for a Conclude action, or returns None
         if it's rejected — the caller decides what happens next (loop back
         for a retry mid-investigation, or fall through to the safe generic
         fallback if this was the one bounded last-chance call after the
-        turn budget ran out). Two independent things can reject a
+        turn budget ran out). Three independent things can reject a
         conclusion: it names something ungrounded (see
-        `_ungrounded_identifiers`), or it's trying to conclude with a
-        write's real-world effect still unverified (see
+        `_ungrounded_identifiers`), it's trying to conclude with a write's
+        real-world effect still unverified (see
         `investigation.pending_verification`'s own docstring for why this
-        exists) — the latter only applies mid-investigation
-        (`final_chance=False`): the one bounded last-chance call offers no
-        tool calls at all (`available_tool_ids=[]`), so there is no way
-        left for the model to actually go check, and rejecting it there
-        would only throw away everything the investigation found in favor
-        of the generic no-root-cause fallback. `_format_report` is what
-        states the true, structurally-derived verification outcome in
-        that case instead of trusting the model's own wording."""
+        exists), or a second LLM opinion judges it doesn't actually follow
+        from the evidence (see `_self_critique_conclude`) — the latter two
+        only apply mid-investigation (`final_chance=False`): the one
+        bounded last-chance call offers no tool calls at all
+        (`available_tool_ids=[]`), so there is no way left for the model to
+        act on new guidance, and rejecting it there would only throw away
+        everything the investigation found in favor of the generic
+        no-root-cause fallback. `_format_report` is what states the true,
+        structurally-derived verification outcome in that case instead of
+        trusting the model's own wording."""
         ungrounded = _ungrounded_identifiers(action, investigation)
         if ungrounded:
             # Don't accept an unverified claim at face value — the same
@@ -1257,6 +1291,33 @@ class AgentOrchestrator:
                 tool_id=pending["tool_id"],
             )
             return None
+
+        if not final_chance:
+            verdict = await self._self_critique_conclude(investigation, action, llm)
+            if verdict is not None and not verdict.sound:
+                note = (
+                    f"A second review of your draft conclusion found a problem: "
+                    f"{verdict.issue or 'it does not follow from the evidence gathered.'} "
+                    "Revise your conclusion so it only states what the evidence actually "
+                    "supports."
+                )
+                investigation.transcript.append(
+                    {
+                        "tool_id": "internal.self_critique_check",
+                        "reason": "A second review of the conclusion before reporting it.",
+                        "result": {"issue": verdict.issue, "message": note},
+                    }
+                )
+                issue_text = verdict.issue or "did not follow from the evidence"
+                self._append_evidence_once(
+                    investigation, f"(a draft conclusion was rejected on review — {issue_text})"
+                )
+                logger.warning(
+                    "conclusion_rejected_self_critique",
+                    investigation_id=investigation.investigation_id,
+                    issue=verdict.issue,
+                )
+                return None
 
         investigation.status = self._conclusion_stage(investigation)
         if action.likely_root_cause:

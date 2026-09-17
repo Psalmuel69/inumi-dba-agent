@@ -16,7 +16,12 @@ from typing import Any
 import pytest
 
 from inumi.agent.llm.base import StructuredLLMProvider
-from inumi.agent.planner.actions import AskClarification, IntentExtraction, ProposeToolCall
+from inumi.agent.planner.actions import (
+    AskClarification,
+    CritiqueVerdict,
+    IntentExtraction,
+    ProposeToolCall,
+)
 
 
 class _FakeStructuredProvider(StructuredLLMProvider):
@@ -239,3 +244,79 @@ async def test_a_single_decision_never_exceeds_the_overall_deadline():
     elapsed = time.monotonic() - start
     assert isinstance(action, AskClarification)
     assert elapsed < 2.0  # nowhere near the real 10s sleep or a 20s default deadline
+
+
+@pytest.mark.asyncio
+async def test_critique_conclusion_returns_a_sound_verdict():
+    provider = _FakeStructuredProvider(tool_result={"sound": True})
+    verdict = await provider.critique_conclusion(
+        problem_statement="check health",
+        transcript=[],
+        proposed_summary="High CPU driven by a runaway query.",
+        proposed_root_cause="Missing index on Orders.CustomerId",
+        proposed_confidence="likely",
+        proposed_recommendation="Add the index.",
+    )
+    assert isinstance(verdict, CritiqueVerdict)
+    assert verdict.sound is True
+
+
+@pytest.mark.asyncio
+async def test_critique_conclusion_returns_an_unsound_verdict_with_its_issue():
+    provider = _FakeStructuredProvider(
+        tool_result={"sound": False, "issue": "No tool result ever mentioned CustomerId."}
+    )
+    verdict = await provider.critique_conclusion(
+        problem_statement="check health",
+        transcript=[],
+        proposed_summary="High CPU.",
+        proposed_root_cause="Missing index on Orders.CustomerId",
+        proposed_confidence="likely",
+        proposed_recommendation=None,
+    )
+    assert verdict.sound is False
+    assert verdict.issue == "No tool result ever mentioned CustomerId."
+
+
+@pytest.mark.asyncio
+async def test_critique_conclusion_retries_a_malformed_completion_once():
+    class _OnceMalformedProvider(_FakeStructuredProvider):
+        _CALL_RETRY_DELAY_SECONDS = 0
+
+        def __init__(self):
+            super().__init__()
+            self._responses = [{"issue": "missing the required sound field"}, {"sound": True}]
+
+        async def _call_tool(self, *, system, user, schema, tool_name):
+            self.call_count += 1
+            return self._responses.pop(0)
+
+    provider = _OnceMalformedProvider()
+    verdict = await provider.critique_conclusion(
+        problem_statement="p",
+        transcript=[],
+        proposed_summary="s",
+        proposed_root_cause=None,
+        proposed_confidence="unable_to_confirm",
+        proposed_recommendation=None,
+    )
+    assert verdict.sound is True
+    assert provider.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_critique_conclusion_propagates_a_persistent_failure():
+    """Deliberately does NOT degrade like decide_next_action does —
+    `orchestrator._self_critique_conclude` is the one place that turns any
+    exception here into "fail open, accept the conclusion" (see its own
+    docstring); this layer has nothing useful to do differently."""
+    provider = _FakeStructuredProvider(tool_error=RuntimeError("persistent outage"))
+    with pytest.raises(RuntimeError, match="persistent outage"):
+        await provider.critique_conclusion(
+            problem_statement="p",
+            transcript=[],
+            proposed_summary="s",
+            proposed_root_cause=None,
+            proposed_confidence="unable_to_confirm",
+            proposed_recommendation=None,
+        )

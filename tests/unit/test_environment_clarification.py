@@ -23,7 +23,7 @@ import pytest
 from inumi.agent.context_manager import ContextManager, InvestigationState
 from inumi.agent.llm.registry import LLMRegistry
 from inumi.agent.orchestrator import AgentOrchestrator
-from inumi.agent.planner.actions import AskClarification, Conclude, IntentExtraction
+from inumi.agent.planner.actions import AskClarification, Conclude, CritiqueVerdict, IntentExtraction
 
 
 class _FakeToolClient:
@@ -68,6 +68,9 @@ class _FakeLLM:
     async def decide_next_action(self, **kwargs):
         self.decide_calls += 1
         return self._decide_action
+
+    async def critique_conclusion(self, **kwargs):
+        return CritiqueVerdict(sound=True)
 
 
 def _orchestrator(llm, servers=None) -> tuple[AgentOrchestrator, ContextManager]:
@@ -249,6 +252,9 @@ class _SequencedFakeLLM:
     async def decide_next_action(self, **kwargs):
         return Conclude(summary="Investigated.")
 
+    async def critique_conclusion(self, **kwargs):
+        return CritiqueVerdict(sound=True)
+
 
 @pytest.mark.asyncio
 async def test_a_later_fresh_investigation_never_reasks_for_an_already_known_environment():
@@ -393,6 +399,9 @@ class _Turn2AsksThenConcludesLLM:
             return AskClarification(question="Which server is the replication check for?")
         return Conclude(summary="Investigated.")
 
+    async def critique_conclusion(self, **kwargs):
+        return CritiqueVerdict(sound=True)
+
 
 @pytest.mark.asyncio
 async def test_the_live_three_turn_sequence_is_handled_correctly_given_one_stable_conversation():
@@ -476,6 +485,9 @@ class _StaleClarificationThenFreshInstructionLLM:
         if self._decide_calls == 1:
             return AskClarification(question="What do you mean by 'blah' / 'the thing'?")
         return Conclude(summary="Dropped the test database on postgres-local as requested.")
+
+    async def critique_conclusion(self, **kwargs):
+        return CritiqueVerdict(sound=True)
 
 
 @pytest.mark.asyncio

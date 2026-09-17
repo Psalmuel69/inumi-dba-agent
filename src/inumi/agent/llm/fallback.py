@@ -66,7 +66,12 @@ from inumi.agent.llm.base import (
     LLMProvider,
     LLMProviderUnavailableError,
 )
-from inumi.agent.planner.actions import AgentAction, AskClarification, IntentExtraction
+from inumi.agent.planner.actions import (
+    AgentAction,
+    AskClarification,
+    CritiqueVerdict,
+    IntentExtraction,
+)
 from inumi.common.observability import get_logger
 
 logger = get_logger(__name__)
@@ -385,3 +390,12 @@ class CrossProviderFallbackLLM(LLMProvider):
 
     async def list_models(self) -> list[str]:
         return await self._primary.list_models()
+
+    async def critique_conclusion(self, **kwargs) -> CritiqueVerdict:
+        """Also deliberately NOT part of the fallback walk, for the same
+        reason as `summarize_for_human` just above: a critique failing is
+        "skip it, accept the conclusion" (see
+        `orchestrator._self_critique_conclude`), never "the DBA gets
+        stuck" — not worth another vendor's slice of the decision-bounding
+        deadline. `orchestrator.py` catches whatever this raises anyway."""
+        return await self._primary.critique_conclusion(**kwargs)
