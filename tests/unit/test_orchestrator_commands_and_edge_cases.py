@@ -17,10 +17,10 @@ from __future__ import annotations
 
 import pytest
 
-from inumi.agent.context_manager import ContextManager, ConversationState, InvestigationState, PendingApproval
+from inumi.agent.context_manager import ContextManager, InvestigationState, PendingApproval
 from inumi.agent.llm.registry import LLMRegistry
 from inumi.agent.orchestrator import AgentOrchestrator
-from inumi.agent.planner.actions import AskClarification, IntentExtraction
+from inumi.agent.planner.actions import IntentExtraction
 from inumi.common.config import Settings
 from inumi.common.models.tool import ToolCallResponse, ToolCallStatus
 
@@ -166,7 +166,12 @@ async def test_slash_reject_with_the_matching_id_actually_rejects():
 @pytest.mark.asyncio
 async def test_slash_servers_lists_registered_servers():
     servers = [
-        {"id": "postgres-local", "environment": "development", "platform": "postgresql", "criticality": "standard"}
+        {
+            "id": "postgres-local",
+            "environment": "development",
+            "platform": "postgresql",
+            "criticality": "standard",
+        }
     ]
     orchestrator = _orchestrator(servers=servers)
 
@@ -235,7 +240,9 @@ async def test_slash_catalog_renders_full_catalog_data_including_least_privilege
 
 @pytest.mark.asyncio
 async def test_slash_catalog_for_an_undiscovered_server_says_to_run_discover():
-    orchestrator = _orchestrator(catalog={"sqlserver-dev-01": {"server": {"id": "sqlserver-dev-01"}, "catalog": None}})
+    orchestrator = _orchestrator(
+        catalog={"sqlserver-dev-01": {"server": {"id": "sqlserver-dev-01"}, "catalog": None}}
+    )
 
     reply = await orchestrator.handle_message(
         channel="slack", channel_account_id="U123", conversation_id="conv1",

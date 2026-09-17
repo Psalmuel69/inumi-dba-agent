@@ -17,8 +17,8 @@ import pytest
 
 from inumi.agent.llm.anthropic_provider import AnthropicLLMProvider
 from inumi.agent.llm.gemini_provider import (
-    _MAX_COOLDOWN_SECONDS,
     _DEFAULT_COOLDOWN_SECONDS,
+    _MAX_COOLDOWN_SECONDS,
     _MODEL_FALLBACK_CHAIN,
     GeminiLLMProvider,
     _clean_schema,
@@ -41,7 +41,13 @@ class _FakeOpenAIClient:
     a tool call always passes `tools=`/`tool_choice=`, a text call never
     does."""
 
-    def __init__(self, *, tool_args_json: str = "{}", text_content: str | None = "hi", model_ids: list[str] | None = None):
+    def __init__(
+        self,
+        *,
+        tool_args_json: str = "{}",
+        text_content: str | None = "hi",
+        model_ids: list[str] | None = None,
+    ):
         self._tool_args_json = tool_args_json
         self._text_content = text_content
         self._model_ids = model_ids or []
@@ -262,7 +268,10 @@ async def test_gemini_call_tool_extracts_function_call_args():
         generate_response=_gemini_response(function_call_args={"action": "conclude"})
     )
     result = await provider._call_tool(
-        system="s", user="u", schema={"type": "object", "properties": {"action": {"type": "string"}}}, tool_name="submit"
+        system="s",
+        user="u",
+        schema={"type": "object", "properties": {"action": {"type": "string"}}},
+        tool_name="submit",
     )
     assert result == {"action": "conclude"}
 
@@ -294,10 +303,14 @@ async def test_gemini_list_models_filters_by_min_version_and_capability():
     provider = _gemini_provider()
     items = [
         SimpleNamespace(name="models/gemini-3.6-flash", supported_actions=["generateContent"]),
-        SimpleNamespace(name="models/gemini-2.5-flash", supported_actions=["generateContent"]),  # below min version
-        SimpleNamespace(name="models/gemini-3.7-flash", supported_actions=["embedContent"]),  # wrong capability
-        SimpleNamespace(name="models/text-bison", supported_actions=["generateContent"]),  # not gemini at all
-        SimpleNamespace(name="models/gemini-3.8-flash", supported_actions=[]),  # no actions listed -> included
+        # below min version
+        SimpleNamespace(name="models/gemini-2.5-flash", supported_actions=["generateContent"]),
+        # wrong capability
+        SimpleNamespace(name="models/gemini-3.7-flash", supported_actions=["embedContent"]),
+        # not gemini at all
+        SimpleNamespace(name="models/text-bison", supported_actions=["generateContent"]),
+        # no actions listed -> included
+        SimpleNamespace(name="models/gemini-3.8-flash", supported_actions=[]),
     ]
     provider._client = _FakeGeminiClient(list_items=items)
     assert await provider.list_models() == ["gemini-3.6-flash", "gemini-3.8-flash"]
