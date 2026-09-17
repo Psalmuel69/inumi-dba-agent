@@ -54,7 +54,15 @@ def test_a_tampered_token_is_rejected():
     verifier = ServiceTokenVerifier("shared-secret", "inumi-internal")
 
     token = issuer.issue(service_name="agent", audience="inumi-gateway")
-    tampered = token[:-1] + ("A" if token[-1] != "A" else "B")
+    # Flip a character well inside the string, not the last one: an
+    # unpadded base64url string's trailing character can carry unused
+    # padding bits, so mutating it doesn't always change the decoded bytes
+    # (verified live: passed locally, failed in CI on a token whose length
+    # happened to land in that insensitive case).
+    middle = len(token) // 2
+    replacement = "A" if token[middle] != "A" else "B"
+    tampered = token[:middle] + replacement + token[middle + 1 :]
+    assert tampered != token
 
     with pytest.raises(InumiError) as exc_info:
         verifier.verify(tampered, expected_audience="inumi-gateway")
