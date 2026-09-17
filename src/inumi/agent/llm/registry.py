@@ -15,6 +15,7 @@ interface.
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Literal
 
 from inumi.agent.llm.anthropic_provider import AnthropicLLMProvider
 from inumi.agent.llm.base import LLMProvider
@@ -63,6 +64,19 @@ class LLMRegistry:
 
     def default(self) -> tuple[str, str]:
         return self._settings.effective_default_llm()
+
+    def tier_model(self, call_type: Literal["fast", "strong"]) -> str | None:
+        """The model id a task-complexity tier resolves to, within
+        whatever provider the conversation already has — `None` (not an
+        empty string) means "no tier configured, use the provider's own
+        default," so callers can tell "no override" apart from "override
+        to the provider default" without a second sentinel."""
+        model = (
+            self._settings.llm_fast_model
+            if call_type == "fast"
+            else self._settings.llm_strong_model
+        )
+        return model or None
 
     async def list_models(self, provider: str) -> list[str]:
         if provider not in self._keys or not self._keys[provider].strip():

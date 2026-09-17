@@ -15,6 +15,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import re
+from typing import Literal
 
 from inumi.agent.context_manager import (
     ContextManager,
@@ -415,7 +416,9 @@ class AgentOrchestrator:
         self._tool_client = tool_client
         self._context = context
 
-    def _llm_for(self, state: ConversationState) -> LLMProvider:
+    def _llm_for(
+        self, state: ConversationState, call_type: Literal["fast", "strong"] = "strong"
+    ) -> LLMProvider:
         """The provider this conversation's next LLM call should use.
 
         `resilient_for_conversation` (not `for_conversation`) so that a
@@ -429,15 +432,31 @@ class AgentOrchestrator:
         the offline mock planner and for single-provider deployments, so
         neither pays anything for this.
 
+        `call_type` proactively picks a model tier (see
+        `LLMRegistry.tier_model`) — cheap for `extract_intent`-style calls,
+        strong for `decide_next_action`/critique — but ONLY when the DBA
+        hasn't made an explicit `/model` choice (`state.llm_provider is
+        None and state.llm_model is None`, the exact existing lock
+        condition): an explicit choice is never silently overridden by a
+        tier default. A deployment-level provider lock (`Settings.
+        llm_provider`) doesn't disable this either — that only constrains
+        which vendor is used; `state.llm_provider`/`llm_model` stay `None`
+        in that case, so tiering still applies within the locked vendor.
+        Both tier settings are empty by default, so a zero-config
+        deployment resolves the exact same model as before this existed.
+
         `state.llm_fallback_notices` is the sink: anything recorded there
         while answering the current message is disclosed to the DBA by
         `handle_message` below. A fresh wrapper per call is deliberate —
         it keeps that sink per-message rather than shared across
         concurrent conversations (the real provider objects underneath are
         still the registry's cached ones)."""
+        model = state.llm_model
+        if state.llm_provider is None and state.llm_model is None:
+            model = self._llm_registry.tier_model(call_type)
         return self._llm_registry.resilient_for_conversation(
             provider=state.llm_provider,
-            model=state.llm_model,
+            model=model,
             notices=state.llm_fallback_notices,
         )
 
@@ -624,7 +643,7 @@ class AgentOrchestrator:
             investigation.last_message = message
             return await self._continue_investigation(state, investigation, channel, channel_account_id)
 
-        llm = self._llm_for(state)
+        llm = self._llm_for(state, call_type="fast")
         intent = await llm.extract_intent(
             message,
             known_database_names=await self._known_database_names(),
@@ -667,7 +686,7 @@ class AgentOrchestrator:
         plausibly be a fresh instruction, not on the common case."""
         if len(message.split()) < 4:
             return None
-        llm = self._llm_for(state)
+        llm = self._llm_for(state, call_type="fast")
         intent = await llm.extract_intent(
             message,
             known_database_names=await self._known_database_names(),
@@ -1190,7 +1209,18 @@ class AgentOrchestrator:
         retries) must never be worse than not having critiqued at all; only
         an actual working `sound=False` verdict rejects. Gated by
         `Settings.self_critique_enabled` as a cheaper-than-a-redeploy kill
-        switch if this misbehaves in production."""
+        switch if this misbehaves in production.
+
+        Deliberately reuses the ambient `llm` from the caller rather than
+        re-resolving its own — `_continue_investigation` always resolves
+        `llm` at the default `call_type="strong"` (it's only ever
+        overridden to `"fast"` at the two `extract_intent` call sites, well
+        before an investigation loop or a Conclude exists), so the
+        provider critiquing a conclusion is already the same strong tier
+        that proposed it; a second resolution here would be redundant, not
+        safer, and would break the many existing tests that inject one
+        `llm` test double directly into `_run_investigation_loop` without
+        going through `LLMRegistry` at all."""
         if not get_settings().self_critique_enabled:
             return None
         try:

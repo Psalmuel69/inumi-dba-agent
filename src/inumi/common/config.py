@@ -93,6 +93,15 @@ class Settings(BaseSettings):
     llm_model: str = ""
     # Whether the `/model` command lets a DBA switch provider/model mid-chat.
     allow_user_model_selection: bool = True
+    # Task-complexity tiering (see agent.llm.registry.LLMRegistry.tier_model
+    # and orchestrator._llm_for): route cheap calls (extract_intent) to
+    # llm_fast_model and hard calls (decide_next_action, critique) to
+    # llm_strong_model, within whatever provider is already resolved for
+    # the conversation — never overriding an explicit `/model` choice.
+    # Both empty by default, so a zero-config deployment sees no behavior
+    # change at all.
+    llm_fast_model: str = ""
+    llm_strong_model: str = ""
 
     service_jwt_secret: str = "dev-only-insecure-secret-change-me"
     service_jwt_issuer: str = "inumi-internal"
