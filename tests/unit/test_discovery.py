@@ -17,7 +17,7 @@ from inumi.execution.discovery.base import (
     build_least_privilege_finding,
     run_least_privilege_check,
 )
-from inumi.execution.discovery.engine import _discoverer_for
+from inumi.execution.discovery.engine import _discoverer_for, run_discovery
 from inumi.execution.discovery.mysql import MySQLDiscoverer
 from inumi.execution.discovery.postgresql import PostgreSQLDiscoverer
 from inumi.execution.discovery.sqlserver import SQLServerDiscoverer, _quote
@@ -35,6 +35,35 @@ def test_dispatch_picks_the_right_discoverer():
 def test_dispatch_raises_for_an_unregistered_engine():
     with pytest.raises(NotImplementedError):
         _discoverer_for(Platform.ORACLE)
+
+
+async def test_run_discovery_returns_a_clean_warning_instead_of_raising_on_connection_failure(
+    monkeypatch,
+):
+    """Verified live: a genuinely offline dev target made discover() raise
+    past this dispatcher as an unhandled exception, surfacing at the API
+    layer as a raw 500 with a driver traceback instead of the "nothing
+    learned this crawl" outcome the rest of discovery already treats as
+    non-fatal (gateway.domain.discovery's lazy_discovery_failed expects to
+    catch a clean exception, not have one leak driver internals). Every
+    platform funnels through this one dispatcher, so the catch belongs
+    here — mirrors ExecutionService.execute()'s same posture."""
+
+    async def _raise_connection_refused(self, server_id):
+        raise ConnectionRefusedError("connection refused")
+
+    monkeypatch.setattr(PostgreSQLDiscoverer, "discover", _raise_connection_refused)
+
+    catalog = await run_discovery(
+        server_id="postgres-dev-01",
+        platform=Platform.POSTGRESQL,
+        credentials=_credentials("postgres"),
+    )
+
+    assert catalog.server_id == "postgres-dev-01"
+    assert catalog.databases == []
+    assert len(catalog.warnings) == 1
+    assert "Could not connect" in catalog.warnings[0]
 
 
 def test_sqlserver_identifier_quoting_is_injection_safe():
