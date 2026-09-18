@@ -5,6 +5,8 @@ the same "look up, degrade to nothing rather than fail hard" shape as
 
 from __future__ import annotations
 
+import datetime as dt
+
 from inumi.common.models.investigation import InvestigationMemoryEntry
 from inumi.common.observability import get_logger
 from inumi.gateway.domain.investigation_store import InvestigationStore
@@ -52,6 +54,57 @@ class InvestigationMemory:
         return [
             InvestigationMemoryEntry(
                 investigation_id=r.investigation_id,
+                server_id=r.server_id,
+                problem=r.problem,
+                status=r.status,
+                findings=r.findings,
+                recommendations=r.recommendations,
+                updated_at=r.updated_at,
+            )
+            for r in records
+            if r.status.startswith(_CONCLUDED_PREFIX)
+        ][:limit]
+
+    async def correlate(
+        self,
+        *,
+        playbook_id: str | None,
+        environment: str | None = None,
+        exclude_server_id: str | None = None,
+        since: dt.datetime | None = None,
+        limit: int = 5,
+    ) -> list[InvestigationMemoryEntry]:
+        """Cross-server pattern correlation — "this same symptom happened
+        on N other servers recently." Structural only: matches by shared
+        `playbook_id` (the deterministic scenario match
+        `agent.playbooks.library.match_playbook` already makes) and
+        optionally `environment`, never fuzzy text similarity — there is no
+        embeddings/vector-search infrastructure anywhere in this codebase,
+        and building one is a much larger, separate investment than this
+        feature implies. `None` means no playbook matched (a fully freeform
+        investigation), which has no meaningful scenario to correlate on —
+        returns `[]` immediately rather than querying "every investigation
+        with no playbook", which isn't a real pattern."""
+        if not playbook_id:
+            return []
+        try:
+            records = await self._store.find_similar(
+                playbook_id=playbook_id,
+                environment=environment,
+                exclude_server_id=exclude_server_id,
+                since=since,
+                limit=limit * 4,
+            )
+        except Exception as exc:  # noqa: BLE001 — same posture as recall(): an
+            # enhancement, never a dependency.
+            logger.warning(
+                "investigation_correlation_lookup_failed", playbook_id=playbook_id, error=str(exc)
+            )
+            return []
+        return [
+            InvestigationMemoryEntry(
+                investigation_id=r.investigation_id,
+                server_id=r.server_id,
                 problem=r.problem,
                 status=r.status,
                 findings=r.findings,

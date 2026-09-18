@@ -8,6 +8,8 @@ Agent recorded.
 
 from __future__ import annotations
 
+import datetime as dt
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from inumi.common.models.investigation import (
@@ -29,6 +31,8 @@ def _serialize(record: InvestigationRecord) -> dict:
         "investigation_id": record.investigation_id,
         "conversation_id": record.conversation_id,
         "server_id": record.server_id,
+        "playbook_id": record.playbook_id,
+        "environment": record.environment,
         "target": record.target,
         "problem": record.problem,
         "status": record.status,
@@ -51,6 +55,29 @@ async def get_investigation_memory(
 ) -> list[dict]:
     entries = await state.investigation_memory.recall(
         server_id, exclude_investigation_id=exclude_investigation_id, limit=limit
+    )
+    return [e.model_dump(mode="json") for e in entries]
+
+
+@router.get("/correlate")
+async def correlate_investigations(
+    playbook_id: str = Query(...),
+    environment: str | None = Query(default=None),
+    exclude_server_id: str | None = Query(default=None),
+    limit: int = Query(default=5, ge=0, le=20),
+    state: GatewayState = Depends(get_state),
+) -> list[dict]:
+    if not state.settings.cross_server_correlation_enabled:
+        return []
+    since = dt.datetime.now(dt.UTC) - dt.timedelta(
+        days=state.settings.cross_server_correlation_lookback_days
+    )
+    entries = await state.investigation_memory.correlate(
+        playbook_id=playbook_id,
+        environment=environment,
+        exclude_server_id=exclude_server_id,
+        since=since,
+        limit=limit,
     )
     return [e.model_dump(mode="json") for e in entries]
 

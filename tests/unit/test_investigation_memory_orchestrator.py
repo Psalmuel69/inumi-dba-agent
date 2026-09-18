@@ -38,11 +38,18 @@ def _tool_def(tool_id: str, operation_type=OperationType.READ) -> ToolDefinition
 
 
 class _FakeToolClient:
-    def __init__(self, *, memory_entries: list[InvestigationMemoryEntry] | None = None):
+    def __init__(
+        self,
+        *,
+        memory_entries: list[InvestigationMemoryEntry] | None = None,
+        cross_server_patterns: list[InvestigationMemoryEntry] | None = None,
+    ):
         self.create_calls: list = []
         self.update_calls: list = []
         self.memory_calls: list = []
+        self.correlate_calls: list = []
         self._memory_entries = memory_entries or []
+        self._cross_server_patterns = cross_server_patterns or []
 
     async def available_tools(self, channel, channel_account_id):
         return [_tool_def("database.get_health")]
@@ -56,6 +63,12 @@ class _FakeToolClient:
     async def get_investigation_memory(self, server_id, *, exclude_investigation_id=None, limit=3):
         self.memory_calls.append((server_id, exclude_investigation_id, limit))
         return self._memory_entries
+
+    async def get_cross_server_patterns(
+        self, *, playbook_id, environment=None, exclude_server_id=None, limit=5
+    ):
+        self.correlate_calls.append((playbook_id, environment, exclude_server_id, limit))
+        return self._cross_server_patterns
 
 
 def _orchestrator(tool_client, llm) -> AgentOrchestrator:
@@ -196,3 +209,40 @@ def test_problem_statement_includes_memory_context_labeled_as_background():
 
     assert "background only, not verified findings for THIS investigation" in problem
     assert "runaway autovacuum" in problem
+
+
+@pytest.mark.asyncio
+async def test_a_matched_playbook_fetches_and_folds_in_cross_server_patterns():
+    pattern = InvestigationMemoryEntry(
+        investigation_id="inv_other",
+        server_id="sqlserver-dev-02",
+        problem="slow queries last month",
+        status="CONCLUDED_VERIFIED",
+        findings=["missing index"],
+        recommendations=["add index"],
+        updated_at="2026-03-01T00:00:00Z",
+    )
+    tool_client = _FakeToolClient(cross_server_patterns=[pattern])
+    llm = _FakeLLM(actions=[Conclude(summary="done")])
+    orchestrator = _orchestrator(tool_client, llm)
+    state, investigation = _state_and_investigation()
+    investigation.playbook_id = "slow_queries"
+
+    await orchestrator._continue_investigation(state, investigation, "dev", "dba_l2@example.com")
+
+    assert tool_client.correlate_calls == [("slow_queries", "development", "postgres-dev-01", 5)]
+    server_ids = [m["server_id"] for m in investigation.memory_context]
+    assert "sqlserver-dev-02" in server_ids
+
+
+@pytest.mark.asyncio
+async def test_no_playbook_match_skips_cross_server_correlation_entirely():
+    tool_client = _FakeToolClient()
+    llm = _FakeLLM(actions=[Conclude(summary="done")])
+    orchestrator = _orchestrator(tool_client, llm)
+    state, investigation = _state_and_investigation()
+    assert investigation.playbook_id is None
+
+    await orchestrator._continue_investigation(state, investigation, "dev", "dba_l2@example.com")
+
+    assert tool_client.correlate_calls == []

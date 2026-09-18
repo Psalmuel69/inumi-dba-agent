@@ -954,6 +954,8 @@ class AgentOrchestrator:
             investigation.investigation_id,
             InvestigationUpdateRequest(
                 server_id=state.database_context.get("instance"),
+                playbook_id=investigation.playbook_id,
+                environment=state.database_context.get("environment"),
                 target=dict(state.database_context),
                 status=investigation.effective_status,
                 evidence=investigation.evidence,
@@ -971,27 +973,34 @@ class AgentOrchestrator:
         """One-time, best-effort hook covering every path into
         `_continue_investigation` (interactive, resumed, the scheduled
         digest, and an alert-triggered run): tells the Gateway this
-        investigation exists, and — if a specific server is already known —
-        recalls recent, concluded findings for it into
+        investigation exists, and folds two kinds of background into
         `investigation.memory_context` (see that field's own docstring for
-        why it's kept separate from `evidence`). Guarded by
-        `remote_bootstrap_done` since this must run exactly once per
-        investigation, not on every resumed turn."""
+        why it's kept separate from `evidence`) — recent, concluded
+        findings for the SAME server (Phase 1), and, when a playbook
+        matched, similar findings on OTHER servers (Phase 5 cross-server
+        correlation, tagged with their own `server_id` so the model/DBA can
+        tell the two apart). Guarded by `remote_bootstrap_done` since this
+        must run exactly once per investigation, not on every resumed
+        turn."""
         if investigation.remote_bootstrap_done:
             return
         investigation.remote_bootstrap_done = True
         server_id = state.database_context.get("instance")
+        environment = state.database_context.get("environment")
         await self._tool_client.create_investigation(
             InvestigationCreateRequest(
                 investigation_id=investigation.investigation_id,
                 conversation_id=state.conversation_id,
                 user_subject_id=channel_account_id,
                 server_id=server_id,
+                playbook_id=investigation.playbook_id,
+                environment=environment,
                 target=dict(state.database_context),
                 problem=investigation.problem,
                 status=investigation.status,
             )
         )
+        memory_context: list[dict] = []
         lookback = get_settings().investigation_memory_lookback
         if server_id and lookback > 0:
             entries = await self._tool_client.get_investigation_memory(
@@ -999,7 +1008,15 @@ class AgentOrchestrator:
                 exclude_investigation_id=investigation.investigation_id,
                 limit=lookback,
             )
-            investigation.memory_context = [e.model_dump(mode="json") for e in entries]
+            memory_context.extend(e.model_dump(mode="json") for e in entries)
+        if investigation.playbook_id:
+            patterns = await self._tool_client.get_cross_server_patterns(
+                playbook_id=investigation.playbook_id,
+                environment=environment,
+                exclude_server_id=server_id,
+            )
+            memory_context.extend(e.model_dump(mode="json") for e in patterns)
+        investigation.memory_context = memory_context
 
     async def _run_investigation_loop(
         self,
@@ -1503,15 +1520,21 @@ class AgentOrchestrator:
             # only ever checks this investigation's own `evidence`/
             # `transcript`, so citing something from here without actually
             # re-confirming it this time will still get rejected as
-            # ungrounded, which is deliberate.
+            # ungrounded, which is deliberate. Each entry names the server
+            # it actually happened on (same-server recall and cross-server
+            # correlation are folded into the same list — see
+            # `_bootstrap_investigation_memory`), so a DBA/model reading
+            # this can tell "this happened here before" apart from "this
+            # happened elsewhere too".
             lines = "\n".join(
-                f"- ({m['status']}) {m['problem']!r} — findings: {m['findings']}; "
+                f"- [server: {m.get('server_id') or 'unknown'}] ({m['status']}) "
+                f"{m['problem']!r} — findings: {m['findings']}; "
                 f"recommendations: {m['recommendations']}"
                 for m in investigation.memory_context
             )
             problem += (
                 "\n\nFor background only, not verified findings for THIS "
-                "investigation — prior investigations on this server:\n"
+                "investigation — related prior investigations:\n"
                 f"{lines}"
             )
         if investigation.last_message:

@@ -157,3 +157,53 @@ async def test_append_event_persists_a_row(database):
     assert len(rows) == 1
     assert rows[0].event_type == "OBSERVATION"
     assert rows[0].payload == {"note": "high wait events"}
+
+
+@pytest.mark.asyncio
+async def test_find_similar_matches_by_playbook_id(database):
+    store = DbInvestigationStore(database.session_factory)
+    await store.create(**_fields("inv_1", playbook_id="slow_queries", server_id="server-a"))
+    await store.create(**_fields("inv_2", playbook_id="high_cpu", server_id="server-b"))
+
+    matches = await store.find_similar(playbook_id="slow_queries")
+
+    assert [m.investigation_id for m in matches] == ["inv_1"]
+
+
+@pytest.mark.asyncio
+async def test_find_similar_excludes_the_asking_server(database):
+    store = DbInvestigationStore(database.session_factory)
+    await store.create(**_fields("inv_1", playbook_id="slow_queries", server_id="server-a"))
+    await store.create(**_fields("inv_2", playbook_id="slow_queries", server_id="server-b"))
+
+    matches = await store.find_similar(playbook_id="slow_queries", exclude_server_id="server-a")
+
+    assert [m.investigation_id for m in matches] == ["inv_2"]
+
+
+@pytest.mark.asyncio
+async def test_find_similar_filters_by_environment_when_given(database):
+    store = DbInvestigationStore(database.session_factory)
+    await store.create(
+        **_fields("inv_1", playbook_id="slow_queries", server_id="server-a", environment="production")
+    )
+    await store.create(
+        **_fields("inv_2", playbook_id="slow_queries", server_id="server-b", environment="development")
+    )
+
+    matches = await store.find_similar(playbook_id="slow_queries", environment="production")
+
+    assert [m.investigation_id for m in matches] == ["inv_1"]
+
+
+@pytest.mark.asyncio
+async def test_find_similar_respects_a_since_cutoff(database):
+    import datetime as dt
+
+    store = DbInvestigationStore(database.session_factory)
+    await store.create(**_fields("inv_1", playbook_id="slow_queries", server_id="server-a"))
+
+    future_since = dt.datetime.now(dt.UTC) + dt.timedelta(hours=1)
+    matches = await store.find_similar(playbook_id="slow_queries", since=future_since)
+
+    assert matches == []

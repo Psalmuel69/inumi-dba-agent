@@ -179,6 +179,12 @@ class InvestigationRecord(Base):
     # cross-server correlation can query by server directly rather than
     # scanning/filtering JSON — see migration 0003.
     server_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True, default=None)
+    # Same reasoning, for cross-server correlation's other two filters (see
+    # migration 0005 and gateway.domain.investigation_store.find_similar).
+    # None means either freeform (no playbook matched) or predates this
+    # column — never treated as "matches everything".
+    playbook_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True, default=None)
+    environment: Mapped[str | None] = mapped_column(String, nullable=True, index=True, default=None)
     target: Mapped[dict] = mapped_column(JSON, default=dict)
     problem: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(String, default="INVESTIGATING")

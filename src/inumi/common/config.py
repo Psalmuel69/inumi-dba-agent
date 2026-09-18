@@ -68,6 +68,14 @@ class Settings(BaseSettings):
     # switch for the same reason as the two above: never worth blocking a
     # deploy over telemetry.
     decision_event_logging_enabled: bool = True
+    # Cross-server pattern correlation ("this same symptom happened on N
+    # other servers recently") — see gateway.domain.investigation_memory
+    # .correlate. Gateway-side kill switch (checked in the /correlate
+    # route itself, the authoritative enforcement point, same posture as
+    # other feature flags in this file) and a lookback window so "recently"
+    # means something bounded, not an unbounded historical scan.
+    cross_server_correlation_enabled: bool = True
+    cross_server_correlation_lookback_days: int = Field(default=30, ge=0)
     # Crawl every registered server once at Gateway startup. Off by default:
     # the catalog also refreshes lazily on first use and via `/discover`, and
     # an eager crawl slows startup / adds load. Turn on for an always-warm

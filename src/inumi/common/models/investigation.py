@@ -19,6 +19,8 @@ class InvestigationCreateRequest(BaseModel):
     conversation_id: str
     user_subject_id: str
     server_id: str | None = None
+    playbook_id: str | None = None
+    environment: str | None = None
     target: dict[str, Any] = Field(default_factory=dict)
     problem: str = ""
     status: str = "INVESTIGATING"
@@ -32,6 +34,8 @@ class InvestigationUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     server_id: str | None = None
+    playbook_id: str | None = None
+    environment: str | None = None
     target: dict[str, Any] | None = None
     status: str | None = None
     evidence: list[Any] | None = None
@@ -49,14 +53,20 @@ class InvestigationEventCreateRequest(BaseModel):
 
 
 class InvestigationMemoryEntry(BaseModel):
-    """A recalled past investigation on the same server — background
-    context for the LLM's problem statement, never grounding evidence (see
-    `agent.orchestrator._ungrounded_identifiers`'s own docstring for why
-    that distinction matters)."""
+    """A recalled past investigation — either on the same server (Phase 1
+    memory recall, `server_id` here always equals the asking server) or a
+    similar one on a different server (Phase 5 cross-server correlation,
+    `server_id` names where it actually happened, so the model/DBA can
+    distinguish "this happened here before" from "this happened elsewhere
+    too"). Background context for the LLM's problem statement either way,
+    never grounding evidence (see `agent.orchestrator
+    ._ungrounded_identifiers`'s own docstring for why that distinction
+    matters)."""
 
     model_config = ConfigDict(extra="ignore")
 
     investigation_id: str
+    server_id: str | None = None
     problem: str
     status: str
     findings: list[str] = Field(default_factory=list)

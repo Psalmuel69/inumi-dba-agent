@@ -48,6 +48,11 @@ class _FakeToolClient:
     async def get_investigation_memory(self, server_id, *, exclude_investigation_id=None, limit=3):
         return []
 
+    async def get_cross_server_patterns(
+        self, *, playbook_id, environment=None, exclude_server_id=None, limit=5
+    ):
+        return []
+
 
 class _FakeLLM:
     """`extract_intent` raises by default — set `intent` to make it return

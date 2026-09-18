@@ -211,6 +211,41 @@ class ToolClient:
             logger.warning("get_investigation_memory_failed", server_id=server_id, error=str(exc))
             return []
 
+    async def get_cross_server_patterns(
+        self,
+        *,
+        playbook_id: str,
+        environment: str | None = None,
+        exclude_server_id: str | None = None,
+        limit: int = 5,
+    ) -> list[InvestigationMemoryEntry]:
+        """Best-effort, same posture as `get_investigation_memory` — a
+        lookup failure means "no cross-server pattern," never "the
+        investigation can't proceed."""
+        try:
+            async with httpx.AsyncClient(base_url=self._base_url, transport=self._transport) as client:
+                response = await client.get(
+                    "/v1/investigations/correlate",
+                    params={
+                        k: v
+                        for k, v in {
+                            "playbook_id": playbook_id,
+                            "environment": environment,
+                            "exclude_server_id": exclude_server_id,
+                            "limit": limit,
+                        }.items()
+                        if v is not None
+                    },
+                    headers=self._headers(),
+                )
+                response.raise_for_status()
+                return [InvestigationMemoryEntry.model_validate(e) for e in response.json()]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "get_cross_server_patterns_failed", playbook_id=playbook_id, error=str(exc)
+            )
+            return []
+
     async def log_decision_event(self, request: DecisionEventCreateRequest) -> None:
         """Best-effort, same posture as the four methods above — pure
         telemetry, never worth blocking or failing the caller over. On

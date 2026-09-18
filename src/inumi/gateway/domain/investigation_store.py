@@ -14,6 +14,7 @@ thin write-through store instead — every operation hits the DB directly.
 
 from __future__ import annotations
 
+import datetime as dt
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -44,6 +45,17 @@ class InvestigationStore(ABC):
 
     @abstractmethod
     async def append_event(self, investigation_id: str, event_type: str, payload: dict) -> None: ...
+
+    @abstractmethod
+    async def find_similar(
+        self,
+        *,
+        playbook_id: str,
+        environment: str | None = None,
+        exclude_server_id: str | None = None,
+        since: dt.datetime | None = None,
+        limit: int = 10,
+    ) -> list[InvestigationRecord]: ...
 
 
 class DbInvestigationStore(InvestigationStore):
@@ -110,3 +122,33 @@ class DbInvestigationStore(InvestigationStore):
                 )
             )
             await session.commit()
+
+    async def find_similar(
+        self,
+        *,
+        playbook_id: str,
+        environment: str | None = None,
+        exclude_server_id: str | None = None,
+        since: dt.datetime | None = None,
+        limit: int = 10,
+    ) -> list[InvestigationRecord]:
+        """Structural correlation only — same `playbook_id` (the
+        deterministic scenario match `agent.playbooks.library.match_playbook`
+        already makes, reused rather than a second vocabulary), optionally
+        the same `environment`, never the asking server itself. No fuzzy
+        text similarity; see `InvestigationMemory.correlate`'s own docstring
+        for why that's a deliberate v1 scope cut, not an oversight."""
+        async with self._sf() as session:
+            stmt = (
+                select(InvestigationRecord)
+                .where(InvestigationRecord.playbook_id == playbook_id)
+                .order_by(InvestigationRecord.created_at.desc())
+                .limit(limit)
+            )
+            if environment is not None:
+                stmt = stmt.where(InvestigationRecord.environment == environment)
+            if exclude_server_id is not None:
+                stmt = stmt.where(InvestigationRecord.server_id != exclude_server_id)
+            if since is not None:
+                stmt = stmt.where(InvestigationRecord.created_at >= since)
+            return list((await session.execute(stmt)).scalars().all())

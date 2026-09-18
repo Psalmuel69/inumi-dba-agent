@@ -110,3 +110,20 @@ def test_alembic_head_adds_investigations_server_id_column(tmp_path):
 
     columns = {c["name"] for c in inspect(create_engine(f"sqlite:///{db_path}")).get_columns("investigations")}
     assert "server_id" in columns
+
+
+def test_alembic_head_adds_investigations_correlation_columns(tmp_path):
+    """Same gap as the test above, for migration 0005's two columns."""
+    db_path = tmp_path / "migration_check_correlation_columns.db"
+    env = dict(os.environ, CONTROL_DB_URL=f"sqlite+aiosqlite:///{db_path}")
+    result = subprocess.run(
+        [sys.executable, "-m", "alembic", "upgrade", "head"],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+    columns = {c["name"] for c in inspect(create_engine(f"sqlite:///{db_path}")).get_columns("investigations")}
+    assert {"playbook_id", "environment"} <= columns
