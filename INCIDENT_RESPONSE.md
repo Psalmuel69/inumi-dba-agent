@@ -60,6 +60,21 @@ prompt or planner logic, not a security response. If the Gateway
 sev-1 in the Gateway's `policy_engine.py`/`tool_call_handler.py`, not the
 Agent.
 
+**Checking whether this is a one-off or a pattern.** `GET /v1/decision-
+events/summary?since_hours=24` on the Gateway returns durable, queryable
+counts of things like `conclusion_rejected_self_critique`,
+`conclusion_rejected_ungrounded_identifiers`,
+`conclusion_rejected_pending_verification`,
+`llm_cross_provider_fallback_used`, and `self_critique_call_failed`
+grouped by type — these used to exist only as log lines. A spike in
+`conclusion_rejected_*` counts means the Agent's own conclusions are
+regularly failing internal review (the system catching itself, not
+necessarily an incident); a spike in `llm_cross_provider_fallback_used`
+means a configured LLM vendor is unreliable, not that the Agent is
+misbehaving. Both `SELF_CRITIQUE_ENABLED` and `DECISION_EVENT_LOGGING_
+ENABLED` (env vars, default `true`) can be turned off without a redeploy
+if either pass itself is suspected of misbehaving.
+
 ## Rollback
 
 Every controlled write tool declares `reversible: true/false`

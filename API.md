@@ -38,9 +38,52 @@ resulting `status` (`APPROVED`, `AWAITING_SECOND_APPROVAL`, `REJECTED`).
 
 Returns the approval's current state (never the raw action hash).
 
+### `POST /v1/investigations`, `PATCH /v1/investigations/{investigation_id}`
+
+The Agent's write path for investigation state (`gateway/domain/
+investigation_store.py`) — the Gateway never fabricates evidence/findings,
+it only persists and serves back what the Agent recorded. `POST` body:
+`investigation_id`, `conversation_id`, `user_subject_id`, `server_id?`,
+`playbook_id?`, `environment?`, `target?`, `problem?`, `status?`; idempotent
+on a duplicate `investigation_id` (returns the existing row rather than
+erroring). `PATCH` takes the same fields plus `evidence`/`hypotheses`/
+`findings`/`recommendations`/`actions`, all optional — omitted fields are
+left unchanged, `404` if the id doesn't exist.
+
+### `POST /v1/investigations/{investigation_id}/events`
+
+Appends one append-only event (`event_type`, `payload`) to an
+investigation's timeline.
+
+### `GET /v1/investigations/memory/{server_id}`
+
+Recalls recent, concluded investigations for a server — background context
+an investigation's problem statement can cite, never grounding evidence for
+it. Query params: `exclude_investigation_id?`, `limit` (default 3). Set
+`INVESTIGATION_MEMORY_LOOKBACK=0` to disable recall entirely.
+
+### `GET /v1/investigations/correlate`
+
+Cross-server pattern correlation — "this same symptom happened on N other
+servers recently." Matches structurally, by shared `playbook_id` and
+optionally `environment`, never by fuzzy text similarity. Query params:
+`playbook_id` (required), `environment?`, `exclude_server_id?`, `limit`
+(default 5). Returns `[]` immediately if `CROSS_SERVER_CORRELATION_ENABLED=false`
+or if `playbook_id` is empty (a fully freeform investigation has no
+scenario to correlate on).
+
 ### `GET /v1/investigations/{investigation_id}`, `GET /v1/audit/{audit_event_id}`
 
 Read-only projections of control-plane state.
+
+### `POST /v1/decision-events`, `GET /v1/decision-events/summary`
+
+Durable storage for a handful of decision-quality signals — a conclusion
+rejected on review, a cross-provider fallback substitution — so they're a
+queryable habit, not just log lines. `POST` body: `event_type`,
+`conversation_id?`, `investigation_id?`, `provider?`, `model?`, `payload?`.
+`GET .../summary?since_hours=24` returns counts grouped by `event_type`
+since that cutoff. Gated by `DECISION_EVENT_LOGGING_ENABLED`.
 
 ### `GET /v1/catalog/servers`, `GET /v1/catalog/servers/{server_id}`
 

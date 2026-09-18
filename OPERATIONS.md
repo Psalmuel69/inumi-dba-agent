@@ -127,6 +127,25 @@ every request) or `ALERT_WEBHOOK_SLACK_CHANNEL` (the Agent no-ops even on a
 request that got through) and restart that service. No job store, no
 scheduler, nothing to clean up.
 
+## Investigation memory, self-critique, and model routing
+
+Five related, independently-switchable features, all on by default with a
+kill switch each — none require a redeploy beyond restarting the Agent (and
+Gateway, for the two Gateway-side switches):
+
+| Variable | Service | Default | What it does |
+|---|---|---|---|
+| `INVESTIGATION_MEMORY_LOOKBACK` | agent | `3` | How many recent, concluded past investigations on the same server the Agent recalls as background before starting a new one. `0` disables recall. |
+| `SELF_CRITIQUE_ENABLED` | agent | `true` | A second LLM opinion reviews a draft conclusion before it's accepted — catches a conclusion that names nothing fabricated and has nothing pending, but still doesn't follow from the evidence. A failed critique call always fails open (the conclusion is still accepted); only a working, negative verdict rejects. |
+| `DECISION_EVENT_LOGGING_ENABLED` | gateway | `true` | Persists a handful of decision-quality signals (a rejected conclusion, a cross-provider fallback substitution) as durable, queryable records instead of only structured log lines — see `GET /v1/decision-events/summary` in [API.md](API.md). |
+| `LLM_FAST_MODEL` / `LLM_STRONG_MODEL` | agent | `""` (off) | Task-complexity model routing: simple calls (classifying a message) use the fast model, investigation reasoning and self-critique use the strong one. Both empty means no behavior change at all. Never overrides a DBA's explicit `/model` choice, and never disabled by a locked `LLM_PROVIDER` — it only constrains the vendor, tiering still applies within it. |
+| `CROSS_SERVER_CORRELATION_ENABLED` | gateway | `true` | Gateway-side kill switch for `GET /v1/investigations/correlate` — "this same symptom happened on N other servers recently," matched by shared playbook + environment, never fuzzy text. |
+| `CROSS_SERVER_CORRELATION_LOOKBACK_DAYS` | gateway | `30` | How far back correlation looks. |
+
+All five degrade gracefully on their own: a Gateway hiccup while recalling
+memory or logging a decision event never blocks or fails the DBA's turn —
+worst case, the enhancement silently didn't happen that time.
+
 ## Monitoring what matters
 
 Per spec §42, track (via the OpenTelemetry wiring in

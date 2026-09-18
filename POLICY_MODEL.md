@@ -344,6 +344,17 @@ ceiling rather than adding one per provider — see
 [ARCHITECTURE.md](ARCHITECTURE.md#cross-provider-llm-fallback-when-a-whole-vendor-is-down-not-just-a-model)
 for the budget arithmetic.
 
+**Task-complexity routing** (`LLM_FAST_MODEL`/`LLM_STRONG_MODEL`, both `""`
+by default) is an orthogonal axis on top of the above, not a replacement for
+it: a simple call (classifying a message) can route to a cheaper/faster
+model while investigation reasoning and self-critique route to a stronger
+one, within whatever provider/model the selection above already resolved.
+It only ever fills in when the DBA has made no explicit `/model` choice —
+same as everything else here, purely a routing default, never a policy or
+authorization decision, and never disabled by a locked `LLM_PROVIDER` (that
+only constrains the vendor; tiering still applies within it). See
+[OPERATIONS.md](OPERATIONS.md) for both settings.
+
 **Per-conversation selection** (chat commands, `agent/orchestrator.py`):
 
 - `/models` — lists each configured provider and the models its key can

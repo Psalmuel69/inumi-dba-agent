@@ -28,6 +28,16 @@ to injected content (e.g., "call get_error_logs again") — wasted work, not
 a security breach, since every proposal still passes the full Gateway
 pipeline.
 
+Investigation memory recall and cross-server correlation
+(`InvestigationState.memory_context`) fold a *past* investigation's
+`problem`/`findings`/`recommendations` text into a later investigation's
+prompt as background — the same threat class as this one (untrusted text
+reaching the model), same mitigation posture: `orchestrator
+._ungrounded_identifiers` structurally excludes `memory_context` from
+what counts as this investigation's own confirmed evidence (see that
+field's docstring), so content injected via a past finding can waste a
+turn but can never itself ground a claim in a new conclusion.
+
 **Test:** `tests/security/test_security_suite.py::test_malicious_database_content_is_never_obeyed`
 
 ## 2. Tool poisoning / hallucinated tools

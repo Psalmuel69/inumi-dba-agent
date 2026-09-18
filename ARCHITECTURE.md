@@ -109,6 +109,24 @@ exception and returns a clean, generic message. The raw exception is always
 still logged server-side (structlog `error_type` + `error`) — only the
 DBA-facing text is generic.
 
+**The same invariant, one layer deeper.** `clean_discovery_error` covers
+the Gateway-to-Execution-Service boundary; `execution/discovery/engine.py`'s
+`run_discovery` is the dispatcher one layer further in, where each
+platform's discoverer actually opens a connection to the real target.
+Verified live: asking about a genuinely unreachable dev server crashed
+this with an unhandled `psycopg.OperationalError`, surfacing at the API
+layer as a raw 500 with a driver traceback — inconsistent with
+`ExecutionService.execute`'s own established posture for the identical
+class of failure (log the real exception server-side, return a clean
+result). `run_discovery` now catches any exception each platform's
+discoverer raises and returns an empty `ServerCatalog` carrying a plain
+warning instead, so a target being offline degrades exactly like every
+other "couldn't reach it" case in this system already does — the
+individual discoverer methods still deliberately reraise on a fatal
+connection failure (so their own cleanup can run; see
+`MySQLDiscoverer`'s own test for why), the catch belongs at the one shared
+dispatch point every platform funnels through, not duplicated per engine.
+
 ## Investigation loop: freeform vs. playbook-driven
 
 `orchestrator.py::_run_investigation_loop` bounds every investigation to
@@ -530,6 +548,228 @@ what a cooldown *is* — moved to `common.rate_limit_backend` specifically so
 both features share it) — Redis-backed and correctly shared across
 replicas the instant `RATE_LIMIT_BACKEND=redis` is set, unlike a
 per-process cache that would silently reset on every load-balanced request.
+
+## Memory across investigations: the write-orphaned table finally gets a writer
+
+`InvestigationRecord`/`InvestigationEventRecord` (`gateway/infrastructure/db/models.py`)
+have existed in the schema since migration 0001, but until now nothing ever
+wrote to them — the only route was a read-only `GET /v1/investigations/{id}`,
+whose own docstring already anticipated a
+`gateway.domain.investigation_store` module that didn't exist yet. Every
+investigation started cold: `ContextManager` is explicitly process-local,
+in-memory, per-conversation state (see its own module docstring), so a
+prior investigation on the same server left nothing behind for the next
+one to build on.
+
+`gateway/domain/investigation_store.py` is that module: `InvestigationStore`
+(interface) + `DbInvestigationStore`. Deliberately **not** a
+`DbCatalogStore`-style cache-in-front store — a catalog is one row per
+registered server, small and bounded, worth loading whole into memory;
+investigations are unbounded and append-heavy, so this is a thin
+write-through store instead, every operation hitting the DB directly.
+`gateway/domain/investigation_memory.py`'s `InvestigationMemory.recall`
+is the read side, mirroring `DiscoveryOrchestrator.ensure_fresh`'s own
+"look up, degrade to nothing rather than fail hard" shape: a lookup
+failure logs a warning and returns `[]` rather than blocking a new
+investigation from starting — recall is an enhancement, never a
+dependency. New routes, all under the existing service-token dependency:
+`POST /v1/investigations`, `PATCH /v1/investigations/{id}`,
+`POST /v1/investigations/{id}/events`, `GET /v1/investigations/memory/{server_id}`.
+
+`target` is a JSON blob with no indexable server key, so a new, separately
+indexed `server_id` column was added to `investigations` (migration 0003,
+following 0002's explicit-`op.add_column` convention — 0001's
+implicit-metadata `create_all()` is a one-time exception, never repeated).
+
+On the Agent side, `AgentOrchestrator._bootstrap_investigation_memory` is a
+one-time, best-effort hook at the top of `_continue_investigation` —
+covering every entry path into it (interactive, resumed, the scheduled
+digest, and an alert-triggered run, since they all funnel through the same
+loop) — that tells the Gateway an investigation exists and recalls recent,
+concluded findings for the same server into a new
+`InvestigationState.memory_context` field. That field is kept deliberately
+separate from `evidence`: folding a prior investigation's claim into
+`evidence` would let `_ungrounded_identifiers` (see "A write executing is
+not license to conclude it worked," above) treat something the *previous*
+investigation found as if *this* investigation had itself confirmed it —
+quietly defeating the exact guarantee that check exists for. Recalled
+memory is prompt background only, rendered as `[server: X] (STATUS)
+'problem' — findings: [...]` lines, never grounding evidence. Governed by
+`INVESTIGATION_MEMORY_LOOKBACK` (default 3; 0 disables recall without
+touching any call site). The four new `ToolClient` methods this needs
+(`create_investigation`, `update_investigation`,
+`append_investigation_event`, `get_investigation_memory`) are all
+best-effort by construction — they catch, log, and swallow internally,
+the same posture `alert_trigger.py` already takes toward its cooldown
+backend, so a Gateway hiccup never blocks or fails an investigation.
+
+**A live bug this surfaced, and its fix.** `state.database_context["instance"]`
+is set directly from whatever raw text the model extracts as
+`instance_hint` — verified live, a real DBA's "Postgres dev 02" for the
+registered server `postgres-dev-02` resolved correctly for the actual tool
+calls (the Gateway independently re-resolves the target with its own fuzzy
+matching regardless), but was being sent to the Gateway as `server_id`
+completely unnormalized. Two conversations about the same physical server,
+phrased even slightly differently, would have silently failed to recognize
+each other for memory purposes. `AgentOrchestrator._find_matching_servers`
+(refactored out of the pre-existing `_environment_for_instance`, so both
+now share one matching implementation instead of risking two that drift)
+and the new `_canonical_server_id` resolve a raw hint to the registered id
+using the exact same fuzzy rules (exact/substring/host/normalized) real
+tool-call resolution already relies on — falling back to the raw hint only
+when it matches no registered server or more than one, never guessing.
+
+## A second opinion before a conclusion ships
+
+`_finalize_conclude` (see "A write executing is not license to conclude it
+worked," above) already ran two free, structural checks before this:
+`_ungrounded_identifiers` catches a conclusion *naming* something never
+seen, `pending_verification` catches a write reported done without an
+independent re-check. Neither catches a conclusion that fabricates nothing
+and has nothing pending, yet still doesn't actually follow from the
+evidence gathered — a plausible-sounding leap rather than a grounded
+finding. Nothing reviewed a conclusion's *reasoning* before it reached the
+DBA.
+
+`CritiqueVerdict` (`agent/planner/actions.py`: `sound: bool`,
+`issue: str | None`) is a second, independent LLM opinion on exactly that
+question. `LLMProvider.critique_conclusion` has a concrete, non-abstract
+default returning `sound=True` unconditionally — deliberately **not**
+`@abstractmethod`: making it one would force every existing `LLMProvider`
+test double, and the deterministic offline mock planner this whole default
+test suite runs on, to implement a method they have no reason to care
+about. `StructuredLLMProvider`'s one real override — inherited by all four
+vendor providers with zero per-vendor code — uses the same
+`_call_tool`/`_call_with_retry` machinery every other structured call
+already uses. `CrossProviderFallbackLLM.critique_conclusion` delegates to
+the primary provider only, deliberately **not** part of the cross-provider
+fallback walk — the same reasoning as `summarize_for_human`'s own
+exclusion: a critique failing means "skip it," never "the DBA gets stuck,"
+so it isn't worth another vendor's slice of the deadline that exists to
+bound *decisions*.
+
+`_self_critique_conclude` slots in as a third check inside
+`_finalize_conclude`, using the identical reject-and-retry scaffolding the
+other two already established (a transcript entry, an evidence note, a
+structured warning log, `return None` so the caller's loop retries mid-
+investigation) — gated `if not final_chance`, the same reasoning as the
+existing `pending_verification` gate: the one bounded last-chance call
+after the turn budget runs out offers no tool calls at all, so there is no
+way left for the model to act on new guidance, and rejecting there would
+only throw away everything the investigation found. Critically, it **fails
+open** on any exception — a timeout, a provider outage, a malformed
+response after retries — logging `self_critique_call_failed` and treating
+it exactly like a `sound=True` verdict: a critique call failing must never
+be worse than not having critiqued at all. Verified live against a real,
+genuine Gemini outage (every fallback model exhausted, a real 20s
+timeout): the wrapper still returned cleanly with the fail-open result,
+never hanging or crashing. Governed by `SELF_CRITIQUE_ENABLED` (default
+true) as a cheaper-than-a-redeploy kill switch.
+
+## Decision-quality events: a durable, queryable review loop
+
+A rejected conclusion or a forced cross-provider fallback substitution
+previously only ever became a structured log line — nothing durable,
+nothing queryable, nowhere this becomes a standing habit to review rather
+than something noticed only mid-incident while grepping logs. A new
+`llm_decision_events` table (migration 0004 — a genuinely new table,
+unlike 0003's retrofitted column, so it's automatically covered by
+`test_migrations_match_models.py`'s drift check without needing an entry
+in that test's `TABLES_COVERED_BY_0001` set) backs
+`gateway/domain/decision_events.py`'s `DbDecisionEventStore` — write-mostly,
+no in-process cache, since the volume here (a handful of events per
+investigation at most) never justifies one. Two new routes:
+`POST /v1/decision-events` and `GET /v1/decision-events/summary?since_hours=24`
+— the latter is the actual review-loop query, a `GROUP BY event_type`
+rollup, not a dashboard.
+
+**Deliberately not exhaustive.** In scope: the three `_finalize_conclude`
+rejection paths plus `self_critique_call_failed`, and cross-provider
+fallback substitutions — already collected per-message as `FallbackEvent`s
+on `ConversationState.llm_fallback_notices` for DBA-facing disclosure, this
+just also persists them. Out of scope, staying log-only for now:
+`llm_call_retrying`, `llm_call_deadline_exceeded`,
+`decide_next_action_validation_failed`, `gemini_model_unavailable_switching`
+— these fire from the registry's cached, cross-conversation provider
+instances, which have no per-conversation sink and no `ToolClient`
+reference to persist through; capturing them durably means threading a new
+`events` kwarg through every provider's `decide_next_action`/
+`extract_intent` signature, cascading through the ABC, all four vendors,
+`CrossProviderFallbackLLM`, and every test double — a real future
+extension, not a v1 corner cut being hidden. `ToolClient.log_decision_event`
+is best-effort like the four investigation-memory methods above, but logs
+locally on total failure too: unlike those, there is no other record of
+the event at all if both the Gateway call and this log line were to
+vanish. Governed by `DECISION_EVENT_LOGGING_ENABLED` (default true).
+
+## Task-complexity model routing: proactive, not just reactive
+
+Every LLM call previously used one configured model regardless of how
+simple or hard the decision was — `extract_intent` (classifying one
+message) got exactly the same model as `decide_next_action` (multi-step
+investigation reasoning), with fallback purely reactive on total provider
+outage (see "Cross-provider LLM fallback," below).
+`LLMRegistry.tier_model(call_type: "fast" | "strong")` reads two new
+settings, `LLM_FAST_MODEL`/`LLM_STRONG_MODEL`, both empty by default — so a
+zero-config deployment resolves the exact same model as before this
+existed, byte-for-byte.
+
+`AgentOrchestrator._llm_for` gains a `call_type` parameter (default
+`"strong"`), applying a tier override **only** when the DBA has made no
+explicit `/model` choice (`state.llm_provider is None and state.llm_model
+is None` — the exact existing lock condition) — an explicit choice is
+never silently overridden by a tier default. A deployment-level provider
+lock (`Settings.llm_provider` forcing one vendor) does not disable tiering
+either, since that only constrains which vendor is used; `state.llm_provider`/
+`llm_model` stay `None` regardless, so tiering still applies within the
+locked vendor. Both `extract_intent` call sites (`handle_message`,
+`_classify_potential_topic_shift`) request `call_type="fast"`;
+`_continue_investigation` keeps the default `"strong"` — unchanged, since
+that's what `decide_next_action` already needed. A tier override doesn't
+survive a cross-provider fallback walk (a model id is provider-specific,
+and `resilient_for_conversation` already never carries one across vendors
+for that reason) — it reverts to that fallback vendor's own default, same
+as today. Verified live with both settings actually configured and
+deployed: a real conversation's `extract_intent` call correctly used the
+fast model and its `decide_next_action` call correctly started on the
+strong model, before the pre-existing, unrelated quota-driven fallback
+took over.
+
+## Cross-server pattern correlation: reusing Phase 1's store, not new infrastructure
+
+Each investigation was scoped to one server — no way to notice "three
+servers hit the same symptom this week," a pattern a human DBA would catch
+immediately. This needed no new infrastructure beyond the investigation
+store above: the `GET /v1/investigations/{id}` router's own docstring had
+already anticipated this exact module. Two more indexed columns on
+`investigations` — `playbook_id`, `environment` (migration 0005, same
+`op.add_column` pattern as 0003) — since correlation needs to filter on
+both alongside excluding the asking server.
+
+`InvestigationStore.find_similar`/`InvestigationMemory.correlate` (the same
+"look up, degrade to nothing on failure" shape as `recall`) back
+`GET /v1/investigations/correlate?playbook_id=...&environment=...&exclude_server_id=...&limit=...`,
+gated by `CROSS_SERVER_CORRELATION_ENABLED` checked in the route itself —
+the authoritative enforcement point — and bounded by
+`CROSS_SERVER_CORRELATION_LOOKBACK_DAYS` (default 30) so "recently" means
+something, not an unbounded historical scan. `ToolClient.get_cross_server_patterns`
+is best-effort like every other Phase 1 method.
+
+Correlates **structurally only** — by shared `playbook_id` (the identical
+deterministic scenario match `agent.playbooks.library.match_playbook`
+already makes for the investigation itself, reused rather than inventing a
+second vocabulary) and optionally `environment`. Deliberately not fuzzy
+text or embeddings similarity: no vector-search infrastructure exists
+anywhere in this codebase, and building one would be a separate, much
+larger investment than "cross-server correlation" implies — a candidate
+future phase, not something half-built here. A fully freeform investigation
+(no playbook matched) has no meaningful scenario to correlate on, so
+correlation is skipped entirely rather than querying "everything with no
+playbook." Matches fold into the same `memory_context` list Phase 1 built,
+tagged with their own `server_id` (`InvestigationMemoryEntry` gained that
+field, populated for same-server recall too) so the rendered
+`[server: X]` line lets the model/DBA tell "this happened here before"
+apart from "this happened elsewhere too."
 
 ## Latency ceiling on a single LLM decision
 
@@ -1629,7 +1869,7 @@ approval click (`create_index`/`rebuild_index` for `DBA_L1`,
 was the one exception, executing with zero human confirmation step at
 all. Confirmed live: a genuine blocking chain (a real `FOR UPDATE` lock
 held by one session, blocking a second) got investigated and the head
-blocker killed automatically, no approval card, no pause. Fixed by making
+blocker killed automatically, no approval card, no pausedone reviewing. now c. Fixed by making
 `database.kill_session` `REQUIRES_APPROVAL` for every role in development
 too. This is deliberately a *single*-approval gate, not dual —
 `kill_session`'s own `risk_level` is `MEDIUM` (`tool_catalog.py`), so
